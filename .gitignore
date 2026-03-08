@@ -34,6 +34,10 @@ dist-ssr
 /src-tauri/target
 /src-tauri/gen
 
+# Player state and cache files
+/src-tauri/player_state.json
+/src-tauri/app_settings.json
+
 # Build outputs
 build/
 out/
