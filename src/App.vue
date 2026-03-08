@@ -18,16 +18,16 @@
           ⚙️
         </button>
         <div class="window-controls">
-          <button @click="minimizeWindow" class="window-control-btn" title="最小化">
-            ⚪
-          </button>
-          <button @click="maximizeWindow" class="window-control-btn" title="最大化">
-            ⬜
-          </button>
-          <button @click="closeWindow" class="window-control-btn close-btn" title="关闭">
-            ✕
-          </button>
-        </div>
+            <button @click="minimizeWindow" class="window-control-btn" title="最小化">
+              —
+            </button>
+            <button @click="maximizeWindow" class="window-control-btn" title="最大化">
+              ▢
+            </button>
+            <button @click="closeWindow" class="window-control-btn close-btn" title="关闭">
+              ✕
+            </button>
+          </div>
       </div>
     </header>
 
@@ -497,7 +497,7 @@
                 
                 <div class="about-description">
                   <h3>程序简介</h3>
-                  <p>TPlayer 是一款基于 Tauri + Vue 3 开发的现代化音乐播放器，支持多种音频格式播放，提供优质的音频体验和简洁的用户界面。</p>
+                  <p>TPlayer 是一款基于 Tauri + Vue 3 开发的现代化音乐播放器，支持丰富的音频格式播放，提供优质的音频体验和简洁的用户界面。</p>
                   
                   <h3>主要功能</h3>
                   <ul class="feature-list">
