@@ -1152,6 +1152,101 @@ async fn get_transcode_status(path: &str, audio_player: tauri::State<'_, Mutex<A
   }
 }
 
+// 保存曲目标签信息
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrackMetadata {
+  pub title: String,
+  pub artist: String,
+  pub album: String,
+  pub lyrics: Option<String>,
+}
+
+#[tauri::command]
+async fn save_track_metadata(path: String, metadata: TrackMetadata) -> Result<(), String> {
+  use lofty::file::TaggedFileExt;
+  use lofty::probe::Probe;
+  use lofty::tag::{ItemKey, Tag, TagType, TagExt};
+  use lofty::config::WriteOptions;
+  
+  let path = std::path::Path::new(&path);
+  
+  // 读取文件
+  let tagged_file = Probe::open(path)
+    .map_err(|e| format!("无法打开文件: {}", e))?
+    .read()
+    .map_err(|e| format!("无法读取文件: {}", e))?;
+  
+  // 获取或创建标签
+  let mut tag = tagged_file.primary_tag()
+    .or_else(|| tagged_file.tags().first())
+    .cloned()
+    .unwrap_or_else(|| Tag::new(TagType::Id3v2));
+  
+  // 设置标签信息
+  tag.insert_text(ItemKey::TrackTitle, metadata.title);
+  tag.insert_text(ItemKey::TrackArtist, metadata.artist);
+  tag.insert_text(ItemKey::AlbumTitle, metadata.album);
+  
+  // 保存歌词到文件（如果提供了歌词）
+  if let Some(lyrics) = metadata.lyrics {
+    let lrc_path = path.with_extension("lrc");
+    if let Err(e) = std::fs::write(&lrc_path, lyrics) {
+      log::warn!("保存歌词文件失败: {}", e);
+    }
+  }
+  
+  // 保存标签到文件
+  tag.save_to_path(path, WriteOptions::default())
+    .map_err(|e| format!("保存标签失败: {}", e))?;
+  
+  Ok(())
+}
+
+// 获取曲目标签信息
+#[tauri::command]
+async fn get_track_metadata(path: String) -> Result<TrackMetadata, String> {
+  use lofty::file::TaggedFileExt;
+  use lofty::probe::Probe;
+  use lofty::tag::ItemKey;
+  
+  let path = std::path::Path::new(&path);
+  
+  // 读取文件
+  let tagged_file = Probe::open(path)
+    .map_err(|e| format!("无法打开文件: {}", e))?
+    .read()
+    .map_err(|e| format!("无法读取文件: {}", e))?;
+  
+  // 获取标签
+  let tag = tagged_file.primary_tag()
+    .or_else(|| tagged_file.tags().first());
+  
+  let title = tag.and_then(|t| t.get_string(&ItemKey::TrackTitle))
+    .unwrap_or("未知标题")
+    .to_string();
+  let artist = tag.and_then(|t| t.get_string(&ItemKey::TrackArtist))
+    .unwrap_or("未知艺术家")
+    .to_string();
+  let album = tag.and_then(|t| t.get_string(&ItemKey::AlbumTitle))
+    .unwrap_or("未知专辑")
+    .to_string();
+  
+  // 读取歌词文件
+  let lrc_path = path.with_extension("lrc");
+  let lyrics = if lrc_path.exists() {
+    std::fs::read_to_string(&lrc_path).ok()
+  } else {
+    None
+  };
+  
+  Ok(TrackMetadata {
+    title,
+    artist,
+    album,
+    lyrics,
+  })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   // 获取命令行参数
@@ -1217,6 +1312,8 @@ pub fn run() {
       start_transcode,
       get_transcode_status,
       exit_app,
+      save_track_metadata,
+      get_track_metadata,
     ))
     .on_window_event(|_, event| match event {
       tauri::WindowEvent::CloseRequested { api, .. } => {

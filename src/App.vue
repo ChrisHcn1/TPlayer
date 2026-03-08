@@ -176,6 +176,13 @@
               <div class="track-actions-col">
                 <div class="track-duration-col">{{ formatTime(track.duration) }}</div>
                 <button 
+                  @click.stop="openEditTrackModal(track)" 
+                  class="edit-btn"
+                  title="编辑标签"
+                >
+                  ✎
+                </button>
+                <button 
                   @click.stop="toggleFavorite(track)" 
                   class="favorite-btn" 
                   :class="{ 'is-favorite': localStore.isFavorite(track.id) }"
@@ -242,9 +249,6 @@
             <button @click="togglePlayMode" class="control-btn mode-btn" :title="playModeTitle">
               {{ playModeIcon }}
             </button>
-            <button @click="toggleRepeatOne" class="control-btn" :title="repeatOne ? '取消单曲循环' : '单曲循环'">
-              {{ repeatOne ? '🔂' : '🔁' }}
-            </button>
             <button @click="playPrevious" class="control-btn">⏮️</button>
             <button @click="togglePlay" class="control-btn play-btn">
               {{ isPlaying ? '⏸️' : '▶️' }}
@@ -262,18 +266,6 @@
                 v-model.number="volume" 
                 @input="updateVolume"
                 class="volume-slider"
-              />
-            </div>
-            <div class="playback-speed-control">
-              <span class="speed-label">{{ playbackSpeed.toFixed(1) }}x</span>
-              <input
-                type="range"
-                min="0.5"
-                max="2"
-                step="0.1"
-                v-model.number="playbackSpeed"
-                @input="() => updatePlaybackSpeed(playbackSpeed)"
-                class="speed-slider"
               />
             </div>
           </div>
@@ -641,6 +633,33 @@
         </div>
       </div>
     </div>
+    
+    <!-- 编辑曲目标签模态框 -->
+    <div v-if="showEditTrackModal" class="modal-overlay" @click="showEditTrackModal = false">
+      <div class="modal edit-track-modal" @click.stop>
+        <h3>编辑曲目信息</h3>
+        <div class="form-group">
+          <label>标题</label>
+          <input v-model="editTrackTitle" type="text" placeholder="歌曲标题" />
+        </div>
+        <div class="form-group">
+          <label>艺术家</label>
+          <input v-model="editTrackArtist" type="text" placeholder="艺术家" />
+        </div>
+        <div class="form-group">
+          <label>专辑</label>
+          <input v-model="editTrackAlbum" type="text" placeholder="专辑名称" />
+        </div>
+        <div class="form-group">
+          <label>歌词</label>
+          <textarea v-model="editTrackLyrics" placeholder="歌词内容（支持LRC格式）" rows="6"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button @click="showEditTrackModal = false" class="btn-secondary">取消</button>
+          <button @click="saveTrackMetadata" class="btn-primary">保存</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -722,6 +741,14 @@ const editPlaylistName = ref('')
 const editPlaylistDesc = ref('')
 const currentEditPlaylistId = ref<number | null>(null)
 const currentTrackToAdd = ref<SongType | null>(null)
+
+// 标签编辑模态框状态
+const showEditTrackModal = ref(false)
+const editingTrack = ref<SongType | null>(null)
+const editTrackTitle = ref('')
+const editTrackArtist = ref('')
+const editTrackAlbum = ref('')
+const editTrackLyrics = ref('')
 
 const currentTrack = computed(() => {
   return currentTrackIndex.value >= 0 ? tracks.value[currentTrackIndex.value] : null
@@ -1755,6 +1782,69 @@ const toggleFavorite = async (track: SongType) => {
     }
   } catch (error) {
     console.error('切换喜欢状态失败:', error)
+  }
+}
+
+// 打开编辑曲目标签模态框
+const openEditTrackModal = async (track: SongType) => {
+  try {
+    editingTrack.value = track
+    const metadata = await invoke<{
+      title: string
+      artist: string
+      album: string
+      lyrics?: string
+    }>('get_track_metadata', { path: track.path })
+    
+    editTrackTitle.value = metadata.title
+    editTrackArtist.value = metadata.artist
+    editTrackAlbum.value = metadata.album
+    editTrackLyrics.value = metadata.lyrics || ''
+    showEditTrackModal.value = true
+  } catch (error) {
+    console.error('获取曲目标签信息失败:', error)
+    // 如果获取失败，使用当前显示的信息
+    editingTrack.value = track
+    editTrackTitle.value = track.title
+    editTrackArtist.value = track.artist
+    editTrackAlbum.value = track.album
+    editTrackLyrics.value = track.lyrics || ''
+    showEditTrackModal.value = true
+  }
+}
+
+// 保存曲目标签
+const saveTrackMetadata = async () => {
+  if (!editingTrack.value) return
+  
+  try {
+    await invoke('save_track_metadata', {
+      path: editingTrack.value.path,
+      metadata: {
+        title: editTrackTitle.value,
+        artist: editTrackArtist.value,
+        album: editTrackAlbum.value,
+        lyrics: editTrackLyrics.value || null
+      }
+    })
+    
+    // 更新本地曲目信息
+    const trackIndex = tracks.value.findIndex(t => t.id === editingTrack.value?.id)
+    if (trackIndex !== -1) {
+      tracks.value[trackIndex] = {
+        ...tracks.value[trackIndex],
+        title: editTrackTitle.value,
+        artist: editTrackArtist.value,
+        album: editTrackAlbum.value,
+        lyrics: editTrackLyrics.value || undefined
+      }
+    }
+    
+    showEditTrackModal.value = false
+    editingTrack.value = null
+  } catch (error) {
+    console.error('保存曲目标签失败:', error)
+    alert('保存失败: ' + error)
   }
 }
 
@@ -3162,6 +3252,64 @@ html, body {
 .favorite-btn.is-favorite {
   color: #ff4757;
   opacity: 1;
+}
+
+.edit-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  opacity: 0.6;
+}
+
+.edit-btn:hover {
+  opacity: 1;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #4facfe;
+}
+
+.edit-track-modal {
+  width: 480px;
+  max-width: 90vw;
+}
+
+.edit-track-modal .form-group {
+  margin-bottom: 16px;
+}
+
+.edit-track-modal .form-group label {
+  display: block;
+  margin-bottom: 6px;
+  color: #ccc;
+  font-size: 14px;
+}
+
+.edit-track-modal .form-group input,
+.edit-track-modal .form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.edit-track-modal .form-group input:focus,
+.edit-track-modal .form-group textarea:focus {
+  outline: none;
+  border-color: #4facfe;
+}
+
+.edit-track-modal .form-group textarea {
+  resize: vertical;
+  min-height: 100px;
+  font-family: inherit;
 }
 
 .empty-state {
