@@ -1,0 +1,30 @@
+{
+  "name": "tplayer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "tauri"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
+    "@types/lodash-es": "^4.17.12"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-deep-link": "^2.4.7",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "localforage": "^1.10.0",
+    "lodash-es": "^4.17.23",
+    "music-metadata": "^11.12.1",
+    "typescript": "^5.9.3",
+    "vue": "^3.5.29"
+  }
+}

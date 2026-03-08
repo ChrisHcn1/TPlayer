@@ -1,0 +1,71 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "tplayer",
+  "version": "0.1.0",
+  "identifier": "com.tplayer.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "tplayer",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "devtools": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "default",
+          "description": "Default capabilities",
+          "windows": ["main"],
+          "permissions": [
+            "dialog:allow-open",
+            "dialog:default",
+            "core:webview:allow-internal-toggle-devtools",
+            "core:webview:default",
+            "core:app:default"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.svg",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin/*.dll": "./"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma"],
+        "name": "Audio File",
+        "description": "Audio file",
+        "role": "Editor"
+      }
+    ]
+  }
+}
