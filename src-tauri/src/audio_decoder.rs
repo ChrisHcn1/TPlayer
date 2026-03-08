@@ -23,7 +23,7 @@ pub fn try_open_audio<P: AsRef<Path>>(path: P) -> Result<Box<dyn Source<Item = f
         return Err(format!("UNSUPPORTED_FORMAT:{}", ext));
     }
     
-    // 1. 首先尝试使用 rodio 的 Decoder 打开
+    // 尝试使用 rodio 的 Decoder 打开
     let file = std::fs::File::open(path).map_err(|e| format!("无法打开文件: {}", e))?;
     let reader = BufReader::new(file);
     
@@ -34,15 +34,8 @@ pub fn try_open_audio<P: AsRef<Path>>(path: P) -> Result<Box<dyn Source<Item = f
         }
         Err(e) => {
             eprintln!("Rodio 解码失败: {}", e);
-            // Rodio 解码失败，尝试使用 FFmpeg 解码
-            match crate::ffmpeg_decoder::from_file(path) {
-                Ok(source) => return Ok(source),
-                Err(ffmpeg_error) => {
-                    eprintln!("FFmpeg 解码失败: {}", ffmpeg_error);
-                    // 所有解码方式都失败
-                    Err(format!("无法解码音频: {}", e))
-                }
-            }
+            // 只使用 Rodio 解码，不尝试 FFmpeg
+            Err(format!("无法解码音频: {}", e))
         }
     }
 }

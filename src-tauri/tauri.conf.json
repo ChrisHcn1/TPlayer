@@ -20,6 +20,10 @@
         "decorations": false
       }
     ],
+    "trayIcon": {
+      "iconPath": "icons/icon.ico",
+      "iconAsTemplate": false
+    },
     "security": {
       "csp": null,
       "capabilities": [
@@ -48,9 +52,8 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin/*.dll": "./"
-    },
+    "resources": {},
+
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

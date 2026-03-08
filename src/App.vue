@@ -647,6 +647,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { open, ask } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { TrayIcon } from '@tauri-apps/api/tray'
@@ -1970,6 +1971,14 @@ onMounted(async () => {
 
   // 初始化系统托盘
   await initSystemTray()
+
+  // 监听托盘菜单事件
+  const unlistenPrevious = await listen('play-previous', () => {
+    playPrevious()
+  })
+  const unlistenNext = await listen('play-next', () => {
+    playNext()
+  })
 })
 
 // 获取曲目信息

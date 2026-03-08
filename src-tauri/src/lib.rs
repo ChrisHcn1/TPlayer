@@ -9,7 +9,6 @@ use walkdir::WalkDir;
 
 mod audio_decoder;
 mod special_decoder;
-mod ffmpeg_decoder;
 mod equalizer;
 mod transcoder;
 
@@ -592,6 +591,16 @@ async fn play_next_track(path: String, player: tauri::State<'_, Mutex<AudioPlaye
 }
 
 #[tauri::command]
+async fn play_previous_track(path: String, player: tauri::State<'_, Mutex<AudioPlayer>>) -> Result<serde_json::Value, String> {
+  let mut player = player.lock().map_err(|e| e.to_string())?;
+  // 先停止当前曲目
+  let _ = player.stop();
+  // 播放新曲目（带淡入效果）
+  let duration = player.play(&path)?;
+  Ok(serde_json::json!({ "duration": duration }))
+}
+
+#[tauri::command]
 async fn pause_track(player: tauri::State<'_, Mutex<AudioPlayer>>) -> Result<(), String> {
   let mut player = player.lock().map_err(|e| e.to_string())?;
   player.pause()
@@ -1159,6 +1168,7 @@ pub fn run() {
       scan_dir,
       play_track,
       play_next_track,
+      play_previous_track,
       pause_track,
       resume_track,
       stop_track,
@@ -1208,6 +1218,13 @@ pub fn run() {
       get_transcode_status,
       exit_app,
     ))
+    .on_window_event(|_, event| match event {
+      tauri::WindowEvent::CloseRequested { api, .. } => {
+        // 当用户点击关闭按钮时，隐藏窗口而不是退出程序
+        api.prevent_close();
+      }
+      _ => {}
+    })
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }
