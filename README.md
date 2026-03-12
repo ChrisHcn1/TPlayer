@@ -20,7 +20,8 @@
 
 ### 2.1 主界面
 
-![主界面](https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=modern%20music%20player%20interface%20with%20playlist%20and%20player%20controls&image_size=landscape_16_9)
+![主界面]<img width="960" height="720" alt="image" src="https://github.com/user-attachments/assets/1e6a63c8-50f0-46f4-abee-300ae76b27ff" />
+
 
 - **左侧边栏**：显示"我喜欢的"、本地歌单和播放列表
 - **主内容区**：显示当前播放列表的歌曲
