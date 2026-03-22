@@ -1,5 +1,5 @@
 {
-  "name": "tplayer",
+  "name": "TPlayer",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -20,11 +20,14 @@
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-deep-link": "^2.4.7",
     "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
     "@vitejs/plugin-vue": "^6.0.4",
+    "axios": "^1.13.6",
     "localforage": "^1.10.0",
     "lodash-es": "^4.17.23",
     "music-metadata": "^11.12.1",
     "typescript": "^5.9.3",
-    "vue": "^3.5.29"
+    "vue": "^3.5.29",
+    "vue-virtual-scroller": "^2.0.0-beta.8"
   }
 }

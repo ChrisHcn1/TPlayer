@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "tplayer",
-  "version": "0.1.0",
+  "productName": "TPlayer",
+  "version": "1.0.1",
   "identifier": "com.tplayer.app",
   "build": {
     "frontendDist": "../dist",
@@ -12,18 +12,19 @@
   "app": {
     "windows": [
       {
-        "title": "tplayer",
-        "width": 800,
-        "height": 600,
+        "title": "TPlayer",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600,
         "resizable": true,
         "devtools": true,
-        "decorations": false
+        "decorations": false,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "transparent": false
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.ico",
-      "iconAsTemplate": false
-    },
     "security": {
       "csp": null,
       "capabilities": [
@@ -34,9 +35,33 @@
           "permissions": [
             "dialog:allow-open",
             "dialog:default",
+            {
+              "identifier": "fs:allow-read-text-file",
+              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+            },
+            {
+              "identifier": "fs:allow-read-file",
+              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+            },
+            {
+              "identifier": "fs:allow-read-dir",
+              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+            },
+            "fs:default",
             "core:webview:allow-internal-toggle-devtools",
             "core:webview:default",
-            "core:app:default"
+            "core:app:default",
+            "core:window:allow-show",
+            "core:window:allow-hide",
+            "core:window:allow-close",
+            "core:window:allow-minimize",
+            "core:window:allow-maximize",
+            "core:window:allow-unmaximize",
+            "core:window:allow-set-focus",
+            "core:window:allow-is-visible",
+            "core:window:allow-start-dragging",
+            "core:event:allow-listen",
+            "core:event:default"
           ]
         }
       ]

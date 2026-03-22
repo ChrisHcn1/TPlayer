@@ -116,3 +116,34 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Documentation files (except README.md)
+CONTEXTMENU_DISABLE.md
+DEVELOPMENT.md
+DISPLAY_FIX.md
+DSD_APE_FIX.md
+FIXES_SUMMARY.md
+IMPROVEMENTS_SUMMARY.md
+METADATA_DECISION.md
+OPTIMIZATION_SUMMARY.md
+PROGRESS_AND_AUTOPLAY_FIX.md
+PROGRESS_FIX_DEBUG.md
+PROGRESS_FIX_FINAL.md
+PROGRESS_TEST.md
+PROGRESS_UPDATE_DEBUG.md
+SETTINGS_AND_FILENAME_PARSING_FIX.md
+USAGE.md
+
+# Trae IDE configuration
+.trae/
+
+# FFmpeg binaries (development dependencies)
+ffmpeg/
+
+# Test data and temporary files
+$null
+*.test.js
+*.spec.js.bak
+test/
+tests/
+__tests__/

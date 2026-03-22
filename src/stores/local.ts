@@ -1,289 +1,209 @@
-import { ref, reactive } from 'vue'
 import localforage from 'localforage'
-import { cloneDeep } from 'lodash-es'
 
-// 定义类型
-export interface SongType {
+// 类型定义
+export interface Song {
   id: string
   title: string
   artist: string
   album: string
-  duration: string
   path: string
-  lyrics?: string
-  album_art?: string
+  duration: string
+  cover: string
+  year: string
+  genre: string
+  lyric?: string
+  isFavorite?: boolean
 }
 
-export interface LocalPlaylistType {
-  id: number
+export interface Playlist {
+  id: string
   name: string
-  description?: string
   songs: string[] // 存储歌曲ID
-  cover?: string
-  createTime: number
-  updateTime: number
+  createdAt: string // 使用ISO字符串而不是Date对象
+  updatedAt: string // 使用ISO字符串而不是Date对象
 }
 
-// localDB
-const localDB = localforage.createInstance({
-  name: 'tplayer-data',
-  description: 'Local data of TPlayer',
-  storeName: 'local'
+export interface PlaybackProgress {
+  songId: string
+  position: number
+  isPlaying: boolean
+  timestamp: string // 使用ISO字符串而不是Date对象
+}
+
+export interface UserSettings {
+  theme: 'light' | 'dark'
+  volume: number
+  playbackMode: 'order' | 'random' | 'repeat'
+  equalizerPreset: string
+  equalizerBands: number[]
+  autoPlay: boolean
+  rememberProgress: boolean
+  crossfadeEnabled: boolean
+  crossfadeDuration: number
+  autoPlayNext: boolean
+  showLyrics: boolean
+  enableTranscode: boolean
+  forceTranscode: boolean
+}
+
+// 初始化localforage
+localforage.config({
+  name: 'TPlayer',
+  storeName: 'tplayer_data',
+  description: 'TPlayer music player data storage'
 })
 
-/**
- * 生成本地歌单 ID（16位数字）
- * 使用时间戳 + 随机数确保唯一性
- */
-const generateLocalPlaylistId = (): number => {
-  const timestamp = Date.now().toString() // 13位
-  const random = Math.floor(Math.random() * 1000)
-    .toString()
-    .padStart(3, '0') // 3位
-  return parseInt(timestamp + random, 10)
+// 存储键名常量
+const STORAGE_KEYS = {
+  SONGS: 'songs',
+  PLAYLISTS: 'playlists',
+  FAVORITES: 'favorites',
+  PLAYBACK_PROGRESS: 'playback_progress',
+  SETTINGS: 'settings'
 }
 
-/**
- * 创建 localStore 实例
- * @returns localStore 实例
- */
-const createLocalStore = () => {
-  // 本地歌曲
-  const localSongs = ref<SongType[]>([])
-  // 本地歌单
-  const localPlaylists = ref<LocalPlaylistType[]>([])
-  // 我喜欢的歌曲ID列表
-  const favoriteSongs = ref<string[]>([])
-  // 是否初始化完成
-  const isInitialized = ref(false)
+// 默认设置
+const DEFAULT_SETTINGS: UserSettings = {
+  theme: 'dark',
+  volume: 80,
+  playbackMode: 'order',
+  equalizerPreset: 'flat',
+  equalizerBands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  autoPlay: true,
+  rememberProgress: true,
+  crossfadeEnabled: false,
+  crossfadeDuration: 1,
+  autoPlayNext: true,
+  showLyrics: true,
+  forceTranscode: false
+}
 
-  // 读取本地歌曲
-  const readLocalSong = async (): Promise<SongType[]> => {
-    try {
-      const result = await localDB.getItem('local-songs')
-      localSongs.value = (result as SongType[]) || []
-      return localSongs.value
-    } catch (error) {
-      console.error('Error reading local songs:', error)
-      throw error
-    }
+// 本地存储服务
+class LocalStorageService {
+  // 歌曲相关
+  async saveSongs(songs: Song[]): Promise<void> {
+    await localforage.setItem(STORAGE_KEYS.SONGS, songs)
   }
 
-  // 更新本地歌曲
-  const updateLocalSong = async (songs: SongType[]) => {
-    try {
-      await localDB.setItem('local-songs', cloneDeep(songs))
-      localSongs.value = songs
-    } catch (error) {
-      console.error('Error updating local songs:', error)
-      throw error
-    }
+  async getSongs(): Promise<Song[]> {
+    const songs = await localforage.getItem<Song[]>(STORAGE_KEYS.SONGS)
+    return songs || []
   }
 
-  // 删除指定歌曲
-  const deleteLocalSong = async (index: number) => {
-    try {
-      const playlist = cloneDeep(localSongs.value)
-      playlist.splice(index, 1)
-      await localDB.setItem('local-songs', playlist)
-      localSongs.value = playlist
-    } catch (error) {
-      console.error('Error deleting local song:', error)
-      throw error
-    }
+  async clearSongs(): Promise<void> {
+    await localforage.removeItem(STORAGE_KEYS.SONGS)
   }
 
-  // 读取本地歌单列表
-  const readLocalPlaylists = async (): Promise<LocalPlaylistType[]> => {
-    try {
-      const result = await localDB.getItem('local-playlists')
-      localPlaylists.value = (result as LocalPlaylistType[]) || []
-      // 读取我喜欢的歌曲
-      const favResult = await localDB.getItem('favorite-songs')
-      favoriteSongs.value = (favResult as string[]) || []
-      isInitialized.value = true
-      return localPlaylists.value
-    } catch (error) {
-      console.error('Error reading local playlists:', error)
-      throw error
-    }
+  // 歌单相关
+  async savePlaylists(playlists: Playlist[]): Promise<void> {
+    await localforage.setItem(STORAGE_KEYS.PLAYLISTS, playlists)
   }
 
-  // 保存本地歌单列表到存储
-  const saveLocalPlaylists = async () => {
-    try {
-      await localDB.setItem('local-playlists', cloneDeep(localPlaylists.value))
-    } catch (error) {
-      console.error('Error saving local playlists:', error)
-      throw error
-    }
+  async getPlaylists(): Promise<Playlist[]> {
+    const playlists = await localforage.getItem<Playlist[]>(STORAGE_KEYS.PLAYLISTS)
+    return playlists || []
   }
 
-  // 创建本地歌单
-  const createLocalPlaylist = async (
-    name: string,
-    description?: string
-  ): Promise<LocalPlaylistType> => {
-    const now = Date.now()
-    const newPlaylist: LocalPlaylistType = {
-      id: generateLocalPlaylistId(),
+  async createPlaylist(name: string): Promise<Playlist> {
+    const playlists = await this.getPlaylists()
+    const now = new Date().toISOString()
+    const newPlaylist: Playlist = {
+      id: `playlist_${Date.now()}`,
       name,
-      description,
       songs: [],
-      createTime: now,
-      updateTime: now
+      createdAt: now,
+      updatedAt: now
     }
-    localPlaylists.value.push(newPlaylist)
-    await saveLocalPlaylists()
+    playlists.push(newPlaylist)
+    await this.savePlaylists(playlists)
     return newPlaylist
   }
 
-  // 更新本地歌单信息
-  const updateLocalPlaylist = async (
-    id: number,
-    data: Partial<Pick<LocalPlaylistType, 'name' | 'description'>>
-  ): Promise<boolean> => {
-    const index = localPlaylists.value.findIndex((p) => p.id === id)
-    if (index === -1) return false
-    const playlist = localPlaylists.value[index]
-    if (data.name !== undefined) playlist.name = data.name
-    if (data.description !== undefined) playlist.description = data.description
-    playlist.updateTime = Date.now()
-    await saveLocalPlaylists()
-    return true
+  async updatePlaylist(id: string, updates: Partial<Playlist>): Promise<void> {
+    const playlists = await this.getPlaylists()
+    const index = playlists.findIndex(p => p.id === id)
+    if (index !== -1) {
+      playlists[index] = {
+        ...playlists[index],
+        ...updates,
+        updatedAt: new Date().toISOString()
+      }
+      await this.savePlaylists(playlists)
+    }
   }
 
-  // 删除本地歌单
-  const deleteLocalPlaylist = async (id: number): Promise<boolean> => {
-    const index = localPlaylists.value.findIndex((p) => p.id === id)
-    if (index === -1) return false
-    localPlaylists.value.splice(index, 1)
-    await saveLocalPlaylists()
-    return true
+  async deletePlaylist(id: string): Promise<void> {
+    const playlists = await this.getPlaylists()
+    const filteredPlaylists = playlists.filter(p => p.id !== id)
+    await this.savePlaylists(filteredPlaylists)
   }
 
-  // 添加歌曲到本地歌单
-  const addSongsToLocalPlaylist = async (
-    playlistId: number,
-    songIds: string[]
-  ): Promise<{ success: boolean; addedCount: number }> => {
-    const playlist = localPlaylists.value.find((p) => p.id === playlistId)
-    if (!playlist) return { success: false, addedCount: 0 }
-
-    // 过滤已存在的歌曲
-    const existingIds = new Set(playlist.songs)
-    const newIds = songIds.filter((id) => !existingIds.has(id))
-    if (newIds.length === 0) return { success: true, addedCount: 0 }
-    // 后添加的歌曲放在前面
-    playlist.songs.unshift(...newIds)
-    playlist.updateTime = Date.now()
-    await saveLocalPlaylists()
-    return { success: true, addedCount: newIds.length }
+  // 收藏歌曲相关
+  async saveFavorites(songIds: string[]): Promise<void> {
+    await localforage.setItem(STORAGE_KEYS.FAVORITES, songIds)
   }
 
-  // 从本地歌单移除歌曲
-  const removeSongsFromLocalPlaylist = async (
-    playlistId: number,
-    songIds: string[]
-  ): Promise<boolean> => {
-    const playlist = localPlaylists.value.find((p) => p.id === playlistId)
-    if (!playlist) return false
-
-    const idsToRemove = new Set(songIds)
-    playlist.songs = playlist.songs.filter((id) => !idsToRemove.has(id))
-    playlist.updateTime = Date.now()
-    await saveLocalPlaylists()
-    return true
+  async getFavorites(): Promise<string[]> {
+    const favorites = await localforage.getItem<string[]>(STORAGE_KEYS.FAVORITES)
+    return favorites || []
   }
 
-  // 获取本地歌单详情（包含歌曲列表）
-  const getLocalPlaylistDetail = (
-    id: number
-  ): { playlist: LocalPlaylistType; songs: SongType[] } | null => {
-    const playlist = localPlaylists.value.find((p) => p.id === id)
-    if (!playlist) return null
-
-    // 根据歌单中的歌曲ID获取完整歌曲信息
-    const songsMap = new Map(localSongs.value.map((s) => [s.id, s]))
-    const songs = playlist.songs
-      .map((songId) => songsMap.get(songId))
-      .filter((s): s is SongType => s !== undefined)
-
-    return { playlist, songs }
+  async addToFavorites(songId: string): Promise<void> {
+    const favorites = await this.getFavorites()
+    if (!favorites.includes(songId)) {
+      favorites.push(songId)
+      await this.saveFavorites(favorites)
+    }
   }
 
-  /**
-   * 判断是否为本地歌单 ID
-   * @param id 歌单 ID
-   */
-  const isLocalPlaylist = (id: number | string | undefined | null): boolean => {
-    if (!id) return false
-    const strId = id.toString()
-    if (strId.length !== 16) return false
-    // 检查是否存在于本地歌单列表
-    return localPlaylists.value.some((p) => p.id.toString() === strId)
+  async removeFromFavorites(songId: string): Promise<void> {
+    const favorites = await this.getFavorites()
+    const filteredFavorites = favorites.filter(id => id !== songId)
+    await this.saveFavorites(filteredFavorites)
   }
 
-  // 添加歌曲到我喜欢
-  const addToFavorites = async (songId: string): Promise<boolean> => {
-    if (favoriteSongs.value.includes(songId)) return false
-    favoriteSongs.value.unshift(songId)
-    await localDB.setItem('favorite-songs', cloneDeep(favoriteSongs.value))
-    return true
+  async isFavorite(songId: string): Promise<boolean> {
+    const favorites = await this.getFavorites()
+    return favorites.includes(songId)
   }
 
-  // 从我喜欢移除歌曲
-  const removeFromFavorites = async (songId: string): Promise<boolean> => {
-    const index = favoriteSongs.value.indexOf(songId)
-    if (index === -1) return false
-    favoriteSongs.value.splice(index, 1)
-    await localDB.setItem('favorite-songs', cloneDeep(favoriteSongs.value))
-    return true
+  // 播放进度相关
+  async savePlaybackProgress(progress: PlaybackProgress): Promise<void> {
+    await localforage.setItem(STORAGE_KEYS.PLAYBACK_PROGRESS, progress)
   }
 
-  // 检查歌曲是否在我喜欢中
-  const isFavorite = (songId: string): boolean => {
-    return favoriteSongs.value.includes(songId)
+  async getPlaybackProgress(): Promise<PlaybackProgress | null> {
+    return await localforage.getItem<PlaybackProgress>(STORAGE_KEYS.PLAYBACK_PROGRESS)
   }
 
-  // 获取我喜欢的歌曲列表
-  const getFavoriteSongs = (): SongType[] => {
-    const songsMap = new Map(localSongs.value.map((s) => [s.id, s]))
-    return favoriteSongs.value
-      .map((songId) => songsMap.get(songId))
-      .filter((s): s is SongType => s !== undefined)
+  async clearPlaybackProgress(): Promise<void> {
+    await localforage.removeItem(STORAGE_KEYS.PLAYBACK_PROGRESS)
   }
 
-  return reactive({
-    localSongs,
-    localPlaylists,
-    favoriteSongs,
-    isInitialized,
-    readLocalSong,
-    updateLocalSong,
-    deleteLocalSong,
-    readLocalPlaylists,
-    createLocalPlaylist,
-    updateLocalPlaylist,
-    deleteLocalPlaylist,
-    addSongsToLocalPlaylist,
-    removeSongsFromLocalPlaylist,
-    getLocalPlaylistDetail,
-    isLocalPlaylist,
-    addToFavorites,
-    removeFromFavorites,
-    isFavorite,
-    getFavoriteSongs
-  })
+  // 设置相关
+  async saveSettings(settings: UserSettings): Promise<void> {
+    await localforage.setItem(STORAGE_KEYS.SETTINGS, settings)
+  }
+
+  async getSettings(): Promise<UserSettings> {
+    const settings = await localforage.getItem<UserSettings>(STORAGE_KEYS.SETTINGS)
+    return settings || DEFAULT_SETTINGS
+  }
+
+  async updateSettings(updates: Partial<UserSettings>): Promise<void> {
+    const currentSettings = await this.getSettings()
+    const newSettings = {
+      ...currentSettings,
+      ...updates
+    }
+    await this.saveSettings(newSettings)
+  }
+
+  // 清空所有数据
+  async clearAll(): Promise<void> {
+    await localforage.clear()
+  }
 }
 
-// 创建全局的 localStore 实例
-const localStoreInstance = createLocalStore()
-
-/**
- * 获取本地歌单存储实例
- * @returns 本地歌单存储实例
- */
-export const useLocalStore = () => {
-  return localStoreInstance
-}
+// 导出单例实例
+export const localStorageService = new LocalStorageService()
