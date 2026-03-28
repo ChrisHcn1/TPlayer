@@ -124,13 +124,19 @@ impl HttpServer {
                         let parts: Vec<&str> = range.split('-').collect();
 
                         if parts.len() >= 2 {
-                            let start = parts[0].parse::<u64>().unwrap_or(0);
+                            let start = parts[0].parse::<u64>().unwrap_or(0).min(file_size);
                             let end = if parts[1].is_empty() {
                                 file_size - 1
                             } else {
-                                parts[1].parse::<u64>().unwrap_or(file_size - 1)
+                                parts[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1)
                             };
-                            (start, Some(end), 206, Some(format!("bytes {}-{}/{}", start, end, file_size)))
+                            
+                            // 检查边界条件
+                            if start > end {
+                                (0, None, 200, None)
+                            } else {
+                                (start, Some(end), 206, Some(format!("bytes {}-{}/{}", start, end, file_size)))
+                            }
                         } else {
                             (0, None, 200, None)
                         }

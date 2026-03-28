@@ -418,15 +418,16 @@
       <div class="player-center">
         <div class="playback-controls">
           <button class="control-btn" @click="changePlaybackMode" title="播放模式">
-            {{ playbackModeIcon }}
+            <img :src="playbackModeImage" alt="播放模式" class="control-icon" />
           </button>
-          <button class="control-btn" @click="playPrevious" title="上一首">⏮</button>
+          <button class="control-btn" @click="playPrevious" title="上一首">
+            <img src="/last-track-button_23ee-fe0f.png" alt="上一首" class="control-icon" />
+          </button>
           <button class="control-btn play" @click="togglePlayback" title="播放/暂停">
-            {{ isPlaying ? '⏸' : '▶' }}
+            <img :src="isPlaying ? '/pause-button_23f8-fe0f.png' : '/play-button_25b6-fe0f.png'" alt="播放/暂停" class="control-icon" />
           </button>
-          <button class="control-btn" @click="playNext" title="下一首">⏭</button>
-          <button class="control-btn" @click="toggleRepeat" title="重复">
-            {{ isRepeating ? '🔁' : '➡️' }}
+          <button class="control-btn" @click="playNext" title="下一首">
+            <img src="/next-track-button_23ed-fe0f.png" alt="下一首" class="control-icon" />
           </button>
         </div>
         <div class="progress-bar">
@@ -709,6 +710,7 @@
             v-model:crossfadeDuration="crossfadeDuration"
             v-model:autoPlayNext="autoPlayNext"
             v-model:theme="theme"
+            v-model:language="language"
             v-model:showLyrics="showLyrics"
             v-model:equalizerEnabled="equalizerVisible"
             v-model:currentPreset="currentPreset"
@@ -788,6 +790,7 @@ import { localStorageService, type Playlist } from './stores/local'
 import { matchSong, songLyric, searchSong, fetchLyricById } from './api/music'
 import * as mm from 'music-metadata'
 import Settings from './components/Settings.vue'
+import { i18nService, t } from './services/i18n'
 import {
   cueAlbums,
   cueTracks,
@@ -871,6 +874,9 @@ const showLyrics = ref(true)
 // 主题相关状态
 const theme = ref<'dark' | 'light'>('dark')
 
+// 语言相关状态
+const language = ref('zh-CN')
+
 // 播放设置
 const crossfadeEnabled = ref(false)
 const crossfadeDuration = ref(1) // 默认为1秒，范围0-3秒
@@ -931,7 +937,6 @@ const formattedCurrentPosition = computed(() => {
   return result
 })
 const playbackMode = ref<'order' | 'random' | 'repeat'>('order')
-const isRepeating = ref(false)
 const isMuted = ref(false)
 const previousVolume = ref(80)
 const volume = ref(80)
@@ -1025,12 +1030,12 @@ const filteredSongs = computed(() => {
   return result
 })
 
-const playbackModeIcon = computed(() => {
+const playbackModeImage = computed(() => {
   switch (playbackMode.value) {
-    case 'order': return '➡️'
-    case 'random': return '🔀'
-    case 'repeat': return '🔁'
-    default: return '➡️'
+    case 'order': return '/play-button_25b6-fe0f.png'
+    case 'random': return '/shuffle-tracks-button_1f500.png'
+    case 'repeat': return '/repeat-button_1f501.png'
+    default: return '/play-button_25b6-fe0f.png'
   }
 })
 
@@ -1741,14 +1746,40 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
     logInfo('前端播放，文件路径:', finalPlayPath)
     
     try {
-      // 停止并清理之前的音频元素
+      // 停止并清理之前的音频元素，确保彻底销毁
       if (audioElement.value) {
         logInfo('停止并清理之前的音频元素')
-        audioElement.value.pause()
-        audioElement.value.currentTime = 0
-        audioElement.value.src = ''
-        audioElement.value.load() // 强制释放资源
+        try {
+          // 先暂停播放
+          audioElement.value.pause()
+          // 移除所有事件监听器
+          if (timeupdateHandler) {
+            audioElement.value.removeEventListener('timeupdate', timeupdateHandler)
+          }
+          // 清理所有事件处理函数
+          audioElement.value.oncanplay = null
+          audioElement.value.onerror = null
+          audioElement.value.onended = null
+          // 清空src并强制加载，释放资源
+          audioElement.value.src = ''
+          audioElement.value.load()
+          // 彻底销毁音频元素
+          audioElement.value = null
+          timeupdateHandler = null
+          logInfo('音频元素清理完成')
+        } catch (cleanupError) {
+          logError('清理音频元素时发生错误:', cleanupError)
+          // 即使出错也要将audioElement.value设为null
+          audioElement.value = null
+          timeupdateHandler = null
+        }
+      }
+      
+      // 额外的安全检查，确保音频元素已被清理
+      if (audioElement.value) {
+        logWarn('音频元素清理后仍然存在，强制设为null')
         audioElement.value = null
+        timeupdateHandler = null
       }
       
       // 确保音频元素的src属性正确设置
@@ -2669,9 +2700,7 @@ const getDisplayAlbum = (song: Song): string => {
   return info.album || '未知专辑'
 }
 
-const toggleRepeat = () => {
-  isRepeating.value = !isRepeating.value
-}
+// toggleRepeat 函数已移除，播放模式切换通过 changePlaybackMode 函数实现
 
 const toggleMute = async () => {
   isMuted.value = !isMuted.value
@@ -3923,7 +3952,6 @@ const handlePlaybackFinished = async (autoPlay: boolean = true) => {
   }
 
   logInfo('前端 播放完成,处理下一首', {
-    isRepeating: isRepeating.value,
     playbackMode: playbackMode.value,
     autoPlayNext: autoPlayNext.value,
     crossfadeEnabled: crossfadeEnabled.value,
@@ -3942,7 +3970,7 @@ const handlePlaybackFinished = async (autoPlay: boolean = true) => {
   // 使用 setTimeout 确保状态更新后再处理下一首
   setTimeout(async () => {
     logInfo('前端 延迟后处理下一首')
-    if (isRepeating.value) {
+    if (playbackMode.value === 'repeat') {
       // 单曲循环,重新播放当前歌曲
       logInfo('前端 单曲循环模式')
       if (currentSong.value) {
@@ -4080,11 +4108,15 @@ onMounted(() => {
   currentPreset.value = savedSettings.equalizerPreset
   equalizerBands.value = savedSettings.equalizerBands
   theme.value = savedSettings.theme || 'dark'
+  language.value = savedSettings.language || 'zh-CN'
   crossfadeEnabled.value = savedSettings.crossfadeEnabled ?? false
   crossfadeDuration.value = savedSettings.crossfadeDuration ?? 1
   autoPlayNext.value = savedSettings.autoPlayNext ?? true
   showLyrics.value = savedSettings.showLyrics ?? true
   enableTranscode.value = savedSettings.enableTranscode ?? true
+  
+  // 初始化语言服务
+  await i18nService.initialize(language.value)
   forceTranscode.value = savedSettings.forceTranscode ?? false
 
   // 监听播放完成事件
@@ -4168,13 +4200,19 @@ watch([currentSong, currentPosition, isPlaying], async ([newSong, newPosition, n
   }
 })
 
+// 监听语言变化，更新语言服务
+watch(language, async (newLanguage) => {
+  await i18nService.changeLanguage(newLanguage)
+})
+
 // 监听设置变化，自动保存
-watch([volume, playbackMode, currentPreset, equalizerBands, theme, crossfadeEnabled, crossfadeDuration, autoPlayNext, showLyrics, enableTranscode, forceTranscode], 
-  async ([newVolume, newPlaybackMode, newPreset, newBands, newTheme, newCrossfadeEnabled, newCrossfadeDuration, newAutoPlayNext, newShowLyrics, newEnableTranscode, newForceTranscode]) => {
+watch([volume, playbackMode, currentPreset, equalizerBands, theme, language, crossfadeEnabled, crossfadeDuration, autoPlayNext, showLyrics, enableTranscode, forceTranscode], 
+  async ([newVolume, newPlaybackMode, newPreset, newBands, newTheme, newLanguage, newCrossfadeEnabled, newCrossfadeDuration, newAutoPlayNext, newShowLyrics, newEnableTranscode, newForceTranscode]) => {
   try {
     // 确保所有数据都是可克隆的
     const serializableSettings = {
       theme: newTheme,
+      language: newLanguage,
       volume: newVolume,
       playbackMode: newPlaybackMode,
       equalizerPreset: newPreset,
@@ -4250,6 +4288,18 @@ body, html {
   --border-color: rgba(255, 255, 255, 0.2);
   --btn-secondary-bg: rgba(255, 255, 255, 0.1);
   --btn-secondary-hover: rgba(255, 255, 255, 0.15);
+
+  /* 按钮主题颜色 */
+  --btn-primary: #5cb85c;
+  --btn-primary-hover: #4aa34a;
+  --btn-secondary: #3a3a3a;
+  --btn-secondary-hover-light: #4a4a4a;
+  --btn-danger: #d9534f;
+  --btn-danger-hover: #c9302c;
+  --btn-success: #5cb85c;
+  --btn-success-hover: #4aa34a;
+  --btn-info: #5bc0de;
+  --btn-info-hover: #46b8da;
 }
 
 .tplayer-container.light {
@@ -4260,6 +4310,18 @@ body, html {
   --border-color: rgba(0, 0, 0, 0.2);
   --btn-secondary-bg: #e0e0e0;
   --btn-secondary-hover: #d0d0d0;
+
+  /* 按钮主题颜色 - 浅色 */
+  --btn-primary: #5cb85c;
+  --btn-primary-hover: #4aa34a;
+  --btn-secondary: #e0e0e0;
+  --btn-secondary-hover-light: #d0d0d0;
+  --btn-danger: #d9534f;
+  --btn-danger-hover: #c9302c;
+  --btn-success: #5cb85c;
+  --btn-success-hover: #4aa34a;
+  --btn-info: #5cb85c;
+  --btn-info-hover: #4aa34a;
 }
 
 /* 顶部信息栏 */
@@ -4286,7 +4348,7 @@ body, html {
   margin: 0;
   font-size: 18px;
   font-weight: bold;
-  color: #4CAF50;
+  color: var(--btn-success);
 }
 
 .window-controls {
@@ -4298,22 +4360,28 @@ body, html {
   width: 30px;
   height: 30px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   background-color: transparent;
-  color: #ffffff;
+  color: var(--text-primary, #ffffff);
   font-size: 14px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s;
+  transition: all 0.2s ease;
 }
 
 .control-btn:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: var(--bg-hover);
+  transform: translateY(-1px);
 }
 
 .control-btn.close:hover {
+  background-color: var(--btn-danger);
+  transform: translateY(-1px);
+}
+
+.tplayer-container.light .control-btn.close:hover {
   background-color: #ff4757;
 }
 
@@ -4353,10 +4421,18 @@ body, html {
 .toggle-btn {
   background: none;
   border: none;
-  color: #ffffff;
+  color: var(--text-primary, #ffffff);
   font-size: 16px;
   cursor: pointer;
   margin-right: 10px;
+  padding: 6px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.toggle-btn:hover {
+  background-color: var(--bg-hover);
+  transform: translateY(-1px);
 }
 
 .sidebar-header h2 {
@@ -4405,8 +4481,8 @@ body, html {
 }
 
 .nav-item.active {
-  background-color: rgba(76, 175, 80, 0.2);
-  border-left: 3px solid #4CAF50;
+  background-color: rgba(92, 184, 92, 0.2);
+  border-left: 3px solid var(--btn-success);
 }
 
 .nav-icon {
@@ -4429,31 +4505,90 @@ body, html {
   border-top: 1px solid #3a3a3a;
 }
 
+/* ========== 统一按钮样式系统 ========== */
+
 .btn {
-  padding: 10px 15px;
+  padding: 10px 16px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 14px;
-  transition: background-color 0.2s;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  user-select: none;
 }
 
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.btn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+/* 主要按钮 (绿色主题) */
 .btn.primary {
-  background-color: #4CAF50;
+  background-color: var(--btn-primary);
   color: #ffffff;
 }
 
 .btn.primary:hover {
-  background-color: #45a049;
+  background-color: var(--btn-primary-hover);
 }
 
+/* 次要按钮 */
 .btn.secondary {
-  background-color: #3a3a3a;
-  color: #ffffff;
+  background-color: var(--btn-secondary-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
 }
 
 .btn.secondary:hover {
-  background-color: #4a4a4a;
+  background-color: var(--btn-secondary-hover);
+}
+
+/* 危险按钮 (红色) */
+.btn.danger {
+  background-color: var(--btn-danger);
+  color: #ffffff;
+}
+
+.btn.danger:hover {
+  background-color: var(--btn-danger-hover);
+}
+
+/* 成功按钮 */
+.btn.success {
+  background-color: var(--btn-success);
+  color: #ffffff;
+}
+
+.btn.success:hover {
+  background-color: var(--btn-success-hover);
+}
+
+/* 信息按钮 */
+.btn.info {
+  background-color: var(--btn-info);
+  color: #ffffff;
+}
+
+.btn.info:hover {
+  background-color: var(--btn-info-hover);
 }
 
 /* 右侧内容区 */
@@ -4540,6 +4675,15 @@ body, html {
   color: #888;
   cursor: pointer;
   font-size: 14px;
+  padding: 6px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.search-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary, #ffffff);
+  transform: translateY(-1px);
 }
 
 /* 歌曲列表 */
@@ -4568,31 +4712,54 @@ body, html {
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.9);
-  border: 2px solid #007bff;
-  color: #007bff;
+  background: var(--btn-success);
+  color: #ffffff;
   font-size: 18px;
-  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 12px rgba(92, 184, 92, 0.3);
   transition: all 0.3s ease;
+  border: none;
 }
 
 .float-button:hover {
-  background: #007bff;
-  color: white;
+  background: var(--btn-success-hover);
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 123, 255, 0.3);
+  box-shadow: 0 8px 20px rgba(92, 184, 92, 0.4);
 }
 
 .float-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  background: rgba(255, 255, 255, 0.7);
-  color: #ccc;
-  border-color: #ccc;
+  background: var(--btn-secondary-bg);
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+
+/* 操作按钮 */
+.action-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.action-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary, #ffffff);
+  transform: translateY(-1px);
+}
+
+.action-btn.favorite.active {
+  color: var(--btn-danger);
 }
 
 .empty-state {
@@ -4815,7 +4982,7 @@ body, html {
 /* CUE专辑视图样式已合并到普通专辑视图样式 */
 .cue-badge {
   display: inline-block;
-  background-color: #4CAF50;
+  background-color: #5cb85c;
   color: #fff;
   font-size: 10px;
   padding: 2px 6px;
@@ -4825,7 +4992,7 @@ body, html {
 
 
 .nav-badge {
-  background-color: #4CAF50;
+  background-color: #5cb85c;
   color: #fff;
   font-size: 10px;
   padding: 2px 6px;
@@ -4870,7 +5037,7 @@ body, html {
 }
 
 .song-row.active {
-  background-color: rgba(76, 175, 80, 0.1);
+  background-color: rgba(92, 184, 92, 0.1);
 }
 
 .col-index {
@@ -4959,7 +5126,7 @@ body, html {
 }
 
 .action-btn.favorite.active {
-  color: #ff4757;
+  color: var(--btn-danger);
 }
 
 /* 均衡器面板 */
@@ -4998,7 +5165,7 @@ body, html {
 .equalizer-header .close-btn {
   background: none;
   border: none;
-  color: #ffffff;
+  color: var(--text-primary);
   font-size: 20px;
   cursor: pointer;
 }
@@ -5057,7 +5224,7 @@ body, html {
   appearance: none;
   width: 16px;
   height: 16px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
 }
@@ -5065,7 +5232,7 @@ body, html {
 .band input[type="range"]::-moz-range-thumb {
   width: 16px;
   height: 16px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
   border: none;
@@ -5238,20 +5405,80 @@ body, html {
   gap: 15px;
 }
 
+/* 播放控制按钮 - 统一风格 */
 .playback-controls .control-btn {
-  font-size: 18px;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  background-color: var(--btn-secondary-bg, #f0f0f0);
+  color: var(--text-primary, #333333);
+  transition: all 0.2s ease;
+  border: 1px solid var(--border-color, #e0e0e0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  user-select: none;
+  padding: 6px;
 }
 
+/* 控制按钮图标样式 */
+.control-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.tplayer-container.light .playback-controls .control-btn {
+  background-color: #f0f0f0;
+  color: #333333;
+  border: 1px solid #e0e0e0;
+}
+
+.tplayer-container .playback-controls .control-btn {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.playback-controls .control-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.tplayer-container.light .playback-controls .control-btn:hover {
+  background-color: #e0e0e0;
+  border-color: #d0d0d0;
+}
+
+.tplayer-container .playback-controls .control-btn:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.playback-controls .control-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* 播放按钮特殊样式 - 绿色主题 */
 .playback-controls .control-btn.play {
   width: 40px;
   height: 40px;
   font-size: 20px;
-  background-color: #4CAF50;
-  border-radius: 50%;
+  background-color: var(--btn-success);
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.3);
 }
 
 .playback-controls .control-btn.play:hover {
-  background-color: #45a049;
+  background-color: var(--btn-success-hover);
+  box-shadow: 0 4px 12px rgba(92, 184, 92, 0.4);
+}
+
+.playback-controls .control-btn.play:active {
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.3);
 }
 
 .progress-bar {
@@ -5284,7 +5511,7 @@ body, html {
   appearance: none;
   width: 16px;
   height: 16px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
 }
@@ -5292,7 +5519,7 @@ body, html {
 .progress-bar input[type="range"]::-moz-range-thumb {
   width: 16px;
   height: 16px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
   border: none;
@@ -5359,28 +5586,16 @@ body, html {
 }
 
 .skip-next-btn {
-  background: linear-gradient(135deg, #4CAF50, #45a049);
-  color: white;
-  border: none;
-  border-radius: 4px;
+  background-color: var(--btn-success);
+  color: #ffffff;
   padding: 3px 8px;
   font-size: 10px;
   font-weight: 500;
-  cursor: pointer;
   margin-top: 4px;
-  transition: all 0.2s ease;
-  box-shadow: 0 1px 3px rgba(76, 175, 80, 0.3);
 }
 
 .skip-next-btn:hover {
-  background: linear-gradient(135deg, #45a049, #3d8b40);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.4);
-}
-
-.skip-next-btn:active {
-  transform: translateY(0);
-  box-shadow: 0 1px 2px rgba(76, 175, 80, 0.3);
+  background-color: var(--btn-success-hover);
 }
 
 .volume-control {
@@ -5425,7 +5640,7 @@ body, html {
   appearance: none;
   width: 12px;
   height: 12px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
 }
@@ -5433,7 +5648,7 @@ body, html {
 .crossfade-duration input[type="range"]::-moz-range-thumb {
   width: 12px;
   height: 12px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
   border: none;
@@ -5455,7 +5670,7 @@ body, html {
   appearance: none;
   width: 12px;
   height: 12px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
 }
@@ -5463,7 +5678,7 @@ body, html {
 .volume-control input[type="range"]::-moz-range-thumb {
   width: 12px;
   height: 12px;
-  background: #4CAF50;
+  background: #5cb85c;
   border-radius: 50%;
   cursor: pointer;
   border: none;
@@ -5549,12 +5764,12 @@ body, html {
   padding: 15px;
   background-color: rgba(255, 255, 255, 0.05);
   border-radius: 8px;
-  border-left: 4px solid #4CAF50;
+  border-left: 4px solid #5cb85c;
 }
 
 .cue-info-section h4 {
   margin-top: 0;
-  color: #4CAF50;
+  color: #5cb85c;
   font-size: 16px;
   margin-bottom: 15px;
 }
@@ -5634,17 +5849,12 @@ body, html {
 }
 
 .match-btn {
-  padding: 6px 12px;
-  background-color: #4a90e2;
-  border: none;
-  border-radius: 4px;
+  background-color: var(--btn-success);
   color: #ffffff;
-  cursor: pointer;
-  transition: background-color 0.2s;
 }
 
 .match-btn:hover {
-  background-color: #357abd;
+  background-color: var(--btn-success-hover);
 }
 
 /* 标签页 */
@@ -5663,19 +5873,19 @@ body, html {
   padding: 10px 20px;
   background: none;
   border: none;
-  color: #cccccc;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.2s;
   border-bottom: 2px solid transparent;
 }
 
 .tab-button:hover {
-  color: #ffffff;
+  color: var(--text-primary);
 }
 
 .tab-button.active {
-  color: #4a90e2;
-  border-bottom-color: #4a90e2;
+  color: var(--btn-success);
+  border-bottom-color: var(--btn-success);
 }
 
 .tab-content {
@@ -5742,18 +5952,15 @@ body, html {
 }
 
 .copy-btn {
-  padding: 0 12px;
-  background-color: #3a3a3a;
-  border: none;
-  border-radius: 4px;
-  color: #ffffff;
-  cursor: pointer;
-  transition: background-color 0.2s;
+  padding: 6px 12px;
+  background-color: var(--btn-secondary-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
   white-space: nowrap;
 }
 
 .copy-btn:hover {
-  background-color: #4a4a4a;
+  background-color: var(--btn-secondary-hover);
 }
 
 /* 歌词操作 */
@@ -5761,20 +5968,6 @@ body, html {
   margin-top: 12px;
   display: flex;
   gap: 10px;
-}
-
-.action-btn {
-  padding: 6px 12px;
-  background-color: #3a3a3a;
-  border: none;
-  border-radius: 4px;
-  color: #ffffff;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.action-btn:hover {
-  background-color: #4a4a4a;
 }
 
 /* 歌词显示区域 */
@@ -5833,11 +6026,11 @@ body, html {
 
 .lyric-line.active {
   font-size: 16px;
-  color: #4CAF50;
+  color: #5cb85c;
   font-weight: bold;
   opacity: 1;
   transform: scale(1.08);
-  text-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+  text-shadow: 0 0 8px rgba(92, 184, 92, 0.5);
 }
 
 /* 淡色主题 */
@@ -5858,7 +6051,7 @@ body, html {
 }
 
 .tplayer-container.light .app-logo h1 {
-  color: #4CAF50;
+  color: #5cb85c;
 }
 
 .tplayer-container.light .control-btn {
@@ -5884,8 +6077,8 @@ body, html {
 }
 
 .tplayer-container.light .nav-item.active {
-  background-color: rgba(76, 175, 80, 0.15);
-  border-left: 3px solid #4CAF50;
+  background-color: rgba(92, 184, 92, 0.15);
+  border-left: 3px solid #5cb85c;
   font-weight: 500;
 }
 
@@ -5893,23 +6086,7 @@ body, html {
   border-top: 1px solid #e0e0e0;
 }
 
-.tplayer-container.light .btn.primary {
-  background-color: #4CAF50;
-  color: #ffffff;
-}
-
-.tplayer-container.light .btn.primary:hover {
-  background-color: #45a049;
-}
-
-.tplayer-container.light .btn.secondary {
-  background-color: #e0e0e0;
-  color: #333333;
-}
-
-.tplayer-container.light .btn.secondary:hover {
-  background-color: #d0d0d0;
-}
+/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
 
 .tplayer-container.light .content-area {
   background-color: #f8f9fa;
@@ -5922,7 +6099,7 @@ body, html {
 }
 
 .tplayer-container.light .search-box input:focus {
-  border-color: #4CAF50;
+  border-color: #5cb85c;
   outline: none;
 }
 
@@ -5936,7 +6113,7 @@ body, html {
 }
 
 .tplayer-container.light .search-btn:hover {
-  color: #4CAF50;
+  color: #5cb85c;
 }
 
 .tplayer-container.light .songs-table {
@@ -5959,8 +6136,8 @@ body, html {
 }
 
 .tplayer-container.light .song-row.active {
-  background-color: rgba(76, 175, 80, 0.12);
-  border-left: 3px solid #4CAF50;
+  background-color: rgba(92, 184, 92, 0.12);
+  border-left: 3px solid #5cb85c;
 }
 
 .tplayer-container.light .col-index,
@@ -6026,7 +6203,7 @@ body, html {
 }
 
 .tplayer-container.light .progress-bar input[type="range"]::-webkit-slider-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -6036,11 +6213,11 @@ body, html {
 
 .tplayer-container.light .progress-bar input[type="range"]::-webkit-slider-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .progress-bar input[type="range"]::-moz-range-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -6051,7 +6228,7 @@ body, html {
 
 .tplayer-container.light .progress-bar input[type="range"]::-moz-range-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .volume-control input[type="range"] {
@@ -6061,7 +6238,7 @@ body, html {
 }
 
 .tplayer-container.light .volume-control input[type="range"]::-webkit-slider-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -6071,11 +6248,11 @@ body, html {
 
 .tplayer-container.light .volume-control input[type="range"]::-webkit-slider-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .volume-control input[type="range"]::-moz-range-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -6086,7 +6263,7 @@ body, html {
 
 .tplayer-container.light .volume-control input[type="range"]::-moz-range-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .equalizer-panel {
@@ -6115,7 +6292,7 @@ body, html {
 }
 
 .tplayer-container.light .presets select:focus {
-  border-color: #4CAF50;
+  border-color: #5cb85c;
   outline: none;
 }
 
@@ -6126,7 +6303,7 @@ body, html {
 }
 
 .tplayer-container.light .band input[type="range"]::-webkit-slider-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -6136,11 +6313,11 @@ body, html {
 
 .tplayer-container.light .band input[type="range"]::-webkit-slider-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .band input[type="range"]::-moz-range-thumb {
-  background: #4CAF50;
+  background: #5cb85c;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -6151,7 +6328,7 @@ body, html {
 
 .tplayer-container.light .band input[type="range"]::-moz-range-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .band span {
@@ -6199,7 +6376,7 @@ body, html {
 .tplayer-container.light .form-group input:focus,
 .tplayer-container.light .form-group select:focus,
 .tplayer-container.light .form-group textarea:focus {
-  border-color: #4CAF50;
+  border-color: #5cb85c;
   outline: none;
 }
 
@@ -6220,15 +6397,15 @@ body, html {
 }
 
 .tplayer-container.light .form-actions button.primary {
-  background-color: #4CAF50;
+  background-color: #5cb85c;
   color: #ffffff;
-  box-shadow: 0 2px 4px rgba(76, 175, 80, 0.3);
+  box-shadow: 0 2px 4px rgba(92, 184, 92, 0.3);
 }
 
 .tplayer-container.light .form-actions button.primary:hover {
   background-color: #45a049;
   transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
+  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
 }
 
 .tplayer-container.light .lyric-actions button {
@@ -6263,7 +6440,7 @@ body, html {
 
 .tplayer-container.light .artist-item.active {
   background-color: #e8f5e9;
-  border: 2px solid #4CAF50;
+  border: 2px solid #5cb85c;
 }
 
 .tplayer-container.light .artist-name {
@@ -6294,7 +6471,7 @@ body, html {
 
 .tplayer-container.light .album-item.active {
   background-color: #e8f5e9;
-  border: 2px solid #4CAF50;
+  border: 2px solid #5cb85c;
 }
 
 .tplayer-container.light .album-name {
@@ -6420,15 +6597,7 @@ body, html {
   margin: 0 0 4px 0;
 }
 
-.tplayer-container.light .playback-controls .control-btn {
-  color: #666666;
-  font-size: 16px;
-  margin: 0 8px;
-}
-
-.tplayer-container.light .playback-controls .control-btn:hover {
-  color: #333333;
-}
+/* 浅色主题播放控制按钮样式已在前面统一定义 */
 
 /* 浅色主题 - 下一首歌曲信息 */
 .tplayer-container.light .player-right {
@@ -6452,23 +6621,15 @@ body, html {
   color: #666666;
 }
 
-.tplayer-container.light .skip-next-btn {
-  background: linear-gradient(135deg, #4CAF50, #45a049);
-  color: white;
-}
-
-.tplayer-container.light .skip-next-btn:hover {
-  background: linear-gradient(135deg, #45a049, #3d8b40);
-}
+/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
 
 .tplayer-container.light .modal-header .close-btn {
-  color: #666666;
-  font-size: 20px;
-  cursor: pointer;
+  color: var(--text-secondary);
 }
 
 .tplayer-container.light .modal-header .close-btn:hover {
-  color: #333333;
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
 }
 
 /* 浅色主题 - 标签页 */
@@ -6476,18 +6637,7 @@ body, html {
   border-bottom: 1px solid #e0e0e0;
 }
 
-.tplayer-container.light .tab-button {
-  color: #666666;
-}
-
-.tplayer-container.light .tab-button:hover {
-  color: #333333;
-}
-
-.tplayer-container.light .tab-button.active {
-  color: #4CAF50;
-  border-bottom-color: #4CAF50;
-}
+/* 浅色主题标签页会自动使用 CSS 变量，无需额外定义 */
 
 /* 浅色主题 - 表单 */
 .tplayer-container.light .form-group label {
@@ -6503,41 +6653,20 @@ body, html {
 
 .tplayer-container.light .form-group input:focus,
 .tplayer-container.light .form-group textarea:focus {
-  border-color: #4CAF50;
+  border-color: #5cb85c;
   outline: none;
 }
 
 /* 浅色主题 - 匹配区域 */
 .tplayer-container.light .match-section {
-  background-color: rgba(76, 175, 80, 0.1);
-  border: 1px solid rgba(76, 175, 80, 0.3);
+  background-color: rgba(92, 184, 92, 0.1);
+  border: 1px solid rgba(92, 184, 92, 0.3);
 }
 
-.tplayer-container.light .match-btn {
-  background-color: #4CAF50;
-}
-
-.tplayer-container.light .match-btn:hover {
-  background-color: #45a049;
-}
+/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
 
 /* 浅色主题 - 按钮 */
-.tplayer-container.light .btn-cancel {
-  background-color: #e0e0e0;
-  color: #333333;
-}
-
-.tplayer-container.light .btn-cancel:hover {
-  background-color: #d0d0d0;
-}
-
-.tplayer-container.light .btn-save {
-  background-color: #4CAF50;
-}
-
-.tplayer-container.light .btn-save:hover {
-  background-color: #45a049;
-}
+/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
 
 /* 浅色主题 - 封面预览 */
 .tplayer-container.light .cover-preview {
@@ -6593,15 +6722,15 @@ body, html {
 }
 
 .tplayer-container.light .action-btn.favorite {
-  color: #999999;
+  color: var(--text-secondary);
 }
 
 .tplayer-container.light .action-btn.favorite:hover {
-  color: #666666;
+  color: var(--text-primary);
 }
 
 .tplayer-container.light .action-btn.favorite.active {
-  color: #ff4757;
+  color: var(--btn-danger);
 }
 
 /* 浅色主题 - 表头 */
@@ -6637,7 +6766,7 @@ body, html {
 
 .tplayer-container.light .settings-modal h3 {
   color: var(--text-primary);
-  border-bottom: 2px solid rgba(76, 175, 80, 0.3);
+  border-bottom: 2px solid rgba(92, 184, 92, 0.3);
 }
 
 .tplayer-container.light .settings-modal .setting-label {
@@ -6732,14 +6861,7 @@ body, html {
   color: rgba(0, 0, 0, 0.5);
 }
 
-.tplayer-container.light .cover-modal-btn {
-  background-color: rgba(0, 0, 0, 0.1);
-  color: #333;
-}
-
-.tplayer-container.light .cover-modal-btn:hover {
-  background-color: rgba(0, 0, 0, 0.2);
-}
+/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
 
 /* 封面部分 */
 .cover-section {
@@ -6853,19 +6975,19 @@ body, html {
   width: 32px;
   height: 32px;
   border: none;
-  background-color: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background-color: var(--btn-secondary-bg);
+  color: var(--text-primary);
   font-size: 14px;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
 }
 
 .cover-modal-btn:hover {
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: var(--btn-secondary-hover);
 }
 
 /* 全屏模式下的调整 */
@@ -7080,32 +7202,25 @@ body, html {
   gap: 10px;
 }
 
+/* 取消按钮 */
 .btn-cancel {
-  padding: 8px 16px;
-  background-color: #3a3a3a;
-  border: none;
-  border-radius: 4px;
-  color: #ffffff;
-  cursor: pointer;
-  transition: background-color 0.2s;
+  background-color: var(--btn-secondary-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
 }
 
 .btn-cancel:hover {
-  background-color: #4a4a4a;
+  background-color: var(--btn-secondary-hover);
 }
 
+/* 保存按钮 */
 .btn-save {
-  padding: 8px 16px;
-  background-color: #4a90e2;
-  border: none;
-  border-radius: 4px;
+  background-color: var(--btn-success);
   color: #ffffff;
-  cursor: pointer;
-  transition: background-color 0.2s;
 }
 
 .btn-save:hover {
-  background-color: #357abd;
+  background-color: var(--btn-success-hover);
 }
 
 /* 滚动条样式 - 隐藏滚动条但保留滚动功能 */

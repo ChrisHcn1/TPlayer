@@ -1,0 +1,38 @@
+{
+  "common": {
+    "appName": "TPlayer",
+    "settings": "Settings",
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close"
+  },
+  "player": {
+    "play": "Play",
+    "pause": "Pause",
+    "next": "Next",
+    "previous": "Previous",
+    "repeat": "Repeat",
+    "random": "Random",
+    "order": "Order"
+  },
+  "settings": {
+    "playback": "Playback Settings",
+    "interface": "Interface Settings",
+    "crossfade": "Crossfade",
+    "autoPlayNext": "Auto Play Next",
+    "equalizer": "Equalizer",
+    "transcode": "Enable Transcode",
+    "forceTranscode": "Force Transcode",
+    "theme": "Theme",
+    "language": "Language",
+    "showLyrics": "Show Lyrics",
+    "dark": "Dark",
+    "light": "Light"
+  },
+  "playlist": {
+    "title": "Playlist",
+    "empty": "Playlist is empty",
+    "addSongs": "Add songs",
+    "totalDuration": "Total duration"
+  }
+}

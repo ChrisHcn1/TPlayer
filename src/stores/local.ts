@@ -41,6 +41,7 @@ export interface PlaybackProgress {
 
 export interface UserSettings {
   theme: 'light' | 'dark'
+  language: string
   volume: number
   playbackMode: 'order' | 'random' | 'repeat'
   equalizerPreset: string
@@ -74,6 +75,7 @@ const STORAGE_KEYS = {
 // 默认设置
 const DEFAULT_SETTINGS: UserSettings = {
   theme: 'dark',
+  language: 'zh-CN',
   volume: 80,
   playbackMode: 'order',
   equalizerPreset: 'flat',
@@ -84,6 +86,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   crossfadeDuration: 1,
   autoPlayNext: true,
   showLyrics: true,
+  enableTranscode: true,
   forceTranscode: false
 }
 

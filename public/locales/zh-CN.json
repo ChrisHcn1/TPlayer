@@ -1,0 +1,38 @@
+{
+  "common": {
+    "appName": "TPlayer",
+    "settings": "设置",
+    "save": "保存",
+    "cancel": "取消",
+    "close": "关闭"
+  },
+  "player": {
+    "play": "播放",
+    "pause": "暂停",
+    "next": "下一首",
+    "previous": "上一首",
+    "repeat": "重复",
+    "random": "随机",
+    "order": "顺序"
+  },
+  "settings": {
+    "playback": "播放设置",
+    "interface": "界面设置",
+    "crossfade": "交叉淡入淡出",
+    "autoPlayNext": "自动播放下一首",
+    "equalizer": "均衡器",
+    "transcode": "启用转码",
+    "forceTranscode": "强制转码",
+    "theme": "主题",
+    "language": "语言",
+    "showLyrics": "显示歌词",
+    "dark": "深色",
+    "light": "浅色"
+  },
+  "playlist": {
+    "title": "播放列表",
+    "empty": "播放列表为空",
+    "addSongs": "添加歌曲",
+    "totalDuration": "总时长"
+  }
+}

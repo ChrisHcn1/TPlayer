@@ -84,6 +84,17 @@
         </div>
       </div>
       
+      <!-- 语言设置 -->
+      <div class="setting-item">
+        <label class="setting-label">语言</label>
+        <div class="setting-control">
+          <select :value="localLanguage" @change="handleLanguageChange($event)">
+            <option value="zh-CN">简体中文</option>
+            <option value="en-US">English</option>
+          </select>
+        </div>
+      </div>
+      
       <!-- 歌词显示设置 -->
       <div class="setting-item">
         <label class="setting-label">
@@ -126,6 +137,10 @@ const props = defineProps({
     type: String,
     default: 'dark'
   },
+  language: {
+    type: String,
+    default: 'zh-CN'
+  },
   showLyrics: {
     type: Boolean,
     default: true
@@ -154,6 +169,7 @@ const emit = defineEmits([
   'update:crossfadeDuration',
   'update:autoPlayNext',
   'update:theme',
+  'update:language',
   'update:showLyrics',
   'update:equalizerEnabled',
   'update:currentPreset',
@@ -168,6 +184,7 @@ const localCrossfadeEnabled = ref(props.crossfadeEnabled)
 const localCrossfadeDuration = ref(props.crossfadeDuration)
 const localAutoPlayNext = ref(props.autoPlayNext)
 const localTheme = ref(props.theme)
+const localLanguage = ref(props.language)
 const localShowLyrics = ref(props.showLyrics)
 const localEqualizerEnabled = ref(props.equalizerEnabled)
 const localCurrentPreset = ref(props.currentPreset)
@@ -235,6 +252,13 @@ const handleShowLyricsChange = (event: Event) => {
   const target = event.target as HTMLInputElement
   if (target) {
     emit('update:showLyrics', target.checked)
+  }
+}
+
+const handleLanguageChange = (event: Event) => {
+  const target = event.target as HTMLSelectElement
+  if (target) {
+    emit('update:language', target.value)
   }
 }
 
@@ -370,21 +394,44 @@ h3 {
 }
 
 .btn {
-  padding: 10px 20px;
+  padding: 10px 16px;
   border: none;
   border-radius: 6px;
   font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.btn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 .btn-primary {
-  background-color: #4CAF50;
+  background-color: var(--btn-success, #5cb85c);
   color: #ffffff;
 }
 
 .btn-primary:hover {
-  background-color: #45a049;
+  background-color: var(--btn-success-hover, #4aa34a);
 }
 
 .btn-secondary {
@@ -405,24 +452,6 @@ h3 {
   margin-top: 15px;
   padding-top: 10px;
   border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
-}
-
-.btn {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background-color: #4CAF50;
-  color: white;
-}
-
-.btn-primary:hover {
-  background-color: #45a049;
 }
 
 </style>
