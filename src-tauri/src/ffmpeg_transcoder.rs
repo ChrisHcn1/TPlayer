@@ -185,7 +185,9 @@ impl TranscodeCache {
     // 获取或创建转码缓存项
     pub fn get_or_create(&self, original_path: &str) -> Option<TranscodeCacheItem> {
         let cache_key = Self::get_cache_key(original_path);
-        let transcoded_path = self.cache_dir.join(format!("{}.flac", cache_key));
+        // 使用源文件名作为转码文件名，去掉后缀改为.flac
+        let transcoded_filename = Self::get_transcoded_filename(original_path);
+        let transcoded_path = self.cache_dir.join(transcoded_filename);
         
         // 检查转码文件是否已存在
         let is_ready = transcoded_path.exists();
@@ -228,14 +230,22 @@ impl TranscodeCache {
         format!("{:x}", hasher.finish())
     }
     
+    // 生成转码文件名（使用源文件名，去掉后缀改为.flac）
+    fn get_transcoded_filename(path: &str) -> String {
+        let path = Path::new(path);
+        let filename_without_ext = path.file_stem().unwrap_or_default().to_string_lossy();
+        format!("{}.flac", filename_without_ext)
+    }
+    
     // 开始转码（使用前端传递的音频信息）
     pub fn start_transcode_with_info(&self, original_path: &str, audio_info_json: Option<serde_json::Value>) -> Result<String, String> {
         let ffmpeg_path = Self::get_ffmpeg_path()
             .ok_or_else(|| "未找到 FFmpeg，请设置 FFMPEG_PATH 环境变量".to_string())?;
         
         let cache_key = Self::get_cache_key(original_path);
-        // 使用缓存键作为转码文件名，与get_or_create保持一致
-        let transcoded_path = self.cache_dir.join(format!("{}.flac", cache_key));
+        // 使用源文件名作为转码文件名，去掉后缀改为.flac
+        let transcoded_filename = Self::get_transcoded_filename(original_path);
+        let transcoded_path = self.cache_dir.join(transcoded_filename);
         
         // 检查转码文件是否已存在
         if transcoded_path.exists() {
