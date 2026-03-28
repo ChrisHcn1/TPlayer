@@ -40,6 +40,11 @@
               <span class="nav-icon">💽</span>
               <span class="nav-text">专辑</span>
             </li>
+            <li class="nav-item" @click="switchFilter('cue')" v-if="cueAlbums.length > 0">
+              <span class="nav-icon">📀</span>
+              <span class="nav-text">CUE专辑</span>
+              <span class="nav-badge">{{ cueAlbums.length }}</span>
+            </li>
           </ul>
         </nav>
         <div class="sidebar-footer">
@@ -79,7 +84,27 @@
         </div>
         
         <!-- 歌曲列表 -->
-        <div class="song-list-container">
+        <div class="song-list-container" ref="songListContainer">
+          <!-- 悬浮控制按钮 -->
+          <div class="playlist-float-buttons" >
+            <button 
+              class="float-button" 
+              @click="scrollToTop"
+              title="回到顶部"
+            >
+              ↑
+            </button>
+            <button 
+              class="float-button" 
+              @click="scrollToCurrentSong"
+              title="跳转到当前曲目"
+              :disabled="!currentSong"
+              v-if="showJumpToCurrentButton && currentSong"
+            >
+              ⚪
+            </button>
+          </div>
+          
           <div v-if="songs.length === 0" class="empty-state">
             <div class="empty-icon">🎵</div>
             <p>暂无歌曲</p>
@@ -264,6 +289,72 @@
                     ♥
                   </button>
                 </span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- CUE专辑视图 - 双栏布局 -->
+          <div v-if="currentFilter === 'cue'" class="albums-view">
+            <div class="albums-sidebar">
+              <div 
+                v-for="album in cueAlbums"
+                :key="album.filePath"
+                class="album-item"
+                :class="{ 'active': selectedCueAlbum?.filePath === album.filePath }"
+                @click="selectCueAlbum(album)"
+              >
+                <div class="album-name">{{ album.title || '未知专辑' }}</div>
+                <div class="album-artist">{{ album.performer || '未知艺术家' }}</div>
+                <div class="album-count">{{ (album as any).tracks?.length || 0 }} 首</div>
+              </div>
+            </div>
+            <div class="albums-content">
+              <div v-if="!selectedCueAlbum" class="empty-selection">
+                <p>请选择一个CUE专辑</p>
+              </div>
+              <div v-else class="song-list">
+                <!-- 表头 -->
+                <table class="songs-table table-header">
+                  <thead>
+                    <tr>
+                      <th class="col-index">#</th>
+                      <th class="col-title">标题</th>
+                      <th class="col-artist">艺术家</th>
+                      <th class="col-duration">时长</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                </table>
+                <!-- 歌曲列表 -->
+                <div class="song-list">
+                  <div
+                    v-for="(item, index) in getCueAlbumTracks(selectedCueAlbum.filePath)"
+                    :key="item.id"
+                    class="song-row"
+                    :class="{ 'active': item.id === currentSong?.id }"
+                    @click="playCueTrackInApp(item)"
+                  >
+                    <span class="col-index">{{ index + 1 }}</span>
+                    <span class="col-title">
+                      <div class="song-title" :title="item.title">
+                        {{ getDisplayTitle(item as unknown as Song) }}
+                      </div>
+                      <div class="song-info cue-badge">CUE Track</div>
+                    </span>
+                    <span class="col-artist" :title="item.artist">{{ item.artist }}</span>
+                    <span class="col-duration">{{ item.duration }}</span>
+                    <span class="col-actions">
+                      <button
+                        class="action-btn favorite"
+                        @click.stop="toggleFavorite(item as unknown as Song)"
+                        :class="{ 'active': favorites.includes(item.id) }"
+                        title="收藏"
+                      >
+                        ♥
+                      </button>
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -525,6 +616,32 @@
                   <input type="text" v-model="editTagsForm.alia" placeholder="请输入别名">
                 </div>
               </div>
+              
+              <!-- CUE信息区域 -->
+              <div v-if="songToEdit && songToEdit.isCueTrack" class="cue-info-section">
+                <h4>CUE信息</h4>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>音轨号</label>
+                    <input type="text" v-model="editTagsForm.trackNumber" placeholder="请输入音轨号">
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>开始时间 (秒)</label>
+                    <input type="number" v-model="songToEdit.startTime" placeholder="开始时间">
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label>结束时间 (秒)</label>
+                    <input type="number" v-model="songToEdit.endTime" placeholder="结束时间">
+                  </div>
+                </div>
+                <div v-if="(songToEdit as any).cueInfo" class="cue-info-text">
+                  <pre>{{ (songToEdit as any).cueInfo }}</pre>
+                </div>
+              </div>
               <div class="form-row">
                 <div class="form-group">
                   <label>路径</label>
@@ -648,7 +765,6 @@
                 :key="index"
                 class="cover-lyric-line"
                 :class="{ 'active': index === currentLyricIndex }"
-                :ref="el => { if (el && el instanceof HTMLElement) coverLyricLineRefs[index] = el }"
               >
                 {{ line.text }}
               </div>
@@ -672,25 +788,41 @@ import { localStorageService, type Playlist } from './stores/local'
 import { matchSong, songLyric, searchSong, fetchLyricById } from './api/music'
 import * as mm from 'music-metadata'
 import Settings from './components/Settings.vue'
+import {
+  cueAlbums,
+  cueTracks,
+  selectedCueAlbum,
+  selectCueAlbum,
+  getCueAlbumTracks,
+  scanCueFiles
+} from './composables/useCue'
+import { exists } from '@tauri-apps/plugin-fs'
 // RecycleScroller组件通过VueVirtualScroller插件注册
 
 // 日志开关：设置为 false 可禁用所有日志输出
-const ENABLE_LOGS = false
+const ENABLE_LOGS = true
+
+// 调试日志级别：0=无日志，1=仅错误，2=基本信息，3=详细信息
+const LOG_LEVEL = 0
 
 // 日志函数
 function logInfo(...args: any[]) {
-  if (ENABLE_LOGS) {
+  // 只输出滚动事件相关的日志
+  if (ENABLE_LOGS && args[0] === '滚动事件触发:') {
     console.log(...args)
   }
 }
 
 function logError(...args: any[]) {
-  if (ENABLE_LOGS) {
-    console.error(...args)
-  }
+  // 禁用错误日志
 }
 
-// 类型定义
+// 详细日志函数（仅在LOG_LEVEL=3时输出）
+function logDebug(...args: any[]) {
+  // 禁用详细日志
+}
+
+// 类型定义 - 独立的Song接口，与local.ts中的Song兼容
 interface Song {
   id: string
   title: string
@@ -703,6 +835,14 @@ interface Song {
   genre: string
   lyric?: string
   isFavorite?: boolean
+  isCueTrack?: boolean
+  startTime?: string | number
+  endTime?: string | number
+  parentFile?: string
+  trackNumber?: string
+  cueInfo?: string
+  // 转码相关
+  needs_transcode: boolean
 }
 
 // 歌词行类型
@@ -740,6 +880,10 @@ const forceTranscode = ref(false) // 强制转码
 const playbackStartTime = ref(Date.now()) // 开始播放的时间
 const pauseStartTime = ref<number | null>(null) // 开始暂停的时间
 const pausedDuration = ref(0) // 累计暂停的时间
+const audioElement = ref<HTMLAudioElement | null>(null) // 前端音频元素
+
+// 时间更新事件处理器
+let timeupdateHandler: ((this: HTMLAudioElement, ev: Event) => any) | null = null
 
 const editTagsForm = ref({
   title: '',
@@ -801,7 +945,7 @@ const playlists = ref<Playlist[]>([])
 const favorites = ref<string[]>([])
 
 // 过滤和搜索
-const currentFilter = ref<'all' | 'favorites' | 'artists' | 'albums'>('all')
+const currentFilter = ref<'all' | 'favorites' | 'artists' | 'albums' | 'cue'>('all')
 const searchQuery = ref('')
 const selectedArtist = ref<string>('')
 const selectedAlbum = ref<string>('')
@@ -816,7 +960,8 @@ const currentFilterText = computed(() => {
     all: '全部歌曲',
     favorites: '我喜欢的歌曲',
     artists: '艺术家',
-    albums: '专辑'
+    albums: '专辑',
+    cue: 'CUE专辑'
   }
   return filters[currentFilter.value]
 })
@@ -920,8 +1065,15 @@ const totalDurationText = computed(() => {
 const titleElement = ref<HTMLElement | null>(null)
 const artistElement = ref<HTMLElement | null>(null)
 const coverLyricsContainer = ref<HTMLElement | null>(null)
-const coverLyricLineRefs = ref<(HTMLElement | null)[]>([])
+const coverLyricLineRefs = ref<(any | null)[]>([])
+const mainLyricsContainer = ref<HTMLElement | null>(null)
+const mainLyricLineRefs = ref<(any | null)[]>([])
 const coverModalContent = ref<HTMLElement | null>(null)
+const songListContainer = ref<HTMLElement | null>(null)
+
+// 滚动相关状态
+const showScrollTopButton = ref(false)
+const showJumpToCurrentButton = ref(true)
 
 // 封面模态框拖动和全屏状态
 const isCoverModalFullscreen = ref(false)
@@ -931,6 +1083,30 @@ let dragStartX = 0
 let dragStartY = 0
 let modalStartX = 0
 let modalStartY = 0
+
+// 滚动事件处理函数
+const handleScroll = () => {
+  if (songListContainer.value) {
+    // 控制回到顶部按钮的显示/隐藏
+    showScrollTopButton.value = songListContainer.value.scrollTop > 0
+    logInfo('滚动事件触发: scrollTop=', songListContainer.value.scrollTop, 'showScrollTopButton=', showScrollTopButton.value)
+    
+    // 控制跳转到当前曲目按钮的显示/隐藏
+    if (currentSong.value) {
+      const currentSongElement = songListContainer.value.querySelector('.song-row.active')
+      if (currentSongElement) {
+        const rect = currentSongElement.getBoundingClientRect()
+        const containerRect = songListContainer.value.getBoundingClientRect()
+        // 检查当前播放曲目是否在可视范围内
+        showJumpToCurrentButton.value = !(rect.top >= containerRect.top && rect.bottom <= containerRect.bottom)
+      } else {
+        showJumpToCurrentButton.value = true
+      }
+    } else {
+      showJumpToCurrentButton.value = false
+    }
+  }
+}
 
 // 检测文本是否过长需要滚动
 const isTextLong = (type: 'title' | 'artist'): boolean => {
@@ -945,7 +1121,7 @@ const toggleSidebar = () => {
   sidebarVisible.value = !sidebarVisible.value
 }
 
-const switchFilter = (filter: 'all' | 'favorites' | 'artists' | 'albums') => {
+const switchFilter = (filter: 'all' | 'favorites' | 'artists' | 'albums' | 'cue') => {
   currentFilter.value = filter
   // 重置选中的艺术家和专辑
   if (filter !== 'artists') {
@@ -954,12 +1130,78 @@ const switchFilter = (filter: 'all' | 'favorites' | 'artists' | 'albums') => {
   if (filter !== 'albums') {
     selectedAlbum.value = ''
   }
+  if (filter !== 'cue') {
+    selectedCueAlbum.value = null
+  }
+  
+  // 更新悬浮按钮的显示状态
+  nextTick(() => {
+    handleScroll()
+  })
+}
+
+// 播放CUE Track
+const playCueTrackInApp = async (track: any) => {
+  logDebug('playCueTrackInApp被调用，track参数:', track)
+  logDebug('track类型:', typeof track)
+  logDebug('track属性:', Object.keys(track))
+
+  // 获取开始和结束时间（支持驼峰命名和蛇形命名）
+  let startTime = track.startTime ?? track.start_time
+  let endTime = track.endTime ?? track.end_time
+
+  logDebug('获取到的时间参数:', { startTime, endTime })
+
+  // 确保时间是数字类型
+  if (typeof startTime === 'string') {
+    startTime = parseInt(startTime, 10)
+  }
+  if (typeof endTime === 'string') {
+    endTime = parseInt(endTime, 10)
+  }
+
+  // 如果仍然没有开始或结束时间，尝试从duration解析
+  if ((!startTime && startTime !== 0) || (!endTime && endTime !== 0)) {
+    logError('CUE track缺少时间参数:', track)
+    logError('startTime:', startTime, 'endTime:', endTime)
+    // 不设置模拟数据，而是报错
+    alert('无法播放该音轨：缺少开始或结束时间参数')
+    return
+  }
+
+  // 计算正确的时长（endTime - startTime）
+  const durationSeconds = endTime - startTime
+  const durationMins = Math.floor(durationSeconds / 60)
+  const durationSecs = Math.floor(durationSeconds % 60)
+  const durationStr = `${durationMins}:${durationSecs.toString().padStart(2, '0')}`
+
+  // 将CUE Track转换为Song格式
+  const song: Song = {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    path: track.path,
+    duration: durationStr,
+    cover: '',
+    year: '',
+    genre: '',
+    isCueTrack: true,
+    startTime: startTime,
+    endTime: endTime,
+    parentFile: track.parentFile || track.parent_file,
+    trackNumber: String(track.trackNumber || track.track_number || '')
+  }
+
+  logDebug('转换后的song:', song)
+  logDebug('准备调用playSong，参数:', { song: song.title, position: startTime, cueStartTime: startTime, cueEndTime: endTime })
+  await playSong(song, startTime, startTime, endTime)
 }
 
 const scanMusic = async () => {
   try {
     // 检测是否在Tauri环境中
-    const tauri = await isTauri()
+    const tauri = isTauri()
     
     if (!tauri) {
       alert('请在桌面应用中运行此功能')
@@ -998,10 +1240,15 @@ const scanMusic = async () => {
         // 调用后端扫描命令
         const result = await invoke<{ tracks: Song[] }>('scan_directory', { directory })
         
+        // 同时扫描CUE文件
+        logInfo('开始扫描CUE文件...')
+        await scanCueFiles(directory)
+        
         if (result && result.tracks) {
           const trackCount = result.tracks.length
+          const cueTrackCount = cueTracks.value.length
           
-          if (trackCount > 0) {
+          if (trackCount > 0 || cueTrackCount > 0) {
             // 更新收藏状态
             result.tracks.forEach(track => {
               track.isFavorite = favorites.value.includes(track.id)
@@ -1019,8 +1266,38 @@ const scanMusic = async () => {
               logInfo('【扫描结果】完整track对象:', JSON.stringify(firstTrack, null, 2).substring(0, 500))
             }
             
-            songs.value = result.tracks
-            alert(`扫描完成，共找到 ${trackCount} 首歌曲`)
+            // 合并普通歌曲和CUE tracks
+            // 创建CUE关联文件路径集合，用于过滤
+            const cueParentFiles = new Set(cueTracks.value.map(track => track.parentFile))
+
+            const cueSongs = cueTracks.value.map(track => ({
+              id: track.id,
+              title: track.title, // 保留完整的title(包含时间信息)
+              artist: track.artist,
+              album: track.album,
+              path: track.path,
+              duration: track.duration,
+              cover: '',
+              year: '',
+              genre: '',
+              isCueTrack: true,
+              startTime: typeof track.startTime === 'string' ? parseFloat(track.startTime) : track.startTime,
+              endTime: track.endTime ? (typeof track.endTime === 'string' ? parseFloat(track.endTime) : track.endTime) : undefined,
+              parentFile: track.parentFile,
+              trackNumber: String(track.trackNumber || ''),
+              cueInfo: track.cueInfo,
+              isFavorite: favorites.value.includes(track.id)
+            }))
+
+            // 过滤掉CUE关联的音频文件
+            const filteredTracks = result.tracks.filter(track => !cueParentFiles.has(track.path))
+            songs.value = [...filteredTracks, ...cueSongs]
+            
+            if (cueTrackCount > 0) {
+              alert(`扫描完成，共找到 ${trackCount} 首歌曲和 ${cueTrackCount} 个CUE Track`)
+            } else {
+              alert(`扫描完成，共找到 ${trackCount} 首歌曲`)
+            }
           } else {
             alert('未找到音频文件，请确认目录中包含支持的音频格式')
           }
@@ -1042,10 +1319,12 @@ const scanMusic = async () => {
 let playSongLock: Promise<void> | null = null
 let currentPlayId = 0 // 用于跟踪当前播放请求的唯一ID
 
-const playSong = async (song: Song, position: number = 0) => {
+const playSong = async (song: Song, position: number = 0, cueStartTime?: number, cueEndTime?: number, autoPlay: boolean = true) => {
   // 生成本次播放请求的唯一ID
   const thisPlayId = ++currentPlayId
-  logInfo(`[播放保护] 开始播放请求, ID: ${thisPlayId}, 歌曲: ${song.title}`)
+  logInfo(`[播放保护] 开始播放请求, ID: ${thisPlayId}, 歌曲: ${song.title}, autoPlay: ${autoPlay}`)
+  
+  let errorMessage = ''
   
   // 如果有正在执行的播放操作，等待它完成
   if (playSongLock) {
@@ -1190,17 +1469,107 @@ const playSong = async (song: Song, position: number = 0) => {
     
     // 交叉淡入淡出处理
     let originalVolume = isMuted.value ? previousVolume.value : volume.value
+    let volumeToPass = originalVolume // 传递给后端的音量值，始终使用原始音量
+
+    logInfo('音量设置前: volume.value=', volume.value, 'isMuted.value=', isMuted.value, 'previousVolume.value=', previousVolume.value, 'originalVolume=', originalVolume, 'volumeToPass=', volumeToPass)
+
     if (crossfadeEnabled.value && crossfadeDuration.value > 0) {
       logInfo('启用交叉淡入淡出，时长:', crossfadeDuration.value, '秒')
       logInfo('交叉淡入淡出前的原始音量:', originalVolume, '当前音量:', volume.value, '静音状态:', isMuted.value)
-      // 临时将音量设置为0
-      volume.value = 0
-      await updateVolume()
+      // 注意：不再修改 volume.value，而是在音频元素创建后直接操作其音量
+      // 这样用户在 UI 上看到的音量值就不会受到交叉淡入淡出的影响
+      logInfo('交叉淡入淡出: 准备在音频元素创建后直接操作其音量')
+    } else {
+      // 没有启用交叉淡入淡出，直接使用原始音量
+      volumeToPass = originalVolume
+      logInfo('未启用交叉淡入淡出: volumeToPass=', volumeToPass)
     }
 
+    logInfo('音量设置后: volume.value=', volume.value, 'volumeToPass=', volumeToPass)
+
+    // 交叉淡入淡出：对当前播放的歌曲执行淡出操作
+    if (crossfadeEnabled.value && crossfadeDuration.value > 0 && audioElement.value && !audioElement.value.paused) {
+      const fadeDuration = crossfadeDuration.value * 1000 // 转换为毫秒
+      const steps = 20 // 淡出步骤数
+      const stepDuration = fadeDuration / steps
+      
+      logInfo('开始交叉淡入淡出，对当前歌曲执行淡出操作')
+      
+      // 逐渐减少音频元素的音量
+      for (let i = steps; i >= 0; i--) {
+        await new Promise(resolve => setTimeout(resolve, stepDuration))
+        const currentVolume = (originalVolume * i) / (steps * 100)
+        if (audioElement.value) {
+          audioElement.value.volume = currentVolume
+        }
+      }
+      
+      logInfo('淡出操作完成，准备播放新歌曲')
+    }
+    
+    // 清理旧的音频元素，避免竞态条件
+    if (audioElement.value && timeupdateHandler) {
+      try {
+        audioElement.value.pause()
+        audioElement.value.removeEventListener('timeupdate', timeupdateHandler)
+        // 清理其他事件监听器
+        audioElement.value.oncanplay = null
+        audioElement.value.onerror = null
+        audioElement.value.onended = null
+      } catch (error) {
+        logError('清理音频元素事件监听器失败:', error)
+      } finally {
+        audioElement.value = null
+        timeupdateHandler = null
+      }
+    }
+    
     // 重置前端状态
     currentSong.value = song
-    currentPosition.value = position
+    
+    // 更新悬浮按钮的显示状态
+    nextTick(() => {
+      handleScroll()
+    })
+    // 对于CUE track，计算相对位置
+    let positionForCue = position
+    if (song.isCueTrack && song.startTime) {
+      // 首先验证position是否合理
+      if (isNaN(position) || position < 0 || position > 1000000) {
+        logError('CUE track位置转换: 无效的position值:', position, '使用0作为默认值')
+        positionForCue = 0
+      } else {
+        // 检查position是否已经是相对位置（小于startTime）
+        if (position < Number(song.startTime)) {
+          // 已经是相对位置，直接使用
+          logDebug('CUE track位置转换: position已为相对位置=' + position + 's')
+        } else {
+          // 是绝对位置，转换为相对位置
+          positionForCue = position - Number(song.startTime)
+          // 确保相对位置不小于0
+          if (positionForCue < 0) {
+            positionForCue = 0
+            logDebug('CUE track位置修正: 相对位置小于0，设置为0')
+          }
+          // 确保相对位置不超过CUE track的长度
+          if (song.endTime) {
+            const cueTrackDuration = Number(song.endTime) - Number(song.startTime)
+            if (positionForCue > cueTrackDuration) {
+              positionForCue = cueTrackDuration
+              logDebug('CUE track位置修正: 相对位置超过音轨长度，限制为', cueTrackDuration, '秒')
+            }
+          }
+          logDebug('CUE track位置转换: 绝对位置=' + position + 's, startTime=' + song.startTime + 's, 相对位置=' + positionForCue + 's')
+        }
+      }
+    } else {
+      // 对于普通歌曲，验证position是否合理
+      if (isNaN(position) || position < 0 || position > 1000000) {
+        logError('普通歌曲位置转换: 无效的position值:', position, '使用0作为默认值')
+        positionForCue = 0
+      }
+    }
+    currentPosition.value = positionForCue
     // 计算进度百分比
     if (song.duration && song.duration !== '未知') {
       const parts = song.duration.split(':')
@@ -1209,7 +1578,7 @@ const playSong = async (song: Song, position: number = 0) => {
         const seconds = parseInt(parts[1])
         const totalSeconds = minutes * 60 + seconds
         if (totalSeconds > 0) {
-          progress.value = Math.min((position / totalSeconds) * 100, 100)
+          progress.value = Math.min((positionForCue / totalSeconds) * 100, 100)
         } else {
           progress.value = 0
         }
@@ -1219,7 +1588,7 @@ const playSong = async (song: Song, position: number = 0) => {
     } else {
       progress.value = 0
     }
-    isPlaying.value = true
+    // 暂时不设置isPlaying.value，等待音频元素真正开始播放后再设置
     
     // 重置播放完成标志
     isPlaybackFinished = false
@@ -1228,207 +1597,742 @@ const playSong = async (song: Song, position: number = 0) => {
     pauseStartTime.value = null
     pausedDuration.value = 0
     logInfo('重置暂停状态: pauseStartTime=null, pausedDuration=0')
+
+    // 准备CUE参数（如果是CUE track）
+    let startTime = cueStartTime !== undefined ? cueStartTime : (song.isCueTrack ? song.startTime : undefined)
+    let endTime = cueEndTime !== undefined ? cueEndTime : (song.isCueTrack ? song.endTime : undefined)
+    const playPath = song.isCueTrack && song.parentFile ? song.parentFile : song.path
     
-    // 更新开始播放的时间
-    playbackStartTime.value = Date.now() - (position * 1000)
-    logInfo('更新播放开始时间:', playbackStartTime.value, '位置:', position)
-
-    // 调用后端播放命令，传入当前音量、转码设置和位置
-    // 只有在启用转码时才传递转码参数
-    const shouldTranscode = enableTranscode.value ? forceTranscode.value : false
-    logInfo('调用后端 play_song 命令，音量:', volume.value, '路径:', song.path, '启用转码:', enableTranscode.value, '强制转码:', forceTranscode.value, '实际转码:', shouldTranscode, '位置:', position)
-    const result: any = await invoke('play_song', { path: song.path, volume: volume.value, force_transcode: shouldTranscode, position: position })
-
-    logInfo('后端返回结果:', result)
-
-    // 解析歌词（优先使用本地歌词）
-    logInfo('【歌词加载】开始加载歌词，歌曲:', song.title)
-    logInfo('【歌词加载】歌曲lyric字段长度:', song.lyric ? song.lyric.length : 0)
-    logInfo('【歌词加载】歌曲lyric字段内容:', song.lyric ? song.lyric.substring(0, 100) + '...' : '空')
+    // 检查playPath是否有效
+    logDebug('计算playPath:', {
+      isCueTrack: song.isCueTrack,
+      parentFile: song.parentFile,
+      path: song.path,
+      playPath: playPath,
+      song: song
+    })
     
-    // 首先尝试从文件系统读取歌词文件（动态加载）
-    logInfo('【歌词加载】尝试从文件系统动态加载歌词')
+    if (!playPath || playPath.length > 1000) {
+      logError('无效的playPath:', playPath)
+      throw new Error('无效的文件路径')
+    }
+    
+    // 检查playPath是否是绝对路径
+    if (!playPath.includes(':')) {
+      logInfo('playPath可能是相对路径:', playPath)
+    }
+
+    // 检查文件路径格式
+    if (playPath.includes('\\') && playPath.includes('/')) {
+      logInfo('文件路径包含混合分隔符，可能导致问题:', playPath)
+      // 统一使用Windows风格的分隔符
+      const normalizedPath = playPath.replace(/\//g, '\\')
+      logDebug('标准化后的路径:', normalizedPath)
+    }
+
+    // 检查文件是否存在
+    let finalPlayPath = playPath
     try {
-      // 构建歌词文件路径
-      const songPath = song.path
-      const lyricPath = songPath.replace(/\.[^/.]+$/, '.lrc')
-      logInfo('【歌词加载】尝试读取歌词文件:', lyricPath)
-      
-      // 使用Tauri的文件系统API读取歌词文件
-      const { readTextFile } = await import('@tauri-apps/plugin-fs')
-      const lyricContent = await readTextFile(lyricPath)
-      logInfo('【歌词加载】成功读取歌词文件，长度:', lyricContent.length)
-      logInfo('【歌词加载】歌词文件内容预览:', lyricContent.substring(0, 200))
-      
-      // 解析歌词
-      lyrics.value = parseLyrics(lyricContent)
-      logInfo('【歌词加载】文件系统歌词已加载:', lyrics.value.length, '行')
-      if (lyrics.value.length > 0) {
-        logInfo('【歌词加载】前3行歌词:')
-        lyrics.value.slice(0, 3).forEach((line, i) => {
-          logInfo(`  [${i}] ${line.time.toFixed(1)}s: ${line.text}`)
-        })
+      const fileExists = await exists(playPath)
+      logDebug('文件存在性检查:', { path: playPath, exists: fileExists })
+      if (!fileExists) {
+        logError('❌ 音频文件不存在，无法播放:', playPath)
+        errorMessage = '文件不存在: ' + playPath
+        isPlaying.value = false
+        isPlaybackFinished = true
+        throw new Error(errorMessage)
       }
     } catch (error) {
-      logInfo('【歌词加载】从文件系统读取歌词失败，尝试使用歌曲对象中的歌词:', error)
-      
-      // 如果文件系统读取失败，尝试使用歌曲对象中的歌词
-      if (song.lyric && song.lyric.trim()) {
-        logInfo('【歌词加载】从歌曲对象加载歌词')
-        lyrics.value = parseLyrics(song.lyric)
-        logInfo('【歌词加载】本地歌词已加载:', lyrics.value.length, '行')
-        if (lyrics.value.length > 0) {
-          logInfo('【歌词加载】前3行歌词:')
-          lyrics.value.slice(0, 3).forEach((line, i) => {
-            logInfo(`  [${i}] ${line.time.toFixed(1)}s: ${line.text}`)
-          })
+      logError('❌ 文件存在性检查失败:', error)
+      errorMessage = error && typeof error === 'object' && 'message' in error ? (error.message as string) : ('文件检查失败: ' + String(error))
+      isPlaying.value = false
+      isPlaybackFinished = true
+      throw new Error(errorMessage)
+    }
+
+    // 从后端获取音频信息（包含时长、采样率、编码器等）
+    let durationFromBackend: number | null = null
+    let audioInfoFromBackend: any = null
+    try {
+      const result = await invoke('get_audio_duration', { path: playPath })
+      if (result && typeof result === 'object') {
+        if ('duration' in result) {
+          durationFromBackend = Number(result.duration)
+          logDebug('从后端获取的音频时长:', durationFromBackend, '秒')
         }
+        // 保存完整的音频信息
+        audioInfoFromBackend = result
+        logDebug('从后端获取的完整音频信息:', audioInfoFromBackend)
+      }
+    } catch (error) {
+      logInfo('获取音频信息失败:', error)
+    }
+
+    // 检查是否需要转码（仅当启用转码功能时）
+    if (enableTranscode.value) {
+      logDebug('转码检查: 文件=' + playPath + ', 启用转码功能')
+      try {
+        // 传递音频信息给转码命令，避免重复调用ffprobe
+        // 增加超时时间到600秒（10分钟），以支持大文件转码
+        logInfo('调用get_transcoded_path，原文件路径:', playPath)
+        const transcodedPath = await invoke('get_transcoded_path', {
+          path: playPath, 
+          timeout_secs: 600,
+          audio_info: audioInfoFromBackend
+        }) as string
+        logInfo('get_transcoded_path返回:', transcodedPath)
+        finalPlayPath = transcodedPath
+        logInfo('更新finalPlayPath为转码后的路径:', finalPlayPath)
+        
+        // 验证转码后的文件是否存在
+        // 如果是HTTP URL，跳过文件存在性检查，因为HTTP URL是通过本地HTTP服务器提供的
+        if (!transcodedPath.startsWith('http://') && !transcodedPath.startsWith('https://')) {
+          const transcodedExists = await exists(transcodedPath)
+          if (!transcodedExists) {
+            logError('❌ 转码后的文件不存在:', transcodedPath)
+            errorMessage = '转码文件不存在: ' + transcodedPath
+            isPlaying.value = false
+            isPlaybackFinished = true
+            throw new Error(errorMessage)
+          }
+        }
+      } catch (transcodeError) {
+        logError('❌ 获取转码文件失败:', transcodeError)
+        errorMessage = '转码失败: ' + (transcodeError && typeof transcodeError === 'object' && 'message' in transcodeError ? (transcodeError.message as string) : String(transcodeError))
+        logInfo('转码检查失败（无法播放原文件，因为原文件格式浏览器不支持）:', errorMessage)
+        // 转码失败时，不尝试播放原文件，因为原文件格式浏览器不支持
+        isPlaying.value = false
+        isPlaybackFinished = true
+        throw new Error(errorMessage)
+      }
+    }
+
+    // 确保CUE track的时间参数正确传递
+    if (song.isCueTrack) {
+      logDebug('CUE track信息:')
+    logDebug('- song.isCueTrack:', song.isCueTrack)
+    logDebug('- song.startTime:', song.startTime)
+    logDebug('- song.endTime:', song.endTime)
+    logDebug('- startTime:', startTime)
+    logDebug('- endTime:', endTime)
+
+      // 确保startTime和endTime是数字类型
+      if (typeof startTime === 'string') {
+        startTime = parseInt(startTime, 10)
+      }
+      if (typeof endTime === 'string') {
+        endTime = parseInt(endTime, 10)
+      }
+
+      if (typeof startTime === 'number' && typeof endTime === 'number') {
+        logDebug('CUE时间参数类型正确，准备传递给后端')
       } else {
-        logInfo('【歌词加载】歌曲对象中也没有歌词')
-        lyrics.value = []
+        logDebug('CUE时间参数类型错误:')
+        logDebug('- startTime类型:', typeof startTime)
+        logDebug('- endTime类型:', typeof endTime)
       }
     }
+
+    logDebug('CUE播放参数:', { isCueTrack: song.isCueTrack, startTime, endTime, playPath, cueStartTime, cueEndTime })
+    logDebug('song对象:', song)
+    logDebug('song.startTime:', song.startTime)
+    logDebug('song.endTime:', song.endTime)
+
+    logInfo('前端播放，文件路径:', finalPlayPath)
     
-    logInfo('【歌词加载】最终歌词状态:', {
-      歌词行数: lyrics.value.length,
-      showLyrics: showLyrics.value,
-      currentLyricIndex: currentLyricIndex.value
-    })
-    currentLyricIndex.value = -1
-
-    if (result) {
-      isPlaying.value = true
-      logInfo('playSong 完成, isPlaying 设置为 true, 结果时长:', result.duration)
-    } else {
-      console.warn('后端返回了空结果')
-      isPlaying.value = true // 即使没有返回结果也设置为播放状态
-    }
-
-    // 交叉淡入淡出：逐渐恢复音量
-    if (crossfadeEnabled.value && crossfadeDuration.value > 0) {
-      logInfo('开始交叉淡入淡出效果')
-      const fadeDuration = crossfadeDuration.value * 1000 // 转换为毫秒
-      const steps = 20 // 淡入步骤数
-      const stepDuration = fadeDuration / steps
-      const volumeStep = originalVolume / steps
-      
-      // 逐渐增加音量
-      for (let i = 1; i <= steps; i++) {
-        await new Promise(resolve => setTimeout(resolve, stepDuration))
-        volume.value = volumeStep * i
-        await updateVolume()
+    try {
+      // 停止并清理之前的音频元素
+      if (audioElement.value) {
+        logInfo('停止并清理之前的音频元素')
+        audioElement.value.pause()
+        audioElement.value.currentTime = 0
+        audioElement.value.src = ''
+        audioElement.value.load() // 强制释放资源
+        audioElement.value = null
       }
       
-      // 确保音量恢复到原始值
-      volume.value = originalVolume
-      await updateVolume()
+      // 确保音频元素的src属性正确设置
+      let audioUrl = finalPlayPath
+      if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://')) {
+        try {
+          audioUrl = await invoke('get_file_http_url', { filePath: audioUrl }) as string
+          logInfo('获取HTTP URL成功:', audioUrl)
+        } catch (urlError) {
+          logError('❌ 前端播放: 获取HTTP URL失败:', urlError)
+          errorMessage = '无法获取文件URL: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
+          isPlaying.value = false
+          isPlaybackFinished = true
+          throw new Error(errorMessage)
+        }
+      }
       
-      // 如果之前是静音状态，恢复静音
+      // 创建音频元素并设置src
+      logInfo('前端播放: 使用URL:', audioUrl)
+      
+      audioElement.value = new Audio(audioUrl)
+      // 禁用autoplay，手动控制播放
+      audioElement.value.autoplay = false
+      // 添加timeupdate事件监听器，用于更新播放进度
+      timeupdateHandler = () => {
+        if (isPlaying.value && !isSeeking.value && audioElement.value) {
+          updateProgress()
+        }
+      }
+      audioElement.value.addEventListener('timeupdate', timeupdateHandler)
+      logInfo('创建音频元素并设置src:', audioUrl, 'autoplay:', audioElement.value.autoplay)
+      
+      // 使用用户设置的音量
+      // 注意：如果启用了交叉淡入淡出，volume.value 可能被临时设置为 0
+      // 所以这里应该使用 originalVolume 来设置音频元素的音量
+      let volumeValue = originalVolume / 100
+      // 确保音量值在有效范围内
+      volumeValue = Math.max(0, Math.min(1, volumeValue))
+      audioElement.value.volume = volumeValue
+      logInfo('设置音频元素音量:', volumeValue)
+      
+      // 确保音频元素不是静音状态
       if (isMuted.value) {
-        volume.value = 0
-        await updateVolume()
-        logInfo('交叉淡入淡出后恢复静音状态')
+        audioElement.value.volume = 0
+        logInfo('音频元素已静音')
       }
       
-      logInfo('交叉淡入淡出效果完成，最终音量:', volume.value, '静音状态:', isMuted.value)
-    }
-    
-    // 启动前端进度更新
-    logInfo('前端 播放开始，立即调用 updateProgress')
-    updateProgress()
-    
-    // 重置播放完成标志
-    isPlaybackFinished = false
-    
-    // 启动播放完成检测定时器
-    if (currentSong.value) {
-      const duration = currentSong.value.duration
-      // 只有当时长不是"未知"时才设置播放完成定时器
-      if (duration !== '未知') {
-        const parts = duration.split(':')
-        if (parts.length === 2) {
-          const minutes = parseInt(parts[0])
-          const seconds = parseInt(parts[1])
-          const totalSeconds = minutes * 60 + seconds
-          if (totalSeconds > 0) {
-            logInfo('前端 启动播放完成检测定时器，总时长:', totalSeconds, '秒')
-            // 立即检测一次，确保播放完成检测逻辑正常
-            logInfo('前端 立即检测播放完成状态')
-            const elapsedSeconds = (Date.now() - playbackStartTime.value) / 1000 - pausedDuration.value
-            if (elapsedSeconds >= totalSeconds - 0.5) {
-              logInfo('前端 立即检测到播放完成，调用 handlePlaybackFinished')
-              isPlaying.value = false
-              handlePlaybackFinished()
-            } else {
-              logInfo('前端 立即检测未完成，elapsed:', elapsedSeconds, 'total:', totalSeconds)
-            }
-            // 设置定时器
-            const playbackTimer = setTimeout(() => {
-              logInfo('前端 播放完成检测定时器触发')
-              if (isPlaying.value) {
-                logInfo('前端 检测到播放完成，调用 handlePlaybackFinished')
-                isPlaying.value = false
-                handlePlaybackFinished()
-              }
-            }, (totalSeconds - 0.5) * 1000)
-            
-            // 保存定时器ID，以便在需要时清除
-            playbackTimerId = playbackTimer
+      // 设置音频时长（如果从后端获取到了时长）
+      if (durationFromBackend && durationFromBackend > 0) {
+        // 更新song的时长
+        const totalSeconds = Math.round(durationFromBackend)
+        const minutes = Math.floor(totalSeconds / 60)
+        const seconds = totalSeconds % 60
+        song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+        logDebug('设置音频时长:', song.duration)
+        
+        // 计算进度百分比
+        if (positionForCue >= 0) {
+          const totalSec = minutes * 60 + seconds
+          if (totalSec > 0) {
+            progress.value = Math.min((positionForCue / totalSec) * 100, 100)
+            logDebug('更新进度百分比:', progress.value)
           }
         }
       } else {
-        logInfo('前端 时长为未知，不设置播放完成检测定时器')
+        logInfo('未获取到音频时长，使用默认值')
       }
-    }
-    
-    // 输出一些调试信息
-    logInfo('前端 播放开始调试信息:', {
-      currentSong: currentSong.value?.title,
-      isPlaying: isPlaying.value,
-      playbackStartTime: playbackStartTime.value,
-      pausedDuration: pausedDuration.value
-    })
-    
-    // 自动滚动到当前播放歌曲
-    scrollToCurrentSong()
-    
-    // 预先确定下一首歌曲（用于随机播放模式）
-    if (playbackMode.value === 'random' && songs.value.length > 1) {
-      let nextIndex
-      do {
-        nextIndex = Math.floor(Math.random() * songs.value.length)
-      } while (nextIndex === currentIndex && songs.value.length > 1)
-      randomNextIndex.value = nextIndex
-      logInfo('随机模式：预先确定下一首索引:', nextIndex, '歌曲:', songs.value[nextIndex].title)
-    } else {
-      randomNextIndex.value = null
+      
+      // 现在设置currentSong
+      // 如果是转码后的文件，创建一个新的song对象，更新path属性
+      if (enableTranscode.value && song.needs_transcode) {
+        // 创建转码后的song对象
+        const transcodedSong = {
+          ...song,
+          path: finalPlayPath
+        }
+        currentSong.value = transcodedSong
+        logInfo('转码后更新currentSong，新路径:', finalPlayPath)
+      } else {
+        currentSong.value = song
+      }
+      
+      // 解析歌词
+      if (song.lyric) {
+        logInfo('解析歌词，长度:', song.lyric.length)
+        lyrics.value = parseLyrics(song.lyric)
+        logInfo('歌词解析完成，行数:', lyrics.value.length)
+      } else {
+        logInfo('歌曲无歌词')
+        lyrics.value = []
+      }
+      
+      // 设置播放位置
+      let startTimeToUse = 0
+      let endTimeToUse: number | null = null
+      
+      if (song.isCueTrack) {
+        let startTimeNum = Number(song.startTime)
+        let endTimeNum = Number(song.endTime)
+        // 检查startTimeNum是否是时间戳（毫秒），如果是，转换为秒数
+        if (!isNaN(startTimeNum) && startTimeNum > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+          startTimeNum = startTimeNum / 1000
+          logInfo('检测到CUE track startTime是时间戳，转换为秒数:', startTimeNum, '秒')
+        }
+        // 检查endTimeNum是否是时间戳（毫秒），如果是，转换为秒数
+        if (!isNaN(endTimeNum) && endTimeNum > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+          endTimeNum = endTimeNum / 1000
+          logInfo('检测到CUE track endTime是时间戳，转换为秒数:', endTimeNum, '秒')
+        }
+        if (!isNaN(startTimeNum) && startTimeNum >= 0) {
+          startTimeToUse = startTimeNum
+        }
+        if (!isNaN(endTimeNum) && endTimeNum > startTimeToUse) {
+          endTimeToUse = endTimeNum
+        }
+        logInfo('CUE track前端播放设置: startTime=' + startTimeToUse + 's, endTime=' + (endTimeToUse || '无'))
+      } else {
+        if (positionForCue > 0) {
+          startTimeToUse = positionForCue
+        }
+      }
+      
+      // 等待音频元素加载完成后再播放
+      if (autoPlay) {
+        await new Promise<void>((resolve) => {
+          // 保存当前音频元素的引用，避免被其他操作修改
+          const currentAudioElement = audioElement.value
+          
+          // 检查音频元素是否为null
+          if (!currentAudioElement) {
+            logError('音频元素为null，无法继续播放')
+            resolve()
+            return
+          }
+          
+          // 添加标志，确保oncanplay只执行一次
+          let canplayExecuted = false
+          
+          // 等待音频元素加载完成后再播放
+          currentAudioElement.oncanplay = async () => {
+            // 确保只执行一次
+            if (canplayExecuted) {
+              logInfo('oncanplay事件已执行过，忽略重复触发')
+              return
+            }
+            canplayExecuted = true
+          
+            // 检查音频元素是否为null或已被替换
+            if (!audioElement.value || audioElement.value !== currentAudioElement) {
+              logInfo('音频元素已被清理或替换，oncanplay事件处理被忽略')
+              resolve()
+              return
+            }
+          
+            // 检查音频元素的src属性是否为空
+            if (!audioElement.value.src) {
+              logInfo('音频元素src属性为空，oncanplay事件处理被忽略')
+              resolve()
+              return
+            }
+          
+            try {
+              // 设置播放位置
+              audioElement.value.currentTime = startTimeToUse
+              
+              // 播放音频
+              try {
+                await audioElement.value.play()
+                logInfo('✅ 前端播放开始，位置:', startTimeToUse, '秒')
+                
+                // 只有播放成功时才设置播放状态为true
+                if (autoPlay) {
+                  isPlaying.value = true
+                }
+              } catch (playError) {
+                logError('播放请求失败:', playError)
+                // 忽略中断错误和自动播放策略错误
+                if (!String(playError).includes('interrupted') && !String(playError).includes('autoplay') && !String(playError).includes('NotAllowedError')) {
+                  // 只记录错误，不抛出，避免清理音频元素
+                  logError('严重播放错误:', playError)
+                }
+                // 播放失败时不设置播放状态为true
+                if (autoPlay) {
+                  isPlaying.value = false
+                }
+              } finally {
+                // 无论播放成功还是失败，都设置播放开始时间，以便进度计算
+                let adjustedStartTimeToUse = startTimeToUse
+                if (adjustedStartTimeToUse > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+                  adjustedStartTimeToUse = adjustedStartTimeToUse / 1000
+                }
+                playbackStartTime.value = Date.now() - (adjustedStartTimeToUse * 1000)
+                logInfo('设置播放开始时间:', playbackStartTime.value, '开始位置:', adjustedStartTimeToUse, '秒')
+              }
+              
+              resolve()
+            } catch (playError) {
+              logError('播放请求失败:', playError)
+              // 检查音频元素是否为null或已被替换
+              if (!audioElement.value || audioElement.value !== currentAudioElement) {
+                logInfo('音频元素已被清理或替换，错误处理被忽略')
+                resolve()
+                return
+              }
+              // 检查音频元素的src属性是否为空
+              if (!audioElement.value.src) {
+                logInfo('音频元素src属性为空，错误处理被忽略')
+                resolve()
+                return
+              }
+              // 发生错误时设置播放状态为false
+              if (autoPlay) {
+                isPlaying.value = false
+              }
+              resolve()
+            }
+          }
+        
+        // 处理错误
+        currentAudioElement.onerror = (event) => {
+          // 检查音频元素是否为null或已被替换
+          if (!audioElement.value || audioElement.value !== currentAudioElement) {
+            logInfo('音频元素已被清理或替换，onerror事件处理被忽略')
+            resolve()
+            return
+          }
+          
+          // 获取更详细的错误信息
+          const error = event.target.error
+          logError('音频元素错误:', event)
+          if (error) {
+            logError('音频错误详情: code=', error.code, 'message=', error.message)
+            
+            // 针对不同类型的错误提供更具体的处理
+            switch(error.code) {
+              case error.MEDIA_ERR_ABORTED:
+                logError('音频加载被中止: 可能是用户中断了加载过程')
+                // 可以尝试重新加载
+                break
+              case error.MEDIA_ERR_NETWORK:
+                logError('网络错误导致音频加载失败: 检查网络连接或文件服务器')
+                // 可以尝试重新加载或切换到备用源
+                break
+              case error.MEDIA_ERR_DECODE:
+                logError('音频解码失败: 音频文件可能损坏或格式不被支持')
+                // 可以尝试转码或使用其他播放器
+                break
+              case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+                logError('音频格式不支持: 当前浏览器不支持此音频格式')
+                // 可以尝试转码为支持的格式
+                break
+              default:
+                logError('未知音频错误: 请检查音频文件和播放环境')
+            }
+            
+            // 针对特定错误类型的处理策略
+            if (error.code === error.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+              logInfo('尝试启用转码来处理不支持的格式')
+              // 可以在这里触发转码逻辑
+            }
+          }
+          // 只记录错误，不设置播放状态为false，避免清理音频元素
+          logInfo('音频元素错误，继续执行')
+          resolve()
+        }
+        
+        // 检查音频元素是否已经加载完成
+        if (currentAudioElement.readyState >= 3) {
+          // 音频已经加载完成
+          logInfo('前端播放: 音频元素已加载完成')
+          logInfo('音频元素状态: src=', currentAudioElement.src, 'readyState=', currentAudioElement.readyState, 'networkState=', currentAudioElement.networkState)
+          
+          // 设置播放位置
+          currentAudioElement.currentTime = startTimeToUse
+          logInfo('设置播放位置后: currentTime=', currentAudioElement.currentTime)
+          
+          if (autoPlay) {
+            // 播放音频
+            currentAudioElement.play()
+              .then(() => {
+                // 检查音频元素是否为null或已被替换
+                if (!audioElement.value || audioElement.value !== currentAudioElement) {
+                  logInfo('音频元素已被清理或替换，播放成功处理被忽略')
+                  resolve()
+                  return
+                }
+                
+                logInfo('✅ 前端播放开始，位置:', startTimeToUse, '秒')
+                logInfo('播放后音频元素状态: currentTime=', audioElement.value.currentTime, 'volume=', audioElement.value.volume, 'paused=', audioElement.value.paused)
+                
+                // 设置播放开始时间，用于后续的进度计算
+                // 检查startTimeToUse是否是时间戳（毫秒），如果是，转换为秒数
+                let adjustedStartTimeToUse = startTimeToUse
+                if (adjustedStartTimeToUse > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+                  adjustedStartTimeToUse = adjustedStartTimeToUse / 1000
+                  logInfo('检测到时间戳，转换为秒数:', adjustedStartTimeToUse, '秒')
+                }
+                playbackStartTime.value = Date.now() - (adjustedStartTimeToUse * 1000)
+                logInfo('设置播放开始时间:', playbackStartTime.value, '开始位置:', adjustedStartTimeToUse, '秒')
+                
+                isPlaying.value = true
+                resolve()
+              })
+              .catch((playError) => {
+                logError('播放请求失败:', playError)
+                // 忽略中断错误和自动播放策略错误
+                // 即使播放请求被中断，也要设置播放开始时间
+                // 检查startTimeToUse是否是时间戳（毫秒），如果是，转换为秒数
+                let adjustedStartTimeToUse = startTimeToUse
+                if (adjustedStartTimeToUse > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+                  adjustedStartTimeToUse = adjustedStartTimeToUse / 1000
+                  logInfo('检测到时间戳，转换为秒数:', adjustedStartTimeToUse, '秒')
+                }
+                playbackStartTime.value = Date.now() - (adjustedStartTimeToUse * 1000)
+                logInfo('设置播放开始时间:', playbackStartTime.value, '开始位置:', adjustedStartTimeToUse, '秒')
+                // 尝试再次播放，可能用户已经交互过
+                setTimeout(async () => {
+                  // 检查音频元素是否为null或已被替换
+                  if (!audioElement.value || audioElement.value !== currentAudioElement) {
+                    logInfo('音频元素已被清理或替换，延迟播放被忽略')
+                    return
+                  }
+                  
+                  try {
+                    await audioElement.value.play()
+                    logInfo('✅ 延迟播放成功')
+                    isPlaying.value = true
+                  } catch (e) {
+                    logError('延迟播放也失败:', e)
+                  }
+                }, 100)
+                resolve()
+              })
+          } else {
+            // 当autoPlay为false时，确保音频元素处于暂停状态
+            try {
+              currentAudioElement.pause()
+              logInfo('当autoPlay为false时，确保音频元素处于暂停状态')
+            } catch (pauseError) {
+              logError('暂停音频元素失败:', pauseError)
+            }
+            resolve()
+          }
+        }
+})
+      } else {
+        // 当autoPlay为false时，直接继续执行，不需要resolve
+        // 确保音频元素处于暂停状态
+        if (audioElement.value) {
+          try {
+            audioElement.value.pause()
+            logInfo('当autoPlay为false时，确保音频元素处于暂停状态')
+          } catch (pauseError) {
+            logError('暂停音频元素失败:', pauseError)
+          }
+        }
+        
+        // 当autoPlay为false时，也要设置播放开始时间，以便后续手动播放时的进度计算
+        let adjustedStartTimeToUse = startTimeToUse
+        if (adjustedStartTimeToUse > 9999999999) { // 如果大于10位数字，认为是毫秒级时间戳
+          adjustedStartTimeToUse = adjustedStartTimeToUse / 1000
+        }
+        playbackStartTime.value = Date.now() - (adjustedStartTimeToUse * 1000)
+        logInfo('设置播放开始时间:', playbackStartTime.value, '开始位置:', adjustedStartTimeToUse, '秒')
+      }
+      
+      // 检查音频元素是否为null
+      if (audioElement.value) {
+        audioElement.value.onended = () => {
+          logInfo('前端播放结束')
+          isPlaybackFinished = true
+          // 触发播放完成事件
+          if (autoPlayNext.value) {
+            playNext()
+          } else if (autoPlay) {
+            isPlaying.value = false
+          }
+        }
+        
+        // 对于CUE track，添加结束时间检测
+        if (song.isCueTrack && endTimeToUse) {
+          const checkEndTime = () => {
+            if (audioElement.value && audioElement.value.currentTime >= endTimeToUse - 0.5) { // 增加缓冲时间
+              logInfo('CUE track达到结束时间，准备停止播放')
+              logInfo('CUE track结束时间检测: currentTime=', audioElement.value.currentTime, 'endTimeToUse=', endTimeToUse)
+              
+              // 等待一小段时间，确保音频播放完成
+              setTimeout(() => {
+                if (audioElement.value && isPlaying.value) {
+                  logInfo('CUE track确认结束，停止播放')
+                  audioElement.value.pause()
+                  isPlaybackFinished = true
+                  if (autoPlay) {
+                    isPlaying.value = false
+                  }
+                  if (autoPlayNext.value) {
+                    playNext()
+                  }
+                }
+              }, 500) // 500毫秒缓冲
+            } else if (isPlaying.value) {
+              setTimeout(checkEndTime, 100)
+            }
+          }
+          checkEndTime()
+        }
+      }
+      
+      // 启动前端进度更新
+      if (autoPlay) {
+        updateProgress()
+      }
+      
+      // 交叉淡入淡出：逐渐恢复音量
+      if (autoPlay && crossfadeEnabled.value && crossfadeDuration.value > 0) {
+        const fadeDuration = crossfadeDuration.value * 1000 // 转换为毫秒
+        const steps = 20 // 淡入步骤数
+        const stepDuration = fadeDuration / steps
+        
+        // 注意：这里直接操作音频元素的音量，而不是 volume.value
+        // 这样用户在 UI 上看到的音量值就不会受到交叉淡入淡出的影响
+        if (audioElement.value) {
+          // 先将音频元素的音量设置为 0
+          audioElement.value.volume = 0
+          
+          // 逐渐增加音频元素的音量
+          for (let i = 1; i <= steps; i++) {
+            await new Promise(resolve => setTimeout(resolve, stepDuration))
+            const currentVolume = (originalVolume * i) / (steps * 100)
+            if (audioElement.value) {
+              audioElement.value.volume = currentVolume
+            }
+          }
+          
+          // 确保音频元素的音量恢复到原始值
+          audioElement.value.volume = originalVolume / 100
+          
+          // 如果之前是静音状态，恢复静音
+          if (isMuted.value) {
+            audioElement.value.volume = 0
+          }
+        }
+      } else {
+        // 没有启用交叉淡入淡出，确保音频元素的音量设置正确
+        if (audioElement.value) {
+          const volumeValue = originalVolume / 100
+          audioElement.value.volume = volumeValue
+        }
+      }
+      
+      // 重置播放完成标志
+      isPlaybackFinished = false
+      
+      // 启动播放完成检测定时器
+      if (currentSong.value) {
+        const duration = currentSong.value!.duration
+        // 只有当时长不是"未知"时才设置播放完成检测定时器
+        if (duration !== '未知') {
+          const parts = duration.split(':')
+          if (parts.length === 2) {
+            const minutes = parseInt(parts[0])
+            const seconds = parseInt(parts[1])
+            const totalSeconds = minutes * 60 + seconds
+            if (totalSeconds > 0) {
+              // 立即检测一次，确保播放完成检测逻辑正常
+              const elapsedSeconds = (Date.now() - playbackStartTime.value) / 1000 - pausedDuration.value
+              // 只有当elapsedSeconds大于0且接近总时长时才认为播放完成
+              if (elapsedSeconds > 0 && elapsedSeconds >= totalSeconds - 0.5) {
+                if (autoPlay) {
+                  isPlaying.value = false
+                }
+                handlePlaybackFinished(autoPlay)
+              }
+              // 设置定时器，使用稍长的时间，确保歌曲真正完成
+              const playbackTimer = setTimeout(() => {
+                if (isPlaying.value) {
+                  // 再次检查实际播放位置，确保确实接近结束
+                  let actualPosition = 0
+                  if (audioElement.value && !isNaN(audioElement.value.currentTime)) {
+                    actualPosition = audioElement.value.currentTime
+                  } else {
+                    actualPosition = (Date.now() - playbackStartTime.value) / 1000 - pausedDuration.value
+                  }
+                  
+                  // 对于CUE track，需要转换为相对位置
+                  let positionInSeconds = actualPosition
+                  if (currentSong.value && currentSong.value.isCueTrack && currentSong.value.startTime) {
+                    const startTimeNum = Number(currentSong.value.startTime)
+                    positionInSeconds = actualPosition - startTimeNum
+                    if (positionInSeconds < 0) positionInSeconds = 0
+                  }
+                  
+                  // 只有当实际位置接近总时长时才认为播放完成
+                  if (positionInSeconds >= totalSeconds - 1) {
+                    if (autoPlay) {
+                      isPlaying.value = false
+                    }
+                    handlePlaybackFinished(autoPlay)
+                  }
+                }
+              }, (totalSeconds + 2) * 1000) // 增加2秒缓冲，确保歌曲真正完成
+              
+              // 保存定时器ID，以便在需要时清除
+              playbackTimerId = playbackTimer
+            }
+          }
+        }
+      }
+      
+      // 自动滚动到当前播放歌曲
+      scrollToCurrentSong()
+      
+      // 预先确定下一首歌曲（用于随机播放模式）
+      if (playbackMode.value === 'random' && songs.value.length > 1) {
+        let nextIndex
+        do {
+          nextIndex = Math.floor(Math.random() * songs.value.length)
+        } while (nextIndex === currentIndex && songs.value.length > 1)
+        randomNextIndex.value = nextIndex
+        logInfo('随机模式：预先确定下一首索引:', nextIndex, '歌曲:', songs.value[nextIndex].title)
+      } else {
+        randomNextIndex.value = null
+      }
+      
+      return
+    } catch (error) {
+      logError('前端播放失败:', error)
+      if (autoPlay) {
+        isPlaying.value = false
+      }
+      isPlaybackFinished = true
+      throw error
     }
   } catch (error) {
     logError('播放歌曲失败:', error)
-    // 检查是否是转码相关的错误
-    const errorMessage = error && typeof error === 'string' ? error : ''
+    logError('播放歌曲失败详情:', typeof error, error)
+    if (autoPlay) {
+      isPlaying.value = false
+    }
+    isPlaybackFinished = true
+    if (audioElement.value && timeupdateHandler) {
+      try {
+        if (autoPlay) {
+          audioElement.value.pause()
+        }
+        audioElement.value.removeEventListener('timeupdate', timeupdateHandler)
+        // 清理其他事件监听器
+        audioElement.value.oncanplay = null
+        audioElement.value.onerror = null
+        audioElement.value.onended = null
+        audioElement.value.src = ''
+      } catch (cleanupError) {
+        logError('清理音频元素失败:', cleanupError)
+      } finally {
+        audioElement.value = null
+        timeupdateHandler = null
+      }
+    }
+    
+    const errorMessage = error && typeof error === 'string' ? error : (error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error))
+    logError('❌ 播放失败:', errorMessage)
+    
     if (errorMessage.includes('FFmpeg') || errorMessage.includes('转码')) {
       logInfo('转码相关错误，静默处理并尝试播放下一首')
-      // 转码错误，不显示错误信息，自动尝试播放下一首
-      isPlaying.value = false
-      // 延迟500ms后尝试播放下一首
-      setTimeout(async () => {
+      if (autoPlayNext.value && songs.value.length > 1) {
+        logInfo('转码失败，自动跳到下一首')
+        await playNext()
+      }
+    } else {
+      if (errorMessage.includes('不存在') || errorMessage.includes('无法读取')) {
+        logInfo('文件不存在或无法读取:', errorMessage)
         if (autoPlayNext.value && songs.value.length > 1) {
-          logInfo('转码失败，自动跳到下一首')
+          logInfo('文件不存在，自动跳到下一首')
           await playNext()
         }
-      }, 500)
-    } else {
-      // 其他错误，显示提示
-      alert(`播放失败：${error} \n请确认音频文件存在且格式受支持`)
-      isPlaying.value = false
-      // 延迟500ms后尝试播放下一首
-      setTimeout(async () => {
+      } else {
+        if (autoPlay) {
+          alert(`播放失败：${errorMessage}\n请确认音频文件存在且格式受支持`)
+        }
         if (autoPlayNext.value && songs.value.length > 1) {
           logInfo('播放失败，自动跳到下一首')
           await playNext()
         }
-      }, 500)
+      }
     }
   } finally {
     // 释放锁定
@@ -1440,7 +2344,18 @@ const playSong = async (song: Song, position: number = 0) => {
   }
 }
 
+// 播放状态锁，避免快速点击导致的操作竞态
+let isToggling = false
+
 const togglePlayback = async () => {
+  // 防止快速连续点击导致的操作竞态
+  if (isToggling) {
+    logInfo('播放操作正在进行中，忽略重复点击')
+    return
+  }
+  
+  isToggling = true
+  
   try {
     logInfo('togglePlayback 被调用,当前 isPlaying:', isPlaying.value)
     
@@ -1457,10 +2372,21 @@ const togglePlayback = async () => {
       // 记录暂停开始时间
       pauseStartTime.value = Date.now()
       logInfo('暂停开始时间:', pauseStartTime.value)
-      await invoke('pause_song')
+      
+      // 暂停前端音频元素
+      if (audioElement.value) {
+        audioElement.value.pause()
+      }
+      
       isPlaying.value = false
     } else {
       logInfo('恢复播放')
+      // 检查音频元素是否存在
+      if (!audioElement.value) {
+        logError('没有音频元素，无法恢复播放')
+        return
+      }
+      
       // 计算暂停的持续时间
       if (pauseStartTime.value) {
         const pauseDuration = (Date.now() - pauseStartTime.value) / 1000
@@ -1471,8 +2397,25 @@ const togglePlayback = async () => {
       // 更新开始播放的时间，减去已经播放的时间
       playbackStartTime.value = Date.now() - (currentPosition.value * 1000)
       logInfo('恢复播放，更新播放开始时间:', playbackStartTime.value)
-      await invoke('resume_song')
-      isPlaying.value = true
+      
+      // 恢复前端音频元素
+      try {
+        await audioElement.value.play()
+        logInfo('✅ 恢复播放成功')
+        isPlaying.value = true
+      } catch (playError) {
+        logError('恢复播放失败:', playError)
+        // 忽略中断错误和自动播放策略错误
+        if (String(playError).includes('interrupted') || String(playError).includes('AbortError')) {
+          logInfo('播放被中断，忽略错误')
+          return
+        }
+        if (String(playError).includes('autoplay') || String(playError).includes('NotAllowedError')) {
+          logInfo('自动播放策略限制，可能需要用户交互')
+          return
+        }
+        throw playError
+      }
     }
     
     logInfo('togglePlayback 完成,新 isPlaying:', isPlaying.value)
@@ -1480,6 +2423,10 @@ const togglePlayback = async () => {
     logError('切换播放状态失败:', error)
     const errorMessage = error && typeof error === 'string' ? error : '未知错误'
     alert(`播放控制失败：${errorMessage}`)
+  } finally {
+    // 释放锁
+    isToggling = false
+    logInfo('播放操作锁已释放')
   }
 }
 
@@ -1491,7 +2438,7 @@ const playPrevious = async () => {
     
     // 如果当前播放进度超过3秒,重新播放当前歌曲
     if (currentPosition.value > 3 && currentSong.value) {
-      await playSong(currentSong.value)
+      await playSong(currentSong.value, 0, undefined, undefined, false)
       return
     }
     
@@ -1503,7 +2450,8 @@ const playPrevious = async () => {
       currentIndex = (currentIndex - 1 + songs.value.length) % songs.value.length
     }
     
-    await playSong(songs.value[currentIndex])
+    await playSong(songs.value[currentIndex], 0, undefined, undefined, false)
+    logInfo('已跳到上一首，保持暂停状态')
   } catch (error) {
     logError('播放上一首失败:', error)
   }
@@ -1627,7 +2575,8 @@ const playNext = async () => {
     }
 
     logInfo('准备播放下一首:', songs.value[targetIndex].title)
-    await playSong(songs.value[targetIndex])
+    await playSong(songs.value[targetIndex], 0, undefined, undefined, true)
+    logInfo('已跳到下一首并开始播放')
   } catch (error) {
     logError('播放下一首失败:', error)
   }
@@ -1657,33 +2606,41 @@ const extractInfoFromFileName = (fileName: string): { artist: string; album: str
   // 常见格式：艺术家 - 歌曲名
   // 或者：艺术家 - 专辑 - 歌曲名
   const parts = fileName.split('-').map(part => part.trim())
-  
+
   if (parts.length >= 2) {
     return {
       artist: parts[0],
       album: parts.length >= 3 ? parts[1] : ''
     }
   }
-  
+
   return {
     artist: '',
     album: ''
   }
 }
 
+
 // 获取显示的歌曲标题
 const getDisplayTitle = (song: Song): string => {
   // 定义常见的音频文件扩展名
   const audioExtensions = ['mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a', 'ape', 'dsd', 'dts', 'wma', 'opus']
-  
+
   // 检查标题是否只是一个文件扩展名
   if (song.title && audioExtensions.includes(song.title.toLowerCase())) {
     // 如果标题只是扩展名，使用文件名（不含后缀）
     return getFileNameWithoutExtension(song.path)
   }
-  
-  // 否则使用标题或文件名
-  return song.title || getFileNameWithoutExtension(song.path)
+
+  // 去掉标题后面的时间信息（格式：::开始时间::结束时间）
+  let displayTitle = song.title || getFileNameWithoutExtension(song.path)
+  const parts = displayTitle.split('::')
+  if (parts.length >= 3) {
+    // 如果有至少3个部分，说明包含时间信息，只保留第一部分
+    displayTitle = parts[0]
+  }
+
+  return displayTitle
 }
 
 // 获取显示的艺术家名称
@@ -1731,7 +2688,10 @@ const toggleMute = async () => {
 
 const updateVolume = async () => {
   try {
-    await invoke('set_volume', { volume: volume.value })
+    // 控制前端音频元素的音量
+    if (audioElement.value) {
+      audioElement.value.volume = volume.value / 100 // 转换为0-1范围
+    }
   } catch (error) {
     logError('设置音量失败:', error)
   }
@@ -1742,67 +2702,304 @@ let wasPlayingBeforeSeek = false
 
 const handleSeeking = () => {
   // 用户正在拖动进度条
+  console.log('【SEEK】========== handleSeeking 触发 ==========')
+  console.log('【SEEK】progress.value:', progress.value)
+  console.log('【SEEK】isSeeking.value:', isSeeking.value)
+  console.log('【SEEK】isPlaying.value:', isPlaying.value)
+  console.log('【SEEK】audioElement.value:', audioElement.value)
+  if (audioElement.value) {
+    console.log('【SEEK】audioElement.currentTime:', audioElement.value.currentTime)
+    console.log('【SEEK】audioElement.duration:', audioElement.value.duration)
+    console.log('【SEEK】audioElement.paused:', audioElement.value.paused)
+  }
   logInfo('用户正在拖动进度条, progress.value:', progress.value)
-  
+
   // 记录拖动前的播放状态
   if (!isSeeking.value) {
     wasPlayingBeforeSeek = isPlaying.value
     logInfo('记录拖动前播放状态:', wasPlayingBeforeSeek)
+    console.log('【SEEK】设置 wasPlayingBeforeSeek =', wasPlayingBeforeSeek)
   }
-  
-  isSeeking.value = true
+
+  // 只有在有音频元素时才设置isSeeking为true
+  if (audioElement.value) {
+    isSeeking.value = true
+    console.log('【SEEK】设置 isSeeking.value = true')
+  } else {
+    console.log('【SEEK】音频元素为null，不设置isSeeking为true')
+  }
+  console.log('【SEEK】========== handleSeeking 结束 ==========')
 }
 
+// seek函数：处理进度条定位
 const seek = async () => {
-  isSeeking.value = true
-  logInfo('seek 被调用, progress.value:', progress.value, '拖动前播放状态:', wasPlayingBeforeSeek)
+  console.log('【SEEK】========== seek 函数开始 ==========')
+  console.log('【SEEK】progress.value:', progress.value, '%')
+  console.log('【SEEK】isPlaying.value:', isPlaying.value)
+  console.log('【SEEK】isSeeking.value:', isSeeking.value)
+  console.log('【SEEK】wasPlayingBeforeSeek:', wasPlayingBeforeSeek)
+  console.log('【SEEK】currentSong.value:', currentSong.value)
+  console.log('【SEEK】audioElement.value:', audioElement.value)
+  logInfo('【SEEK】seek函数被调用, progress.value:', progress.value, '%, isPlaying:', isPlaying.value)
 
-  try {
+  // 保存对 audioElement 的引用，防止在 seek 过程中被清理
+  const audioElementRef = audioElement.value
+  if (!audioElementRef) {
+    console.log('【SEEK】❌ 没有音频元素，无法定位')
+    logInfo('【SEEK】没有音频元素，无法定位')
+    
+    // 即使没有音频元素，也要更新播放状态和进度
     if (currentSong.value) {
-      // 如果时长为"未知"，不允许拖动进度条
-      if (currentSong.value.duration === '未知') {
-        logInfo('时长为未知，不允许拖动进度条')
-        isSeeking.value = false
-        return
-      }
-      
-      // 计算实际的播放位置（秒）
+      // 解析时长格式 "mm:ss"
       const parts = currentSong.value.duration.split(':')
       if (parts.length === 2) {
         const minutes = parseInt(parts[0])
         const seconds = parseInt(parts[1])
         const totalSeconds = minutes * 60 + seconds
+        
         if (totalSeconds > 0) {
-          const actualPosition = (progress.value / 100) * totalSeconds
-
-          logInfo('seek 计算位置: progress=' + progress.value + '%, totalSeconds=' + totalSeconds + ', actualPosition=' + actualPosition + 's')
-
-          // 重新播放歌曲，从指定位置开始
-          logInfo('重新播放歌曲，从指定位置开始:', actualPosition, '秒')
+          // 计算目标位置（秒）
+          const clampedProgress = Math.min(Math.max(progress.value, 0), 100)
+          const relativePosition = (clampedProgress / 100) * totalSeconds
+          let actualPosition = relativePosition
           
-          // 保存当前播放状态
-          const wasPlaying = isPlaying.value
-          
-          // 重新调用playSong，传入位置参数
-          await playSong(currentSong.value, actualPosition)
-          
-          // 如果之前在播放，确保继续播放
-          if (wasPlaying && !isPlaying.value) {
-            logInfo('恢复播放状态')
-            isPlaying.value = true
+          // 对于CUE track，将相对位置转换为绝对位置
+          if (currentSong.value.isCueTrack && currentSong.value.startTime) {
+            const startTimeNum = Number(currentSong.value.startTime)
+            if (!isNaN(startTimeNum) && startTimeNum >= 0) {
+              actualPosition = startTimeNum + relativePosition
+              
+              // 确保不超出CUE track的范围
+              if (currentSong.value.endTime) {
+                const endTimeNum = Number(currentSong.value.endTime)
+                if (!isNaN(endTimeNum) && endTimeNum > 0 && actualPosition > endTimeNum) {
+                  actualPosition = endTimeNum
+                }
+              }
+              if (actualPosition < startTimeNum) {
+                actualPosition = startTimeNum
+              }
+            }
           }
+          
+          // 更新进度相关变量
+          playbackStartTime.value = Date.now() - (actualPosition * 1000)
+          currentPosition.value = actualPosition
+          progress.value = clampedProgress
+          logInfo('【SEEK】没有音频元素，更新进度变量: currentPosition=', actualPosition, 's, progress=', progress.value, '%')
         }
       }
     }
+    
+    // 重置标志，防止播放状态被锁定
+    isSeeking.value = false
+    wasPlayingBeforeSeek = false
+    return
+  }
+
+  try {
+    // 如果没有当前歌曲，不执行定位
+    if (!currentSong.value) {
+      console.log('【SEEK】❌ 没有当前歌曲，不执行定位')
+      logInfo('【SEEK】没有当前歌曲，不执行定位')
+      return
+    }
+
+    console.log('【SEEK】currentSong.duration:', currentSong.value.duration)
+    console.log('【SEEK】currentSong.isCueTrack:', currentSong.value.isCueTrack)
+
+    // 如果时长为"未知"，不允许拖动进度条
+    if (currentSong.value.duration === '未知') {
+      console.log('【SEEK】❌ 时长为未知，不允许拖动进度条')
+      logInfo('【SEEK】时长为未知，不允许拖动进度条')
+      return
+    }
+
+    // 解析时长格式 "mm:ss"
+    const parts = currentSong.value.duration.split(':')
+    console.log('【SEEK】解析时长 parts:', parts)
+    if (parts.length !== 2) {
+      console.log('【SEEK】❌ 时长格式错误:', currentSong.value.duration)
+      logInfo('【SEEK】时长格式错误:', currentSong.value.duration)
+      return
+    }
+
+    const minutes = parseInt(parts[0])
+    const seconds = parseInt(parts[1])
+    const totalSeconds = minutes * 60 + seconds
+    console.log('【SEEK】totalSeconds:', totalSeconds)
+
+    if (totalSeconds <= 0) {
+      console.log('【SEEK】❌ 总时长为0或负数:', totalSeconds)
+      logInfo('【SEEK】总时长为0或负数:', totalSeconds)
+      return
+    }
+
+    // 如果还没有记录拖动前的播放状态（比如直接点击进度条），现在记录
+    if (!isSeeking.value) {
+      wasPlayingBeforeSeek = isPlaying.value
+      console.log('【SEEK】直接点击进度条，设置 wasPlayingBeforeSeek =', wasPlayingBeforeSeek)
+      logInfo('【SEEK】记录播放状态:', wasPlayingBeforeSeek)
+      isSeeking.value = true
+    }
+
+    // 计算目标位置（秒）
+    const clampedProgress = Math.min(Math.max(progress.value, 0), 100)
+    const relativePosition = (clampedProgress / 100) * totalSeconds
+    let actualPosition = relativePosition
+    console.log('【SEEK】计算位置: clampedProgress =', clampedProgress, '%, relativePosition =', relativePosition, 's')
+
+    // 对于CUE track，将相对位置转换为绝对位置
+    if (currentSong.value.isCueTrack && currentSong.value.startTime) {
+      console.log('【SEEK】处理 CUE track')
+      const startTimeNum = Number(currentSong.value.startTime)
+      console.log('【SEEK】startTimeNum:', startTimeNum)
+      if (isNaN(startTimeNum) || startTimeNum < 0) {
+        console.log('【SEEK】❌ CUE track: 无效的startTime值:', currentSong.value.startTime)
+        logInfo('【SEEK】CUE track: 无效的startTime值:', currentSong.value.startTime)
+        return
+      }
+      actualPosition = startTimeNum + relativePosition
+      console.log('【SEEK】CUE track 计算后 actualPosition =', actualPosition, 's')
+
+      // 确保不超出CUE track的范围
+      if (currentSong.value.endTime) {
+        const endTimeNum = Number(currentSong.value.endTime)
+        console.log('【SEEK】endTimeNum:', endTimeNum)
+        if (!isNaN(endTimeNum) && endTimeNum > 0 && actualPosition > endTimeNum) {
+          actualPosition = endTimeNum
+          console.log('【SEEK】CUE track 限制到结束时间:', actualPosition)
+        }
+      }
+      if (actualPosition < startTimeNum) {
+        actualPosition = startTimeNum
+        console.log('【SEEK】CUE track 限制到开始时间:', actualPosition)
+      }
+      logInfo('【SEEK】CUE track: 相对位置=', relativePosition, 's, 开始时间=', startTimeNum, 's, 绝对位置=', actualPosition, 's')
+    } else {
+      console.log('【SEEK】普通歌曲')
+      logInfo('【SEEK】普通歌曲: 绝对位置=', actualPosition, 's')
+    }
+
+    // 检查音频元素是否仍然存在
+    if (!audioElementRef) {
+      console.log('【SEEK】❌ audioElement 被清理了，无法定位')
+      logInfo('【SEEK】audioElement 被清理了，无法定位')
+      return
+    }
+
+    console.log('【SEEK】audioElementRef.currentTime (设置前):', audioElementRef.currentTime)
+    console.log('【SEEK】audioElementRef.duration:', audioElementRef.duration)
+    console.log('【SEEK】audioElementRef.paused:', audioElementRef.paused)
+    console.log('【SEEK】audioElementRef.readyState:', audioElementRef.readyState)
+    console.log('【SEEK】audioElementRef.networkState:', audioElementRef.networkState)
+    console.log('【SEEK】audioElementRef.src:', audioElementRef.src)
+
+    // 暂时移除timeupdate事件监听器，防止在seek过程中干扰
+    if (timeupdateHandler && audioElementRef) {
+      console.log('【SEEK】移除 timeupdate 事件监听器')
+      audioElementRef.removeEventListener('timeupdate', timeupdateHandler)
+    }
+
+    // 更新进度相关变量
+    playbackStartTime.value = Date.now() - (actualPosition * 1000)
+    currentPosition.value = actualPosition
+    progress.value = clampedProgress
+    console.log('【SEEK】更新变量: playbackStartTime =', playbackStartTime.value, ', currentPosition =', currentPosition.value, ', progress =', progress.value, '%')
+    logInfo('【SEEK】更新完成: playbackStartTime=', playbackStartTime.value, ', currentPosition=', currentPosition.value, ', progress=', progress.value, '%')
+
+    // 设置音频元素的当前位置
+    console.log('【SEEK】准备设置 audioElementRef.currentTime =', actualPosition, 's')
+    logInfo('【SEEK】设置 audioElement.currentTime =', actualPosition, 's')
+
+    // 保存当前播放状态
+    const wasPaused = audioElementRef.paused
+
+    // 直接设置currentTime，不暂停（因为暂停会导致HTTP Range请求问题）
+    console.log('【SEEK】直接设置 currentTime（不暂停）')
+    audioElementRef.currentTime = actualPosition
+
+    // 等待一小段时间让浏览器处理
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    console.log('【SEEK】audioElementRef.currentTime (设置后 100ms):', audioElementRef.currentTime)
+
+    // 如果currentTime设置成功，就继续
+    if (audioElementRef.currentTime > 0) {
+      console.log('【SEEK】✅ currentTime 设置成功！')
+    } else {
+      console.log('【SEEK】⚠️ currentTime 仍然是 0，可能需要检查服务器配置')
+    }
+
+    // 如果之前在播放，确保继续播放
+    console.log('【SEEK】检查是否需要恢复播放: wasPlayingBeforeSeek =', wasPlayingBeforeSeek)
+    if (wasPlayingBeforeSeek) {
+      console.log('【SEEK】尝试恢复播放')
+      try {
+        console.log('【SEEK】调用 audioElementRef.play()')
+        await audioElementRef.play()
+        console.log('【SEEK】✅ 恢复播放成功')
+        logInfo('【SEEK】恢复播放成功')
+        isPlaying.value = true
+        console.log('【SEEK】设置 isPlaying.value = true')
+      } catch (playError) {
+        console.log('【SEEK】❌ 恢复播放失败:', playError)
+        logInfo('【SEEK】恢复播放失败:', playError)
+      }
+    } else {
+      console.log('【SEEK】不需要恢复播放（之前不在播放）')
+    }
+
+    // 重新添加timeupdate事件监听器
+    if (timeupdateHandler && audioElementRef) {
+      console.log('【SEEK】重新添加 timeupdate 事件监听器')
+      audioElementRef.addEventListener('timeupdate', timeupdateHandler)
+    }
+
+    // 重置标志
+    isSeeking.value = false
+    wasPlayingBeforeSeek = false
+    console.log('【SEEK】重置标志: isSeeking = false, wasPlayingBeforeSeek = false')
+    logInfo('【SEEK】定位完成, isSeeking已重置')
+    console.log('【SEEK】========== seek 函数结束 ==========')
+
   } catch (error) {
-    logError('跳转失败:', error)
-  } finally {
-    // 延迟重置标志,确保seek完成
-    setTimeout(() => {
-      logInfo('seek 完成,重置 isSeeking 标志')
-      isSeeking.value = false
-      wasPlayingBeforeSeek = false
-    }, 300)
+    console.log('【SEEK】❌ 定位失败，错误:', error)
+    logError('【SEEK】定位失败:', error)
+
+    // 出错时也要重新添加timeupdate事件监听器
+    if (timeupdateHandler && audioElementRef) {
+      console.log('【SEEK】出错时重新添加 timeupdate 事件监听器')
+      audioElementRef.addEventListener('timeupdate', timeupdateHandler)
+    }
+
+    isSeeking.value = false
+    wasPlayingBeforeSeek = false
+  }
+}
+
+const scrollToTop = () => {
+  console.log('scrollToTop 函数被调用')
+  console.log('songListContainer.value:', songListContainer.value)
+  if (songListContainer.value) {
+    // 找到实际的滚动容器
+    const scrollableContainer = songListContainer.value.querySelector('.song-list')
+    console.log('实际滚动容器:', scrollableContainer)
+    if (scrollableContainer) {
+      console.log('执行滚动到顶部操作')
+      scrollableContainer.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      })
+    } else {
+      console.log('未找到实际滚动容器，尝试滚动song-list-container')
+      songListContainer.value.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      })
+    }
+  } else {
+    console.log('songListContainer.value 为 null，无法执行滚动操作')
   }
 }
 
@@ -1817,8 +3014,6 @@ const getBandLabel = (index: number) => {
 
 const applyPreset = async () => {
   try {
-    await invoke('apply_equalizer_preset', { presetName: currentPreset.value })
-    
     const presets = {
       flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       rock: [6, 5, 4, 3, 2, -1, -2, -3, -2, 0],
@@ -1834,11 +3029,8 @@ const applyPreset = async () => {
 }
 
 const updateEqualizer = async () => {
-  try {
-    await invoke('set_equalizer', { bands: equalizerBands.value })
-  } catch (error) {
-    logError('设置均衡器失败:', error)
-  }
+  // 前端均衡器目前只存储配置，不实际应用到音频
+  // Web Audio API的均衡器实现较为复杂，暂时仅保存配置
 }
 
 const handleSearch = () => {
@@ -1894,11 +3086,20 @@ const editSongTags = async (song: Song) => {
     genre: song.genre || '',
     fileName: fileName,
     albumArtist: '',
-    trackNumber: '',
+    trackNumber: song.isCueTrack ? (song.trackNumber || (song as any).track_number || '').toString() : '',
     discNumber: '',
     alia: '',
     lyric: lyric,
     cover: song.cover || ''
+  }
+  
+  // 如果是CUE track，添加开始和结束时间信息到备注或其他字段
+  if (song.isCueTrack) {
+    logInfo('CUE track信息:', {
+      trackNumber: song.trackNumber || (song as any).track_number,
+      startTime: song.startTime,
+      endTime: song.endTime
+    })
   }
   logInfo('编辑歌曲标签:', song.title, '封面:', song.cover ? '有' : '无', '歌词:', lyric ? '有' : '无')
   showEditTagsModal.value = true
@@ -1917,14 +3118,16 @@ const openCoverModal = () => {
     showCoverModal.value = true
     logInfo('打开封面模态框')
     
-    // 打开后立即滚动到当前歌词
-    nextTick(() => {
-      scrollToCurrentLyric()
-    })
+    // 打开后等待模态框完全渲染，然后滚动到当前歌词
+    setTimeout(() => {
+      nextTick(() => {
+        scrollToCurrentLyric()
+      })
+    }, 100)
   }
 }
 
-// 滚动到当前歌词
+// 滚动到当前歌词（封面模态框）
 const scrollToCurrentLyric = () => {
   const index = currentLyricIndex.value
   if (index >= 0 && coverLyricsContainer.value) {
@@ -1945,6 +3148,27 @@ const scrollToCurrentLyric = () => {
   }
 }
 
+// 滚动到当前歌词（主界面）
+const scrollToMainCurrentLyric = () => {
+  const index = currentLyricIndex.value
+  if (index >= 0 && mainLyricsContainer.value) {
+    const lineElement = mainLyricLineRefs.value[index]
+    if (lineElement && mainLyricsContainer.value) {
+      const container = mainLyricsContainer.value
+      const lineTop = lineElement.offsetTop
+      const lineHeight = lineElement.offsetHeight
+      const containerHeight = container.clientHeight
+      const scrollTop = lineTop - containerHeight / 2 + lineHeight / 2
+      
+      container.scrollTo({
+        top: Math.max(0, scrollTop),
+        behavior: 'smooth'
+      })
+      logInfo('主界面歌词滚动: 滚动到歌词行', index)
+    }
+  }
+}
+
 // 关闭封面模态框
 const closeCoverModal = () => {
   showCoverModal.value = false
@@ -1958,7 +3182,7 @@ const toggleCoverModalFullscreen = () => {
   isCoverModalFullscreen.value = !isCoverModalFullscreen.value
   if (isCoverModalFullscreen.value) {
     // 全屏时重置位置
-    coverModalPosition.value = {}
+    coverModalPosition.value = { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
   } else {
     // 退出全屏时恢复居中
     coverModalPosition.value = { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
@@ -2337,24 +3561,29 @@ const saveSongTags = async () => {
     }
     
     // 更新歌曲信息
-    const updatedSong = {
+    const updatedSong: Song = {
       ...songToEdit.value,
       ...editTagsForm.value
-    }
+    } as Song
     
     // 找到并更新歌曲列表中的歌曲
     const index = songs.value.findIndex(s => s.id === songToEdit.value?.id)
     if (index !== -1) {
-      songs.value[index] = updatedSong
+      songs.value[index] = updatedSong as Song
     }
     
     // 如果是当前播放的歌曲，也更新当前歌曲信息
-    if (currentSong.value?.id === songToEdit.value.id) {
-      currentSong.value = updatedSong
+    if (currentSong.value?.id === songToEdit.value?.id) {
+      currentSong.value = updatedSong as Song
     }
     
-    // 保存到本地存储
-    await localStorageService.saveSongs(songs.value)
+    // 保存到本地存储（确保类型兼容）
+    const songsToSave = songs.value.map(song => ({
+      ...song,
+      startTime: song.startTime ? String(song.startTime) : undefined,
+      endTime: song.endTime ? String(song.endTime) : undefined
+    })) as import('./stores/local').Song[]
+    await localStorageService.saveSongs(songsToSave)
     
     alert('标签编辑成功')
     closeEditTagsModal()
@@ -2449,40 +3678,30 @@ const formatTime = (seconds: number): string => {
 }
 
 // 解析歌词
-const parseLyrics = (lyricText: string): LyricLine[] => {
+const parseLyrics = (lyricContent: string): LyricLine[] => {
   const lines: LyricLine[] = []
-  // 修改正则表达式，支持[mm:ss]和[mm:ss.sss]格式
-  const regex = /\[(\d{2}):(\d{2}(?:\.\d{2,3})?)\](.*)/g
-  let match
+  if (!lyricContent) return lines
   
-  logInfo('【歌词解析】开始解析歌词，文本长度:', lyricText.length)
-  logInfo('【歌词解析】歌词文本前200字符:', lyricText.substring(0, 200).replace(/\n/g, '\\n'))
+  const lyricLines = lyricContent.split('\n')
+  const timeRegex = /\[(\d+):(\d+\.\d+)\]/g
   
-  let matchCount = 0
-  while ((match = regex.exec(lyricText)) !== null) {
-    matchCount++
-    const minutes = parseInt(match[1])
-    const seconds = parseFloat(match[2])
-    const time = minutes * 60 + seconds
-    const text = match[3].trim()
-    
-    // 只输出前5个匹配，避免日志过多
-    if (matchCount <= 5) {
-      logInfo(`【歌词解析】匹配 #${matchCount}: 时间=${time.toFixed(2)}s, 文本="${text.substring(0, 30)}"`)
+  for (const line of lyricLines) {
+    const matches = [...line.matchAll(timeRegex)]
+    if (matches.length > 0) {
+      const text = line.replace(timeRegex, '').trim()
+      if (text) {
+        for (const match of matches) {
+          const minutes = parseInt(match[1])
+          const seconds = parseFloat(match[2])
+          const time = minutes * 60 + seconds
+          lines.push({ time, text })
+        }
+      }
     }
-    
-    if (text) {
-      lines.push({ time, text })
-    }
-  }
-  
-  if (matchCount > 5) {
-    logInfo(`【歌词解析】... 还有 ${matchCount - 5} 个匹配`)
   }
   
   // 按时间排序
   lines.sort((a, b) => a.time - b.time)
-  logInfo('【歌词解析】解析完成，有效歌词行数:', lines.length)
   return lines
 }
 
@@ -2566,167 +3785,106 @@ const closeWindow = async () => {
 // 预转码标志，防止重复预转码
 let hasPretranscodedNextSong = false
 
-const updateProgress = async () => {
-  updateProgressCallCount++
-  logInfo('【前端】updateProgress 被调用, 次数:', updateProgressCallCount)
-
+const updateProgress = () => {
   try {
-    // 每5秒输出一次,确认定时器在运行
-    if (updateProgressCallCount % 25 === 0) {
-      logInfo('前端 updateProgress 定时器运行中,已调用次数:', updateProgressCallCount, 'isPlaying=', isPlaying.value)
-    }
-
     // 如果未播放或正在拖动进度条,不更新进度
-    if (!isPlaying.value) {
-      if (updateProgressCallCount % 25 === 0) {
-        logInfo('前端 updateProgress: 未播放,跳过更新')
+    if (!isPlaying.value || isSeeking.value) {
+      if (isSeeking.value) {
+        console.log('【UPDATE PROGRESS】跳过更新：isSeeking = true')
+      } else {
+        console.log('【UPDATE PROGRESS】跳过更新：isPlaying = false')
       }
       return
     }
     
-    if (isSeeking.value) {
-      if (updateProgressCallCount % 25 === 0) {
-        logInfo('前端 updateProgress: 正在拖动进度条,跳过更新')
+    // 获取实际播放位置
+    let actualPosition: number
+    let positionInSeconds: number
+
+    // 检查是否正在前端播放
+    if (audioElement.value) {
+      // 检查音频元素是否存在且currentTime有效
+      if (!isNaN(audioElement.value.currentTime)) {
+        // 从前端音频元素获取位置
+        actualPosition = audioElement.value.currentTime
+      } else {
+        // 使用本地计算作为备用
+        const now = Date.now()
+        positionInSeconds = (now - playbackStartTime.value) / 1000 - pausedDuration.value
+        actualPosition = positionInSeconds
       }
-      return
-    }
-    
-    logInfo('前端 updateProgress: 开始获取位置')
-      
-    // 从后端获取实际播放位置，确保前后端状态一致
-    try {
-      const actualPosition = await invoke('get_position') as number
-      logInfo('前端 从后端获取实际位置:', actualPosition, '秒')
-      
-      // 确保位置值不超过歌曲总长度
-      let positionInSeconds = actualPosition
-      let totalSeconds = 0
-      if (currentSong.value) {
-        logInfo('前端 当前歌曲:', currentSong.value.title, 'duration:', currentSong.value.duration)
-        // 如果时长为"未知"，只更新位置，不计算进度百分比
-        if (currentSong.value.duration === '未知') {
-          currentPosition.value = positionInSeconds
-          progress.value = 0
-          logInfo('前端 时长为未知，不计算进度百分比')
-          return
+
+      // 对于CUE track，将绝对位置转换为相对位置
+      if (currentSong.value && currentSong.value.isCueTrack && currentSong.value.startTime) {
+        const startTimeNum = Number(currentSong.value.startTime)
+        positionInSeconds = actualPosition - startTimeNum
+
+        // 确保相对位置不小于0
+        if (positionInSeconds < 0) {
+          positionInSeconds = 0
         }
-        
-        const parts = currentSong.value.duration.split(':')
-        logInfo('前端 duration parts:', parts)
-        if (parts.length === 2) {
-          const minutes = parseInt(parts[0])
-          const seconds = parseInt(parts[1])
-          totalSeconds = minutes * 60 + seconds
-          logInfo('前端 计算总秒数:', totalSeconds, '秒')
-          if (totalSeconds > 0) {
-            // 确保位置值不超过总长度
-            if (positionInSeconds > totalSeconds) {
-              positionInSeconds = totalSeconds
-              logInfo('前端 限制位置值: 从', actualPosition, '秒限制为', positionInSeconds, '秒')
-            }
+        // 确保相对位置不超过CUE track的长度
+        if (currentSong.value.endTime) {
+          const endTimeNum = Number(currentSong.value.endTime)
+          const cueTrackDuration = endTimeNum - startTimeNum
+          if (positionInSeconds > cueTrackDuration) {
+            positionInSeconds = cueTrackDuration
           }
         }
+      } else {
+        // 对于普通歌曲，直接使用音频元素的位置
+        positionInSeconds = actualPosition
       }
-      
-      // 调试播放完成检测
-      if (currentSong.value && currentSong.value.duration !== '未知' && totalSeconds > 0) {
-        logInfo('前端 播放完成检测: positionInSeconds=', positionInSeconds, 'totalSeconds=', totalSeconds, '条件:', positionInSeconds >= totalSeconds - 0.5)
-      }
-
-      // 直接赋值更新
-      currentPosition.value = positionInSeconds
-
-      logInfo('前端 赋值后 currentPosition.value:', currentPosition.value, '类型:', typeof currentPosition.value)
-
-      // 强制触发响应式更新
-      await nextTick()
-
-      // 计算进度百分比
-      if (currentSong.value && currentSong.value.duration !== '未知') {
-        const parts = currentSong.value.duration.split(':')
-        if (parts.length === 2) {
-          const minutes = parseInt(parts[0])
-          const seconds = parseInt(parts[1])
-          const totalSeconds = minutes * 60 + seconds
-          if (totalSeconds > 0) {
-            // 确保进度不会超过100%
-            const calculatedProgress = (positionInSeconds / totalSeconds) * 100
-            progress.value = Math.min(calculatedProgress, 100)
-            logInfo('前端 更新进度: position=' + positionInSeconds.toFixed(1) + 's, total=' + totalSeconds + 's, progress=' + progress.value.toFixed(2) + '%')
-            
-            // 预转码下一首歌曲（在剩余15秒时开始，且启用了转码功能）
-            const remainingTime = totalSeconds - positionInSeconds
-            if (enableTranscode.value && remainingTime <= 15 && !hasPretranscodedNextSong && nextSong.value) {
-              logInfo('[预转码] 剩余时间:', remainingTime.toFixed(1), '秒，开始预转码下一首:', nextSong.value.title)
-              hasPretranscodedNextSong = true
-              
-              // 在后台静默开始转码，不等待结果
-              invoke('pretranscode_audio', { path: nextSong.value.path, force_transcode: forceTranscode.value }).catch((error) => {
-                logError('[预转码] 预转码失败:', error)
-              })
-            }
-          }
-        }
-      }
-
-      // 同步歌词显示
-      syncLyrics()
-
-      // 输出更新后的值和歌词状态
-      logInfo('前端 更新后 currentPosition.value:', currentPosition.value, 'formatTime:', formatTime(currentPosition.value), 'formattedCurrentPosition:', formattedCurrentPosition.value)
-      
-      // 每50次更新输出一次歌词状态
-      if (updateProgressCallCount % 50 === 0 && lyrics.value.length > 0) {
-        logInfo('【歌词状态】歌词总数:', lyrics.value.length, '当前索引:', currentLyricIndex.value, 'showLyrics:', showLyrics.value)
-        if (currentLyricIndex.value >= 0 && currentLyricIndex.value < lyrics.value.length) {
-          logInfo('【歌词状态】当前歌词:', lyrics.value[currentLyricIndex.value].text)
-        }
-      }
-
-      // 尝试直接读取DOM
-      const timeElements = document.querySelectorAll('.progress-info span')
-      if (timeElements.length > 0) {
-        logInfo('DOM中的时间显示:', timeElements[0].textContent)
-      }
-    } catch (error) {
-      logError('从后端获取位置失败,使用本地计算:', error)
-      // 备用方案：使用本地计算
+    } else {
+      // 使用本地计算作为备用
       const now = Date.now()
-      const elapsedSeconds = (now - playbackStartTime.value) / 1000 - pausedDuration.value
+      positionInSeconds = (now - playbackStartTime.value) / 1000 - pausedDuration.value
+      actualPosition = positionInSeconds
+    }
+    
+    if (currentSong.value) {
+      // 如果时长为"未知"，只更新位置，不计算进度百分比
+      if (currentSong.value.duration === '未知') {
+        currentPosition.value = positionInSeconds
+        progress.value = 0
+        return
+      }
       
-      let positionInSeconds = elapsedSeconds
-      let totalSeconds = 0
-      if (currentSong.value) {
-        // 如果时长为"未知"，只更新位置，不计算进度百分比
-        if (currentSong.value.duration === '未知') {
-          currentPosition.value = positionInSeconds
-          progress.value = 0
-          syncLyrics()
-          return
-        }
+      const parts = currentSong.value.duration.split(':')
+      if (parts.length === 2) {
+        const minutes = parseInt(parts[0])
+        const seconds = parseInt(parts[1])
+        const totalSeconds = minutes * 60 + seconds
         
-        const parts = currentSong.value.duration.split(':')
-        if (parts.length === 2) {
-          const minutes = parseInt(parts[0])
-          const seconds = parseInt(parts[1])
-          totalSeconds = minutes * 60 + seconds
-          if (totalSeconds > 0) {
-            if (positionInSeconds > totalSeconds) {
-              positionInSeconds = totalSeconds
-            }
+        if (totalSeconds > 0) {
+          // 确保位置值不超过总长度
+          if (positionInSeconds > totalSeconds) {
+            positionInSeconds = totalSeconds
+          }
+          
+          // 计算进度百分比
+          const calculatedProgress = (positionInSeconds / totalSeconds) * 100
+          progress.value = Math.min(calculatedProgress, 100)
+          
+          // 预转码下一首歌曲（在剩余20秒时开始，且启用了转码功能）
+          const remainingTime = totalSeconds - positionInSeconds
+          if (enableTranscode.value && remainingTime <= 20 && !hasPretranscodedNextSong && nextSong.value) {
+            hasPretranscodedNextSong = true
+            
+            // 在后台静默开始转码，不等待结果
+            invoke('pretranscode_audio', { path: nextSong.value.path, force_transcode: forceTranscode.value }).catch((error) => {
+              logError('[预转码] 预转码失败:', error)
+            })
           }
         }
       }
-      
-      currentPosition.value = positionInSeconds
-      
-      if (currentSong.value && totalSeconds > 0) {
-        const calculatedProgress = (positionInSeconds / totalSeconds) * 100
-        progress.value = Math.min(calculatedProgress, 100)
-      }
-      
-      syncLyrics()
     }
+    
+    // 直接赋值更新
+    currentPosition.value = positionInSeconds
+
+    // 同步歌词显示
+    syncLyrics()
   } catch (error) {
     logError('更新进度失败:', error)
   }
@@ -2738,7 +3896,7 @@ let isPlaybackFinished = false
 // 播放完成检测定时器ID
 let playbackTimerId: number | null = null
 
-const handlePlaybackFinished = async () => {
+const handlePlaybackFinished = async (autoPlay: boolean = true) => {
   // 防止重复触发
   if (isPlaybackFinished) {
     logInfo('前端 播放完成事件已处理,跳过')
@@ -2754,9 +3912,15 @@ const handlePlaybackFinished = async () => {
     playbackTimerId = null
   }
   
+  // 重置预转码标志，以便下一首歌曲播放时能够再次触发预转码
+  hasPretranscodedNextSong = false
+  logInfo('前端 重置预转码标志')
+  
   // 立即设置播放状态为false,防止重复触发
-  isPlaying.value = false
-  logInfo('前端 播放状态已设置为false')
+  if (autoPlay) {
+    isPlaying.value = false
+    logInfo('前端 播放状态已设置为false')
+  }
 
   logInfo('前端 播放完成,处理下一首', {
     isRepeating: isRepeating.value,
@@ -2764,7 +3928,8 @@ const handlePlaybackFinished = async () => {
     autoPlayNext: autoPlayNext.value,
     crossfadeEnabled: crossfadeEnabled.value,
     crossfadeDuration: crossfadeDuration.value,
-    currentSong: currentSong.value?.title
+    currentSong: currentSong.value?.title,
+    autoPlay: autoPlay
   })
 
   // 计算延迟时间：如果启用了交叉淡入淡出，延迟时间为淡出时间，否则为100ms
@@ -2828,6 +3993,15 @@ onMounted(() => {
   //     return false
   //   }
   // })
+  
+  // 监听滚动事件
+  nextTick(() => {
+    if (songListContainer.value) {
+      songListContainer.value.addEventListener('scroll', handleScroll)
+      // 初始调用一次，设置初始状态
+      handleScroll()
+    }
+  })
 })
 
 // 异步初始化
@@ -2882,11 +4056,7 @@ onMounted(() => {
     // 延迟一小段时间确保应用完全加载
     setTimeout(async () => {
       try {
-        await invoke('play_song', { path: currentSong.value?.path })
-        // 如果有保存的播放位置,跳转到该位置
-        if (currentPosition.value > 0) {
-          await invoke('seek_song', { position: currentPosition.value })
-        }
+        await playSong(currentSong.value!, currentPosition.value)
         isPlaying.value = true
       } catch (error) {
         logError('自动播放失败:', error)
@@ -2939,13 +4109,19 @@ onMounted(() => {
   }
 
   logInfo('前端 初始化完成')
+  
+  // 初始化悬浮按钮状态
+  nextTick(() => {
+    handleScroll()
+  })
 })()
 
 // 进度更新定时器
 let progressTimer: number | null = null
 
 // 监听播放状态变化，动态控制定时器
-watch(isPlaying, (playing) => {
+watch(isPlaying, (playing, oldPlaying) => {
+  logInfo('【前端】isPlaying.value变化: 从', oldPlaying, '变为', playing)
   if (playing) {
     logInfo('【前端】播放状态变为true，启动进度更新定时器')
     if (!progressTimer) {
@@ -3369,11 +4545,54 @@ body, html {
 /* 歌曲列表 */
 .song-list-container {
   flex: 1;
-  overflow: hidden;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   min-height: 0; /* 确保flex子元素可以正确收缩 */
   max-width: 100%;
+  position: relative; /* 为悬浮按钮提供定位上下文 */
+}
+
+/* 悬浮控制按钮 */
+.playlist-float-buttons {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 1000;
+}
+
+.float-button {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid #007bff;
+  color: #007bff;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: all 0.3s ease;
+}
+
+.float-button:hover {
+  background: #007bff;
+  color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 123, 255, 0.3);
+}
+
+.float-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: rgba(255, 255, 255, 0.7);
+  color: #ccc;
+  border-color: #ccc;
 }
 
 .empty-state {
@@ -3403,7 +4622,8 @@ body, html {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto; /* 允许垂直滚动 */
+  overflow-x: hidden; /* 隐藏水平滚动条 */
 }
 
 .table-header {
@@ -3590,6 +4810,27 @@ body, html {
   font-size: 12px;
   color: #888;
   margin-top: 4px;
+}
+
+/* CUE专辑视图样式已合并到普通专辑视图样式 */
+.cue-badge {
+  display: inline-block;
+  background-color: #4CAF50;
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+
+.nav-badge {
+  background-color: #4CAF50;
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  margin-left: auto;
 }
 
 .albums-content {
@@ -4176,6 +5417,7 @@ body, html {
   border-radius: 2px;
   outline: none;
   -webkit-appearance: none;
+  appearance: none;
 }
 
 .crossfade-duration input[type="range"]::-webkit-slider-thumb {
@@ -4299,6 +5541,38 @@ body, html {
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+}
+
+/* CUE信息区域 */
+.cue-info-section {
+  margin-top: 20px;
+  padding: 15px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  border-left: 4px solid #4CAF50;
+}
+
+.cue-info-section h4 {
+  margin-top: 0;
+  color: #4CAF50;
+  font-size: 16px;
+  margin-bottom: 15px;
+}
+
+.cue-info-text {
+  margin-top: 15px;
+  padding: 10px;
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.cue-info-text pre {
+  margin: 0;
+  color: #f0f0f0;
 }
 
 .modal-header {
@@ -4538,9 +5812,9 @@ body, html {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
-  padding: 5px 0;
+  padding: 10px 0;
   overflow-y: auto;
   max-height: 100%;
 }

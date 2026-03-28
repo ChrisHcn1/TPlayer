@@ -47,6 +47,10 @@
               "identifier": "fs:allow-read-dir",
               "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
             },
+            {
+              "identifier": "fs:allow-exists",
+              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+            },
             "fs:default",
             "core:webview:allow-internal-toggle-devtools",
             "core:webview:default",

@@ -13,6 +13,15 @@ export interface Song {
   genre: string
   lyric?: string
   isFavorite?: boolean
+  // CUE相关字段
+  isCueTrack?: boolean
+  startTime?: string
+  endTime?: string
+  trackNumber?: string
+  parentFile?: string
+  cueInfo?: string
+  // 转码相关
+  needs_transcode: boolean
 }
 
 export interface Playlist {

@@ -1,5 +1,8 @@
+#![allow(static_mut_refs)]
+
 use std::fs::{self, DirEntry};
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -11,11 +14,10 @@ use lofty::tag::Accessor;
 use rodio::Source;
 use tauri::{State, Emitter};
 
+use crate::ffmpeg_transcoder;
 use crate::equalizer::{Equalizer, EqualizerPreset};
-use crate::ffmpeg_transcoder::{self, TranscodeCache};
 
-// 全局播放器(不实现Send,使用unsafe)
-// 需要使用unsafe static来绕过rodio的Send限制
+// 全局播放器(使用unsafe static,但通过PLAYER_MUTEX确保线程安全)
 #[allow(static_mut_refs)]
 static mut GLOBAL_PLAYER: Option<GlobalPlayer> = None;
 static PLAYER_MUTEX: Mutex<()> = Mutex::new(());
@@ -41,6 +43,12 @@ pub struct Song {
     pub year: String,
     pub genre: String,
     pub lyric: String,
+    // 音频参数
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    pub bit_depth: Option<u8>,
+    // 转码相关
+    pub needs_transcode: bool,
 }
 
 // 播放器状态(只存储简单的状态,不包含rodio对象)
@@ -52,6 +60,9 @@ pub struct PlayerState {
     pub position_update_count: u64, // 用于跟踪更新次数
     pub equalizer_bands: [f32; 10],
     pub equalizer: Equalizer,
+    // CUE track相关
+    pub cue_start_time: Option<f64>, // CUE track开始时间（秒）
+    pub cue_end_time: Option<f64>,   // CUE track结束时间（秒）
 }
 
 // 全局播放器句柄(使用unsafe存储,不实现Send)
@@ -71,6 +82,8 @@ impl Default for PlayerState {
             position_update_count: 0,
             equalizer_bands: [0.0; 10],
             equalizer: Equalizer::new(),
+            cue_start_time: None,
+            cue_end_time: None,
         }
     }
 }
@@ -88,9 +101,53 @@ impl Default for GlobalPlayer {
 // 扫描目录，查找音频文件
 #[tauri::command]
 pub async fn scan_directory(directory: String) -> Result<serde_json::Value, String> {
+    use crate::cue_parser::{scan_cue_files, parse_cue_file};
+    
+    let path = Path::new(&directory);
     let mut songs = Vec::new();
     
-    if let Err(err) = scan_directory_recursive(Path::new(&directory), &mut songs) {
+    // 先扫描所有CUE文件，收集被引用的音频文件路径
+    let cue_file_paths = scan_cue_files(path);
+    let mut cue_referenced_files = std::collections::HashSet::new();
+    
+    #[cfg(debug_assertions)]
+    println!("[CUE过滤] 扫描到 {} 个CUE文件", cue_file_paths.len());
+    for cue_path in &cue_file_paths {
+        #[cfg(debug_assertions)]
+        println!("[CUE过滤] CUE文件路径: {:?}", cue_path);
+    }
+    
+    for cue_path in cue_file_paths {
+        #[cfg(debug_assertions)]
+        println!("[CUE过滤] 解析CUE文件: {:?}", cue_path);
+        if let Ok(album) = parse_cue_file(&cue_path) {
+            let file_path = album.file_path;
+            #[cfg(debug_assertions)]
+            println!("[CUE过滤] CUE引用的音频文件路径: {:?}", file_path);
+            #[cfg(debug_assertions)]
+            println!("[CUE过滤] 文件是否存在: {}", file_path.exists());
+            // 无论文件是否存在，都添加到CUE引用文件集合中
+            // 这样可以确保即使文件不存在，也不会在播放列表中显示
+            let canonical_path = file_path.canonicalize().unwrap_or(file_path.clone());
+            #[cfg(debug_assertions)]
+            println!("[CUE过滤] 规范化后的路径: {:?}", canonical_path);
+            cue_referenced_files.insert(canonical_path);
+            #[cfg(debug_assertions)]
+            println!("[CUE过滤] 添加到CUE引用文件集合");
+        } else {
+            #[cfg(debug_assertions)]
+            println!("[CUE过滤] 解析CUE文件失败");
+        }
+    }
+    
+    #[cfg(debug_assertions)]
+    println!("[CUE过滤] CUE引用文件集合大小: {}", cue_referenced_files.len());
+    for path in &cue_referenced_files {
+        #[cfg(debug_assertions)]
+        println!("[CUE过滤] CUE引用文件: {:?}", path);
+    }
+    
+    if let Err(err) = scan_directory_recursive(Path::new(&directory), &mut songs, &cue_referenced_files) {
         return Err(format!("扫描目录失败: {}", err));
     }
     
@@ -102,17 +159,31 @@ pub async fn scan_directory(directory: String) -> Result<serde_json::Value, Stri
 }
 
 // 递归扫描目录
-fn scan_directory_recursive(path: &Path, songs: &mut Vec<Song>) -> std::io::Result<()> {
+fn scan_directory_recursive(
+    path: &Path, 
+    songs: &mut Vec<Song>,
+    cue_referenced_files: &std::collections::HashSet<std::path::PathBuf>
+) -> std::io::Result<()> {
     if path.is_dir() {
+        println!("[CUE过滤] 扫描目录: {:?}", path);
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let path = entry.path();
             
             if path.is_dir() {
-                scan_directory_recursive(&path, songs)?;
+                scan_directory_recursive(&path, songs, cue_referenced_files)?;
             } else if is_audio_file(&entry) {
-                if let Some(song) = parse_audio_file(&path) {
-                    songs.push(song);
+                println!("[CUE过滤] 发现音频文件: {:?}", path);
+                // 检查文件是否被CUE引用
+                let canonical_path = path.canonicalize().unwrap_or(path.clone());
+                println!("[CUE过滤] 规范化后的路径: {:?}", canonical_path);
+                if !cue_referenced_files.contains(&canonical_path) {
+                    println!("[CUE过滤] 文件未被CUE引用，添加到播放列表");
+                    if let Some(song) = parse_audio_file(&path) {
+                        songs.push(song);
+                    }
+                } else {
+                    println!("[CUE过滤] 文件被CUE引用，跳过");
                 }
             }
         }
@@ -263,6 +334,20 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         }
     } else {
         eprintln!("警告: {} 无法读取元数据", path_str);
+    }
+    
+    // 尝试使用rodio获取音频参数
+    let mut sample_rate: Option<u32> = None;
+    let mut channels: Option<u16> = None;
+    let mut bit_depth: Option<u8> = None;
+    
+    if let Ok(file) = std::fs::File::open(path) {
+        if let Ok(decoder) = rodio::Decoder::new(file) {
+            sample_rate = Some(decoder.sample_rate());
+            channels = Some(decoder.channels());
+            // rodio不直接提供位深度信息，这里设置为默认值
+            bit_depth = Some(16);
+        }
     }
 
     // 检查是否为特殊格式（DSD、DTS等无法获取时长的格式）
@@ -417,6 +502,9 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
     // 生成唯一ID
     let id = format!("{:x}", md5::compute(&path_str));
 
+    // 判断文件是否需要转码
+    let needs_transcode = ffmpeg_transcoder::needs_transcode(&path_str);
+
     Some(Song {
         id,
         title,
@@ -428,6 +516,10 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         year,
         genre,
         lyric,
+        sample_rate,
+        channels,
+        bit_depth,
+        needs_transcode,
     })
 }
 
@@ -441,7 +533,7 @@ fn format_duration(seconds: f64) -> String {
     format!("{}:{:02}", mins, secs)
 }
 
-// 初始化音频流
+// 初始化音频流（不获取锁，由调用者确保线程安全）
 fn initialize_audio_stream() -> Result<rodio::OutputStreamHandle, String> {
     unsafe {
         if GLOBAL_PLAYER.is_none() {
@@ -471,9 +563,51 @@ pub async fn play_song(
     volume: Option<f32>,
     force_transcode: Option<bool>,
     position: Option<f64>,
+    start_time: Option<String>,  // CUE track开始时间（秒），字符串类型
+    end_time: Option<String>,    // CUE track结束时间（秒），字符串类型
+    track_number: Option<String>,  // CUE track编号
+    title: Option<String>,     // CUE track标题
     state: State<'_, Arc<Mutex<PlayerState>>>,
     window: tauri::Window,
 ) -> Result<serde_json::Value, String> {
+    // 如果start_time或end_time为空,尝试从title中解析
+    let (start_time_val, end_time_val) = if start_time.is_none() || end_time.is_none() || start_time.as_deref() == Some(&"".to_string()) || end_time.as_deref() == Some(&"".to_string()) {
+        // 从title中解析时间信息(格式: 标题::开始时间::结束时间)
+        match title.as_deref() {
+            Some(title_str) if !title_str.is_empty() => {
+                let parts: Vec<&str> = title_str.split("::").collect();
+                if parts.len() >= 3 {
+                    let parsed_start = parts[1].parse::<f64>().ok();
+                    let parsed_end = if !parts[2].is_empty() {
+                        parts[2].parse::<f64>().ok()
+                    } else {
+                        None
+                    };
+                    println!("[播放] 从title解析时间: start={:?}, end={:?}", parsed_start, parsed_end);
+                    (parsed_start, parsed_end)
+                } else {
+                    (start_time.clone().and_then(|s| s.parse().ok()), end_time.clone().and_then(|s| s.parse().ok()))
+                }
+            }
+            _ => (start_time.clone().and_then(|s| s.parse().ok()), end_time.clone().and_then(|s| s.parse().ok()))
+        }
+    } else {
+        (start_time.clone().and_then(|s| s.parse().ok()), end_time.clone().and_then(|s| s.parse().ok()))
+    };
+
+    // 记录所有接收到的参数
+    println!("[播放] === 前端传递的参数 ===");
+    println!("[播放] path: {}", path);
+    println!("[播放] volume: {:?}", volume);
+    println!("[播放] force_transcode: {:?}", force_transcode);
+    println!("[播放] position: {:?}", position);
+    println!("[播放] start_time (String): {:?}", start_time);
+    println!("[播放] end_time (String): {:?}", end_time);
+    println!("[播放] track_number: {:?}", track_number);
+    println!("[播放] title: {:?}", title);
+    println!("[播放] 解析后: start_time={:?}, end_time={:?}", start_time_val, end_time_val);
+    println!("[播放] ======================");
+    
     let _lock = PLAYER_MUTEX.lock().unwrap();
     
     // 先停止当前的播放，避免多首同时播放
@@ -486,103 +620,200 @@ pub async fn play_song(
         }
     }
     
-    // 检查是否需要转码
-    let play_path = if force_transcode.unwrap_or(false) || TranscodeCache::needs_transcode(&path) {
-        println!("[播放] 检测到需要转码的格式: {}", path);
+    // 检查是否需要转码（参考SPlayer实现，只对特殊格式转码）
+    let play_path = if force_transcode.unwrap_or(false) || ffmpeg_transcoder::needs_transcode(&path) {
+        // 检查文件扩展名
+        let file_ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         
-        // 尝试获取转码缓存
-        if let Some(cache) = ffmpeg_transcoder::get_transcode_cache() {
-            // 获取或创建缓存项
-            if let Some(item) = cache.get_or_create(&path) {
-                // 如果已经转码完成，直接使用
-                if item.is_ready && std::path::Path::new(&item.transcoded_path).exists() {
-                    println!("[播放] 使用已转码的文件: {}", item.transcoded_path);
-                    item.transcoded_path.clone()
-                } else {
-                    // 检查是否正在转码
-                    if item.is_transcoding {
-                        println!("[播放] 正在转码中，等待完成...");
+        // 参考SPlayer，WAV文件不使用转码
+        if file_ext == "wav" {
+            println!("[播放] WAV文件直接播放，不使用转码");
+            path.clone()
+        } else {
+            println!("[播放] 检测到需要转码的格式: {}", path);
+            
+            // 尝试获取转码缓存
+            if let Some(cache) = ffmpeg_transcoder::get_transcode_cache() {
+                // 获取或创建缓存项
+                if let Some(item) = cache.get_or_create(&path) {
+                    // 如果已经转码完成，直接使用
+                    if item.is_ready && std::path::Path::new(&item.transcoded_path).exists() {
+                        println!("[播放] 使用已转码的文件: {}", item.transcoded_path);
+                        item.transcoded_path.clone()
                     } else {
-                        // 开始转码
-                        println!("[播放] 开始转码...");
-                        match cache.start_transcode(&path) {
-                            Ok(_transcoded_path) => {
-                                println!("[播放] 转码已启动");
+                        // 检查是否正在转码
+                        if item.is_transcoding {
+                            println!("[播放] 正在转码中，等待完成...");
+                        } else {
+                            // 开始转码
+                            println!("[播放] 开始转码...");
+                            match cache.start_transcode(&path) {
+                                Ok(_transcoded_path) => {
+                                    println!("[播放] 转码已启动");
+                                }
+                                Err(e) => {
+                                    eprintln!("[播放] 启动转码失败: {}", e);
+                                    return Err(format!("转码失败: {}", e));
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("[播放] 启动转码失败: {}", e);
-                                return Err(format!("转码失败: {}", e));
+                        }
+                        
+                        // 等待转码完成（最多等待120秒，给DSD等大文件足够时间）
+                        println!("[播放] 等待转码完成...");
+                        match cache.wait_for_transcode(&path, 120) {
+                            Some(ready_path) => {
+                                println!("[播放] 转码完成，开始播放: {}", ready_path);
+                                ready_path
+                            }
+                            None => {
+                                // 转码超时，返回错误
+                                eprintln!("[播放] 转码超时");
+                                return Err("转码超时，文件可能过大或格式不支持，请稍后重试".to_string());
                             }
                         }
                     }
-                    
-                    // 等待转码完成（最多等待120秒，给DSD等大文件足够时间）
-                    println!("[播放] 等待转码完成...");
-                    match cache.wait_for_transcode(&path, 120) {
-                        Some(ready_path) => {
-                            println!("[播放] 转码完成，开始播放: {}", ready_path);
-                            ready_path
-                        }
-                        None => {
-                            // 转码超时，返回错误
-                            eprintln!("[播放] 转码超时");
-                            return Err("转码超时，文件可能过大或格式不支持，请稍后重试".to_string());
-                        }
-                    }
+                } else {
+                    return Err("转码缓存初始化失败".to_string());
                 }
             } else {
-                return Err("转码缓存初始化失败".to_string());
+                return Err("FFmpeg转码服务不可用".to_string());
             }
-        } else {
-            return Err("FFmpeg转码服务不可用".to_string());
         }
     } else {
         path.clone()
     };
     
+    println!("[播放] 准备播放文件: {}", play_path);
+    
     // 获取音频时长
     let duration = match lofty::read_from_path(&play_path) {
-        Ok(file) => file.properties().duration().as_secs_f64(),
-        Err(_) => 180.0,
+        Ok(file) => {
+            let dur = file.properties().duration().as_secs_f64();
+            println!("[播放] 音频时长: {:.2}秒", dur);
+            dur
+        },
+        Err(e) => {
+            println!("[播放] 获取音频时长失败: {}, 使用默认值180.0秒", e);
+            180.0
+        }
     };
     
     // 初始化音频流
+    println!("[播放] 初始化音频流...");
     let handle = initialize_audio_stream()?;
+    println!("[播放] 音频流初始化成功");
     
     // 打开文件并解码
+    println!("[播放] 打开文件: {}", play_path);
     let file = std::fs::File::open(&play_path)
-        .map_err(|e| format!("打开文件失败: {}", e))?;
+        .map_err(|e| {
+            println!("[播放] 打开文件失败: {}", e);
+            format!("打开文件失败: {}", e)
+        })?;
     
+    println!("[播放] 文件打开成功，开始解码...");
     let mut source = rodio::Decoder::new(file)
-        .map_err(|e| format!("解码失败: {}", e))?;
+        .map_err(|e| {
+            println!("[播放] 解码失败: {}", e);
+            format!("解码失败: {}", e)
+        })?;
     
-    // 跳过指定位置的音频
-    let start_position = position.unwrap_or(0.0);
-    if start_position > 0.0 {
+    println!("[播放] 解码成功");
+    
+    // 打印音频参数
+    let sample_rate = source.sample_rate();
+    let channels = source.channels();
+    let current_frame_len = source.current_frame_len();
+    let total_duration = source.total_duration();
+    println!("[播放] 音频参数: 采样率={}Hz, 声道数={}, 当前帧长度={:?}, 总时长={:?}, 格式=PCM (pcm_s16le)", 
+             sample_rate, channels, current_frame_len, total_duration);
+    
+    // 检测文件扩展名
+    let file_path = std::path::Path::new(&play_path);
+    let extension = file_path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    println!("[播放] 文件扩展名: {}", extension);
+    
+    // 计算实际开始位置（考虑CUE track的start_time和position参数）
+    // 如果start_time和end_time都是None或0，说明不是CUE track，从0开始播放
+    let cue_start_val = start_time_val.unwrap_or(0.0);
+    let end_time_val_for_cue = end_time_val.unwrap_or(0.0);
+    
+    let (cue_start, track_end_time) = if cue_start_val == 0.0 && end_time_val_for_cue == 0.0 {
+        // 如果不是CUE track，从0开始播放
+        println!("[播放] 不是CUE track，从0秒开始播放");
+        (0.0, None)
+    } else {
+        // 是CUE track，使用传入的时间参数
+        println!("[播放] 是CUE track，使用传入的时间参数");
+        (cue_start_val, Some(end_time_val_for_cue))
+    };
+    
+    let position_offset = position.unwrap_or(0.0);
+    let start_position = cue_start + position_offset;
+    
+    // 计算结束位置
+    let _end_position = track_end_time;
+    
+    println!("[播放] CUE参数详细信息:");
+    println!("[播放] - start_time参数: {:?}", start_time_val);
+    println!("[播放] - end_time参数: {:?}", end_time_val);
+    println!("[播放] - position参数: {:?}", position);
+    println!("[播放] - 计算结果: cue_start={:.2}s, position_offset={:.2}s, start_position={:.2}s", 
+             cue_start, position_offset, start_position);
+    
+    // 检查是否有CUE参数
+    if start_time_val.unwrap_or(0.0) == 0.0 && end_time_val.unwrap_or(0.0) == 0.0 {
+        println!("[播放] 不是CUE track，将从0秒开始播放");
+    } else {
+        println!("[播放] 是CUE track，将从 {:?}s 播放到 {:?}s", start_time_val, end_time_val);
+    }
+    
+    // 处理样本跳过
+    let source = if start_position > 0.0 {
         // 计算需要跳过的样本数
         let sample_rate = source.sample_rate();
         let channels = source.channels();
         let samples_to_skip = (start_position * sample_rate as f64 * channels as f64) as u64;
-        println!("跳过 {} 秒，{} 样本", start_position, samples_to_skip);
+        println!("[播放] 跳过样本计算:");
+        println!("[播放] - 采样率: {}Hz", sample_rate);
+        println!("[播放] - 声道数: {}", channels);
+        println!("[播放] - 需要跳过的样本数: {}", samples_to_skip);
         
         // 手动跳过样本
+        let mut skipped_samples = 0;
         for _ in 0..samples_to_skip {
             if source.next().is_none() {
+                println!("[播放] 跳过样本时遇到文件结束，已跳过 {} 个样本", skipped_samples);
                 break;
             }
+            skipped_samples += 1;
         }
-    }
+        println!("[播放] 实际跳过的样本数: {}", skipped_samples);
+        source
+    } else {
+        source
+    };
+    
+    // 使用跳过样本后的source
+    let boxed_source: Box<dyn Source<Item = f32> + Send> = Box::new(source.convert_samples::<f32>());
     
     unsafe {
         if let Some(player) = &mut GLOBAL_PLAYER {
             // 停止旧的sink
             if let Some(old_sink) = player.sink.take() {
+                println!("[播放] 停止旧的播放");
                 old_sink.stop();
             }
             
             // 创建新的sink
             let new_sink = rodio::Sink::try_new(&handle)
                 .map_err(|e| format!("创建播放器失败: {}", e))?;
+            
+            println!("[播放] 播放器创建成功");
             
             // 设置音量 - 使用传入的音量或状态中的音量
             let normalized_volume = if let Some(vol) = volume {
@@ -592,6 +823,7 @@ pub async fn play_song(
                 player_state.volume
             };
             new_sink.set_volume(normalized_volume);
+            println!("[播放] 音量设置为: {:.2}", normalized_volume);
             
             // 更新状态中的音量
             {
@@ -599,38 +831,17 @@ pub async fn play_song(
                 player_state.volume = normalized_volume;
             }
             
-            // 应用均衡器效果
-            let equalizer = {
-                let player_state = state.lock().unwrap();
-                player_state.equalizer.clone()
-            };
-            
-            // 先将音频源转换为f32格式，然后应用均衡器效果
-            let converted_source = source.convert_samples();
-            let equalized_source = crate::equalizer::EqualizedSource::new(converted_source, equalizer);
-            
-            // 添加音频源
-            new_sink.append(equalized_source);
+            // 直接添加原始音频源，不经过均衡器处理
+            println!("[播放] 添加音频源到播放器");
+            new_sink.append(boxed_source);
             new_sink.play();
+            println!("[播放] 开始播放，sink状态: 空={}, 已结束={}", new_sink.empty(), new_sink.is_paused());
             
             player.sink = Some(new_sink);
         }
     }
     
-    // 先停止旧的进度更新线程
-    // 1. 暂时将播放状态设置为false，让旧线程退出
-    {
-        let mut player_state = state.lock().unwrap();
-        player_state.is_playing = false;
-    }
-    
-    // 2. 停止旧的进度更新线程
-    stop_progress_updater();
-    
-    // 3. 短暂延迟，确保旧线程有时间退出
-    std::thread::sleep(Duration::from_millis(100));
-
-    // 4. 更新状态
+    // 4. 更新状态（在启动进度更新线程之前）
     {
         let mut player_state = state.lock().unwrap();
         player_state.current_song = Some(parse_audio_file(Path::new(&path)).unwrap_or(Song {
@@ -638,19 +849,34 @@ pub async fn play_song(
             title: "".to_string(),
             artist: "".to_string(),
             album: "".to_string(),
-            path: path.clone(),
+            path: path.to_string(),
             duration: format_duration(duration),
             cover: "".to_string(),
             year: "".to_string(),
             genre: "".to_string(),
             lyric: "".to_string(),
+            sample_rate: None,
+            channels: None,
+            bit_depth: None,
+            needs_transcode: false,
         }));
         player_state.is_playing = true;
         player_state.position = start_position;
         player_state.position_update_count = 0;
+        // 保存CUE track时间信息
+        player_state.cue_start_time = if cue_start_val > 0.0 { Some(cue_start_val) } else { None };
+        player_state.cue_end_time = if end_time_val_for_cue > 0.0 { Some(end_time_val_for_cue) } else { None };
+        println!("[播放] CUE时间信息: start_time={:?}, end_time={:?}", player_state.cue_start_time, player_state.cue_end_time);
     }
+    
+    // 5. 先停止旧的进度更新线程
+    stop_progress_updater();
+    
+    // 6. 短暂延迟，确保旧线程有时间退出
+    std::thread::sleep(Duration::from_millis(100));
 
-    // 5. 启动新的进度更新
+    // 7. 启动新的进度更新
+    println!("[播放] 启动进度更新线程");
     start_progress_updater(state.inner().clone(), window);
     
     let result = serde_json::json!({
@@ -736,6 +962,36 @@ fn start_progress_updater(
             // 基于实际经过的时间更新播放进度
             let elapsed = start_time.elapsed().as_secs_f64();
             let current_position = initial_position + elapsed;
+            
+            // 检查是否超过CUE track结束时间
+            let cue_end_reached = {
+                let player_state = state.lock().unwrap();
+                if let Some(end_time) = player_state.cue_end_time {
+                    current_position >= end_time
+                } else {
+                    false
+                }
+            };
+            
+            if cue_end_reached {
+                // CUE track播放完成
+                {
+                    let mut player_state = state.lock().unwrap();
+                    player_state.is_playing = false;
+                    // 停止播放器
+                    unsafe {
+                        if let Some(player) = &GLOBAL_PLAYER {
+                            if let Some(sink) = &player.sink {
+                                sink.stop();
+                            }
+                        }
+                    }
+                }
+                println!("CUE track播放完成,发送playback_finished事件");
+                let _ = window.emit("playback_finished", ());
+                break;
+            }
+            
             {
                 let mut player_state = state.lock().unwrap();
                 player_state.position = current_position;
@@ -924,9 +1180,20 @@ pub async fn get_position(
     state: State<'_, Arc<Mutex<PlayerState>>>
 ) -> Result<f64, String> {
     let player_state = state.lock().unwrap();
-    let position = player_state.position;
-    println!("get_position 被调用,返回: {:.1}秒, 更新次数: {}", position, player_state.position_update_count);
-    Ok(position)
+    let absolute_position = player_state.position;
+    
+    // 如果是CUE track，返回相对于开始时间的位置
+    let relative_position = if let Some(start_time) = player_state.cue_start_time {
+        let rel_pos = absolute_position - start_time;
+        // 确保不会返回负数
+        if rel_pos < 0.0 { 0.0 } else { rel_pos }
+    } else {
+        absolute_position
+    };
+    
+    println!("get_position 被调用, 绝对位置: {:.1}秒, 相对位置: {:.1}秒, 更新次数: {}", 
+             absolute_position, relative_position, player_state.position_update_count);
+    Ok(relative_position)
 }
 
 // 停止播放(清理资源)
@@ -946,6 +1213,135 @@ pub async fn cleanup_player() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// 获取音频信息（包含时长、采样率、编码器等）
+#[tauri::command]
+pub async fn get_audio_duration(path: String) -> Result<serde_json::Value, String> {
+    println!("[音频信息] 开始获取音频信息: {}", path);
+    
+    // 优先使用lofty库读取音乐元数据
+    if let Ok(file) = lofty::read_from_path(&path) {
+        let dur = file.properties().duration().as_secs_f64();
+        if dur > 0.0 {
+            println!("[音频信息] lofty获取音频时长: {:.2}秒", dur);
+            return Ok(serde_json::json!({
+                    "duration": dur,
+                    "sample_rate": Option::<u32>::None,
+                    "codec_name": Option::<String>::None,
+                    "channels": Option::<u32>::None,
+                    "sample_fmt": Option::<String>::None,
+                    "bitrate": Option::<u64>::None,
+                    "source": "lofty"
+                }));
+        }
+        println!("[音频信息] lofty获取时长为0，尝试使用ffprobe");
+    } else {
+        println!("[音频信息] lofty读取失败，尝试使用ffprobe");
+    }
+    
+    // lofty失败时，使用ffprobe作为备用，获取完整音频信息
+    if let Some(ffprobe_path) = ffmpeg_transcoder::TranscodeCache::get_ffprobe_path() {
+        let probe_result = Command::new(&ffprobe_path)
+            .arg("-hide_banner")
+            .arg(&path)
+            .arg("-show_streams")
+            .arg("-select_streams")
+            .arg("a")
+            .arg("-print_format")
+            .arg("json")
+            .output();
+        
+        match &probe_result {
+            Ok(result) => {
+                let stdout_str = String::from_utf8_lossy(&result.stdout);
+                
+                if !stdout_str.is_empty() && !stdout_str.contains("error") && !stdout_str.contains("Error") {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout_str) {
+                        if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+                            if let Some(first_stream) = streams.first() {
+                                // 获取时长
+                                let duration = first_stream.get("duration")
+                                    .and_then(|d| d.as_str())
+                                    .and_then(|d| d.parse::<f64>().ok());
+                                
+                                // 获取采样率
+                                let sample_rate = first_stream.get("sample_rate")
+                                    .and_then(|r| r.as_str())
+                                    .and_then(|r| r.parse::<u32>().ok());
+                                
+                                // 获取编码器名称
+                                let codec_name = first_stream.get("codec_name")
+                                    .and_then(|c| c.as_str())
+                                    .map(|c| c.to_string());
+                                
+                                // 获取声道数
+                                let channels = first_stream.get("channels")
+                                    .and_then(|c| c.as_u64())
+                                    .map(|c| c as u32);
+                                
+                                // 获取采样格式
+                                let sample_fmt = first_stream.get("sample_fmt")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string());
+                                
+                                // 获取比特率
+                                let bitrate = first_stream.get("bit_rate")
+                                    .and_then(|b| b.as_str())
+                                    .and_then(|b| b.parse::<u64>().ok());
+                                
+                                if let Some(dur_val) = duration {
+                                    println!("[音频信息] ffprobe获取音频时长: {:.2}秒", dur_val);
+                                    if let Some(rate) = sample_rate {
+                                        println!("[音频信息] ffprobe获取采样率: {} Hz", rate);
+                                    }
+                                    if let Some(codec) = &codec_name {
+                                        println!("[音频信息] ffprobe获取编码器: {}", codec);
+                                    }
+                                    if let Some(chans) = channels {
+                                        println!("[音频信息] ffprobe获取声道数: {}", chans);
+                                    }
+                                    if let Some(fmt) = &sample_fmt {
+                                        println!("[音频信息] ffprobe获取采样格式: {}", fmt);
+                                    }
+                                    if let Some(bitrate_val) = bitrate {
+                                        println!("[音频信息] ffprobe获取比特率: {} bps", bitrate_val);
+                                    }
+                                    
+                                    return Ok(serde_json::json!({
+                                        "duration": dur_val,
+                                        "sample_rate": sample_rate,
+                                        "codec_name": codec_name,
+                                        "channels": channels,
+                                        "sample_fmt": sample_fmt,
+                                        "bitrate": bitrate,
+                                        "source": "ffprobe"
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[音频信息] ffprobe执行失败: {}", e);
+            }
+        }
+    } else {
+        println!("[音频信息] 未找到FFprobe，使用默认值");
+    }
+    
+    // 所有方法都失败，使用默认值
+    println!("[音频信息] 获取音频信息失败，使用默认值");
+    Ok(serde_json::json!({
+                "duration": 180.0,
+                "sample_rate": Option::<u32>::None,
+                "codec_name": Option::<String>::None,
+                "channels": Option::<u32>::None,
+                "sample_fmt": Option::<String>::None,
+                "bitrate": Option::<u64>::None,
+                "source": "default"
+            }))
 }
 
 // 最小化窗口
@@ -983,3 +1379,61 @@ pub async fn toggle_window_visibility(window: tauri::Window) -> Result<bool, Str
         Ok(true)
     }
 }
+
+
+// CUE分段音频源 - 用于在指定时间范围内播放音频
+#[allow(dead_code)]
+pub struct CueSegmentSource {
+    inner: Box<dyn Source<Item = f32> + Send>,
+    current_time: f64,
+    end_time: f64,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl CueSegmentSource {
+    #[allow(dead_code)]
+    pub fn new(inner: Box<dyn Source<Item = f32> + Send>, start_time: f64, end_time: f64) -> Self {
+        let sample_rate = inner.sample_rate();
+        let channels = inner.channels();
+        
+        Self {
+            inner,
+            current_time: start_time,
+            end_time,
+            sample_rate,
+            channels,
+        }
+    }
+}
+
+impl Iterator for CueSegmentSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_time >= self.end_time {
+            return None;
+        }
+        let sample = self.inner.next()?;
+        let samples_per_second = self.sample_rate as f64 * self.channels as f64;
+        self.current_time += 1.0 / samples_per_second;
+        Some(sample)
+    }
+}
+
+impl Source for CueSegmentSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        let remaining_time = self.end_time - self.current_time;
+        let samples_per_second = self.sample_rate as f64 * self.channels as f64;
+        let remaining_samples = (remaining_time * samples_per_second) as usize;
+        Some(remaining_samples)
+    }
+
+    fn channels(&self) -> u16 { self.channels }
+    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        let duration = self.end_time - self.current_time;
+        Some(std::time::Duration::from_secs_f64(duration))
+    }
+}
+

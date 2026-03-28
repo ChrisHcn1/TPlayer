@@ -4,8 +4,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 mod commands;
+mod commands_cue;
+mod cue_parser;
 mod equalizer;
 mod ffmpeg_transcoder;
+mod http_server;
 use commands::PlayerState;
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
@@ -52,27 +55,31 @@ fn main() {
         }
     }
 
+    // 初始化HTTP服务器
+    match http_server::init_http_server() {
+        Ok(_) => {
+            log_info!("HTTP服务器初始化成功");
+        }
+        Err(e) => {
+            log_error!("初始化HTTP服务器失败: {}", e);
+        }
+    }
+
     tauri::Builder::default()
         // 注册命令
         .invoke_handler(tauri::generate_handler![
             commands::scan_directory,
-            commands::play_song,
-            commands::pause_song,
-            commands::resume_song,
-            commands::stop_song,
-            commands::set_volume,
-            commands::seek_song,
-            commands::set_equalizer,
-            commands::apply_equalizer_preset,
-            commands::get_position,
-            commands::cleanup_player,
+            commands::get_audio_duration,
             commands::minimize_window,
             commands::toggle_maximize_window,
             commands::close_window,
             commands::toggle_window_visibility,
+            commands_cue::scan_cue_files,
+            commands_cue::parse_cue_file_command,
             ffmpeg_transcoder::check_needs_transcode,
             ffmpeg_transcoder::pretranscode_audio,
-            ffmpeg_transcoder::get_transcoded_path
+            ffmpeg_transcoder::get_transcoded_path,
+            http_server::get_file_http_url
         ])
         // 注册插件
         .plugin(tauri_plugin_dialog::init())
