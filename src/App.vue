@@ -6,9 +6,9 @@
         <h1>TPlayer</h1>
       </div>
       <div class="window-controls" data-tauri-drag-region="false">
-        <button class="control-btn minimize" @click="minimizeWindow" title="最小化">−</button>
-        <button class="control-btn maximize" @click="toggleMaximizeWindow" title="最大化/还原">□</button>
-        <button class="control-btn close" @click="closeWindow" title="关闭">×</button>
+        <button class="control-btn minimize" @click="minimizeWindow" :title="t('buttons.minimize')">−</button>
+        <button class="control-btn maximize" @click="toggleMaximizeWindow" :title="t('buttons.maximize')">□</button>
+        <button class="control-btn close" @click="closeWindow" :title="t('buttons.close')">×</button>
       </div>
     </header>
     
@@ -17,39 +17,39 @@
       <!-- 左侧边栏 -->
       <aside class="sidebar" :class="{ 'collapsed': !sidebarVisible }">
         <div class="sidebar-header">
-          <button class="toggle-btn" @click="toggleSidebar" title="切换侧边栏">
+          <button class="toggle-btn" @click="toggleSidebar" :title="t('buttons.toggleSidebar')">
             {{ sidebarVisible ? '◀' : '▶' }}
           </button>
-          <h2>播放列表</h2>
+          <h2>{{ t('playlist.title') }}</h2>
         </div>
         <nav class="sidebar-nav">
           <ul>
             <li class="nav-item active" @click="switchFilter('all')">
               <span class="nav-icon">🎵</span>
-              <span class="nav-text">全部歌曲</span>
+              <span class="nav-text">{{ t('playlist.allSongs') }}</span>
             </li>
             <li class="nav-item" @click="switchFilter('favorites')">
               <span class="nav-icon">❤️</span>
-              <span class="nav-text">我喜欢</span>
+              <span class="nav-text">{{ t('playlist.favorites') }}</span>
             </li>
             <li class="nav-item" @click="switchFilter('artists')">
               <span class="nav-icon">👤</span>
-              <span class="nav-text">艺术家</span>
+              <span class="nav-text">{{ t('playlist.artists') }}</span>
             </li>
             <li class="nav-item" @click="switchFilter('albums')">
               <span class="nav-icon">💽</span>
-              <span class="nav-text">专辑</span>
+              <span class="nav-text">{{ t('playlist.albums') }}</span>
             </li>
             <li class="nav-item" @click="switchFilter('cue')" v-if="cueAlbums.length > 0">
               <span class="nav-icon">📀</span>
-              <span class="nav-text">CUE专辑</span>
+              <span class="nav-text">{{ t('playlist.cueAlbums') }}</span>
               <span class="nav-badge">{{ cueAlbums.length }}</span>
             </li>
           </ul>
         </nav>
         <div class="sidebar-footer">
-          <button class="btn primary" @click="createPlaylist" title="创建歌单">
-            + 歌单
+          <button class="btn primary" @click="createPlaylist" :title="t('playlist.createPlaylist')">
+            + {{ t('playlist.createPlaylist') }}
           </button>
         </div>
       </aside>
@@ -59,15 +59,30 @@
         <!-- 过滤控制区 -->
         <div class="filter-controls">
           <div class="filter-header">
-            <div class="filter-title">
+            <!-- 左侧区块：标题和统计信息 -->
+            <div class="filter-header-left">
               <h2>{{ currentFilterText }}</h2>
               <div class="playlist-info">
-                {{ filteredSongs.length }} 首歌曲 • 时长: {{ totalDurationText }}
+                {{ filteredSongs.length }} {{ t('playlist.songs') }} • {{ t('playlist.totalDuration') }}: {{ totalDurationText }}
               </div>
             </div>
-            <div class="filter-actions">
-              <button class="btn primary" @click="scanMusic" title="扫描音乐">
-                📁 扫描音乐
+            
+            <!-- 中间区块：歌词显示 -->
+            <div class="filter-header-center">
+              <div v-if="currentSong && showLyrics && lyricsPosition === 'top'" class="current-lyric-display">
+                <span v-if="lyrics.length > 0 && currentLyricIndex >= 0" class="current-lyric">
+                  {{ lyrics[currentLyricIndex].text }}
+                </span>
+                <span v-else class="no-lyric">
+                  {{ t('playlist.noLyrics') }}
+                </span>
+              </div>
+            </div>
+            
+            <!-- 右侧区块：操作按钮 -->
+            <div class="filter-header-right">
+              <button class="btn primary" @click="scanMusic" :title="t('playlist.scanMusic')">
+                📁 {{ t('playlist.scanMusic') }}
               </button>
             </div>
           </div>
@@ -76,7 +91,7 @@
             <input 
               type="text" 
               v-model="searchQuery" 
-              placeholder="搜索歌曲、艺术家或专辑..."
+              :placeholder="t('playlist.searchPlaceholder')"
               @input="handleSearch"
             />
             <button class="search-btn" @click="handleSearch">🔍</button>
@@ -90,14 +105,15 @@
             <button 
               class="float-button" 
               @click="scrollToTop"
-              title="回到顶部"
+              :title="t('playlist.backToTop')"
+              v-if="showScrollTopButton"
             >
               ↑
             </button>
             <button 
               class="float-button" 
               @click="scrollToCurrentSong"
-              title="跳转到当前曲目"
+              :title="t('playlist.jumpToCurrent')"
               :disabled="!currentSong"
               v-if="showJumpToCurrentButton && currentSong"
             >
@@ -107,8 +123,8 @@
           
           <div v-if="songs.length === 0" class="empty-state">
             <div class="empty-icon">🎵</div>
-            <p>暂无歌曲</p>
-            <p class="empty-hint">点击上方的"扫描音乐"按钮添加音乐</p>
+            <p>{{ t('playlist.noSongs') }}</p>
+            <p class="empty-hint">{{ t('playlist.clickToScan') }}</p>
           </div>
           
           <!-- 艺术家视图 - 双栏布局 -->
@@ -122,12 +138,12 @@
                 @click="selectedArtist = artist.name"
               >
                 <div class="artist-name">{{ artist.name }}</div>
-                <div class="artist-count">{{ artist.count }} 首</div>
+                <div class="artist-count">{{ artist.count }} {{ t('playlist.songs') }}</div>
               </div>
             </div>
             <div class="artists-content">
               <div v-if="!selectedArtist" class="empty-selection">
-                <p>请选择一个艺术家</p>
+                <p>{{ t('playlist.selectArtist') }}</p>
               </div>
               <div v-else class="song-list">
                 <!-- 表头 -->
@@ -135,10 +151,10 @@
                   <thead>
                     <tr>
                       <th class="col-index">#</th>
-                      <th class="col-title">标题</th>
-                      <th class="col-album">专辑</th>
-                      <th class="col-duration">时长</th>
-                      <th class="col-actions">操作</th>
+                      <th class="col-title">{{ t('playlist.titleHeader') }}</th>
+                      <th class="col-album">{{ t('playlist.albumHeader') }}</th>
+                      <th class="col-duration">{{ t('playlist.durationHeader') }}</th>
+                      <th class="col-actions">{{ t('playlist.actionsHeader') }}</th>
                     </tr>
                   </thead>
                 </table>
@@ -166,7 +182,7 @@
                         class="action-btn favorite"
                         @click.stop="toggleFavorite(item)"
                         :class="{ 'active': item.isFavorite }"
-                        title="收藏"
+                        :title="t('buttons.favorite')"
                       >
                         ♥
                       </button>
@@ -189,12 +205,12 @@
               >
                 <div class="album-name">{{ album.name }}</div>
                 <div class="album-artist">{{ album.artist }}</div>
-                <div class="album-count">{{ album.count }} 首</div>
+                <div class="album-count">{{ album.count }} {{ t('playlist.songs') }}</div>
               </div>
             </div>
             <div class="albums-content">
               <div v-if="!selectedAlbum" class="empty-selection">
-                <p>请选择一个专辑</p>
+                <p>{{ t('playlist.selectAlbum') }}</p>
               </div>
               <div v-else class="song-list">
                 <!-- 表头 -->
@@ -202,10 +218,10 @@
                   <thead>
                     <tr>
                       <th class="col-index">#</th>
-                      <th class="col-title">标题</th>
-                      <th class="col-artist">艺术家</th>
-                      <th class="col-duration">时长</th>
-                      <th class="col-actions">操作</th>
+                      <th class="col-title">{{ t('playlist.titleHeader') }}</th>
+                      <th class="col-artist">{{ t('playlist.artistHeader') }}</th>
+                      <th class="col-duration">{{ t('playlist.durationHeader') }}</th>
+                      <th class="col-actions">{{ t('playlist.actionsHeader') }}</th>
                     </tr>
                   </thead>
                 </table>
@@ -233,7 +249,7 @@
                         class="action-btn favorite"
                         @click.stop="toggleFavorite(item)"
                         :class="{ 'active': item.isFavorite }"
-                        title="收藏"
+                        :title="t('buttons.favorite')"
                       >
                         ♥
                       </button>
@@ -249,15 +265,15 @@
             <!-- 表头 -->
             <table class="songs-table table-header">
               <thead>
-                <tr>
-                  <th class="col-index">#</th>
-                  <th class="col-title">标题</th>
-                  <th class="col-artist">艺术家</th>
-                  <th class="col-album">专辑</th>
-                  <th class="col-duration">时长</th>
-                  <th class="col-actions">操作</th>
-                </tr>
-              </thead>
+                    <tr>
+                      <th class="col-index">#</th>
+                      <th class="col-title">{{ t('playlist.titleHeader') }}</th>
+                      <th class="col-artist">{{ t('playlist.artistHeader') }}</th>
+                      <th class="col-album">{{ t('playlist.albumHeader') }}</th>
+                      <th class="col-duration">{{ t('playlist.durationHeader') }}</th>
+                      <th class="col-actions">{{ t('playlist.actionsHeader') }}</th>
+                    </tr>
+                  </thead>
             </table>
             
             <!-- 普通滚动列表 -->
@@ -303,14 +319,14 @@
                 :class="{ 'active': selectedCueAlbum?.filePath === album.filePath }"
                 @click="selectCueAlbum(album)"
               >
-                <div class="album-name">{{ album.title || '未知专辑' }}</div>
-                <div class="album-artist">{{ album.performer || '未知艺术家' }}</div>
-                <div class="album-count">{{ (album as any).tracks?.length || 0 }} 首</div>
+                <div class="album-name">{{ album.title || t('playlist.unknownAlbum') }}</div>
+                <div class="album-artist">{{ album.performer || t('playlist.unknownArtist') }}</div>
+                <div class="album-count">{{ (album as any).tracks?.length || 0 }} {{ t('playlist.songs') }}</div>
               </div>
             </div>
             <div class="albums-content">
               <div v-if="!selectedCueAlbum" class="empty-selection">
-                <p>请选择一个CUE专辑</p>
+                <p>{{ t('playlist.selectCueAlbum') }}</p>
               </div>
               <div v-else class="song-list">
                 <!-- 表头 -->
@@ -318,10 +334,10 @@
                   <thead>
                     <tr>
                       <th class="col-index">#</th>
-                      <th class="col-title">标题</th>
-                      <th class="col-artist">艺术家</th>
-                      <th class="col-duration">时长</th>
-                      <th class="col-actions">操作</th>
+                      <th class="col-title">{{ t('playlist.titleHeader') }}</th>
+                      <th class="col-artist">{{ t('playlist.artistHeader') }}</th>
+                      <th class="col-duration">{{ t('playlist.durationHeader') }}</th>
+                      <th class="col-actions">{{ t('playlist.actionsHeader') }}</th>
                     </tr>
                   </thead>
                 </table>
@@ -348,7 +364,7 @@
                         class="action-btn favorite"
                         @click.stop="toggleFavorite(item as unknown as Song)"
                         :class="{ 'active': favorites.includes(item.id) }"
-                        title="收藏"
+                        :title="t('buttons.favorite')"
                       >
                         ♥
                       </button>
@@ -363,18 +379,18 @@
         <!-- 均衡器面板 -->
         <div class="equalizer-panel" :class="{ 'visible': equalizerVisible }">
           <div class="equalizer-header">
-            <h3>均衡器</h3>
-            <button class="close-btn" @click="toggleEqualizer" title="关闭">×</button>
+            <h3>{{ t('settings.equalizer') }}</h3>
+            <button class="close-btn" @click="toggleEqualizer" :title="t('common.close')">×</button>
           </div>
           <div class="equalizer-content">
             <div class="presets">
               <select v-model="currentPreset" @change="applyPreset">
-                <option value="flat">平坦</option>
-                <option value="rock">摇滚</option>
-                <option value="pop">流行</option>
-                <option value="jazz">爵士</option>
-                <option value="classical">古典</option>
-                <option value="electronic">电子</option>
+                <option value="flat">Flat</option>
+                <option value="rock">Rock</option>
+                <option value="pop">Pop</option>
+                <option value="jazz">Jazz</option>
+                <option value="classical">Classical</option>
+                <option value="electronic">Electronic</option>
               </select>
             </div>
             <div class="bands">
@@ -411,22 +427,22 @@
             <p v-if="currentSong" ref="artistElement" :class="{ 'long-text': isTextLong('artist') }">
               <span class="ellipsis-text">{{ getDisplayArtist(currentSong) }} - {{ getDisplayAlbum(currentSong) }}</span>
             </p>
-            <p v-else class="no-song">未选择歌曲</p>
+            <p v-else class="no-song">{{ t('playlist.noSongSelected') }}</p>
           </div>
         </div>
       </div>
       <div class="player-center">
         <div class="playback-controls">
-          <button class="control-btn" @click="changePlaybackMode" title="播放模式">
+          <button class="control-btn" @click="changePlaybackMode" :title="t('buttons.playbackMode')">
             <img :src="playbackModeImage" alt="播放模式" class="control-icon" />
           </button>
-          <button class="control-btn" @click="playPrevious" title="上一首">
+          <button class="control-btn" @click="playPrevious" :title="t('buttons.previous')">
             <img src="/last-track-button_23ee-fe0f.png" alt="上一首" class="control-icon" />
           </button>
-          <button class="control-btn play" @click="togglePlayback" title="播放/暂停">
+          <button class="control-btn play" @click="togglePlayback" :title="t('buttons.playPause')">
             <img :src="isPlaying ? '/pause-button_23f8-fe0f.png' : '/play-button_25b6-fe0f.png'" alt="播放/暂停" class="control-icon" />
           </button>
-          <button class="control-btn" @click="playNext" title="下一首">
+          <button class="control-btn" @click="playNext" :title="t('buttons.next')">
             <img src="/next-track-button_23ed-fe0f.png" alt="下一首" class="control-icon" />
           </button>
         </div>
@@ -447,9 +463,9 @@
         </div>
         
         <!-- 歌词显示区域 -->
-        <div v-if="showLyrics" class="lyrics-display" :class="{ 'has-lyrics': lyrics.length > 0 }">
+        <div v-if="showLyrics && lyricsPosition !== 'top'" class="lyrics-display" :class="{ 'has-lyrics': lyrics.length > 0 }">
           <div v-if="lyrics.length === 0" class="lyrics-placeholder">
-            暂无歌词
+            {{ t('playlist.noLyrics') }}
           </div>
           <div v-else class="lyrics-container">
             <div 
@@ -467,7 +483,7 @@
       <div class="player-right">
         <div class="player-right-top">
           <div class="volume-control">
-            <button class="control-btn" @click="toggleMute" title="静音">
+            <button class="control-btn" @click="toggleMute" :title="t('buttons.mute')">
               {{ isMuted ? '🔇' : '🔊' }}
             </button>
             <input 
@@ -480,25 +496,25 @@
             />
           </div>
           
-          <button class="control-btn" @click="showLyrics = !showLyrics" title="显示/隐藏歌词">
+          <button class="control-btn" @click="showLyrics = !showLyrics" :title="t('buttons.toggleLyrics')">
             🎵
           </button>
-          <button class="control-btn" @click="showSettingsModal = true" title="设置">
+          <button class="control-btn" @click="showSettingsModal = true" :title="t('buttons.settings')">
             ⚙️
           </button>
         </div>
         
         <!-- 下一首歌曲信息 - 仅当正在播放时显示 -->
         <div class="next-song-info" v-if="currentSong && nextSong">
-          <div class="next-song-label">下一首</div>
+          <div class="next-song-label">{{ t('playlist.nextSong') }}</div>
           <div class="next-song-title" :title="getDisplayTitle(nextSong)">
             {{ getDisplayTitle(nextSong) }}
           </div>
           <div class="next-song-artist" :title="getDisplayArtist(nextSong)">
             {{ getDisplayArtist(nextSong) }}
           </div>
-          <button class="skip-next-btn" @click="skipNextSong" title="跳过下一首">
-            跳过 ⏭
+          <button class="skip-next-btn" @click="skipNextSong" :title="t('playlist.skip') + ' ' + t('playlist.nextSong')">
+            {{ t('playlist.skip') }} ⏭
           </button>
         </div>
       </div>
@@ -507,13 +523,13 @@
     <!-- 歌曲菜单 -->
     <div v-if="showSongMenu" class="song-menu" :style="menuPosition">
       <ul>
-        <li @click="playSong(selectedSong!)">播放</li>
-        <li @click="addSongToPlaylist(selectedSong!)">添加到歌单</li>
+        <li @click="playSong(selectedSong!)">{{ t('menu.play') }}</li>
+        <li @click="addSongToPlaylist(selectedSong!)">{{ t('menu.addToPlaylist') }}</li>
         <li @click="toggleFavorite(selectedSong!)">
-          {{ selectedSong?.isFavorite ? '取消收藏' : '添加到收藏' }}
+          {{ selectedSong?.isFavorite ? t('menu.removeFromFavorites') : t('menu.addToFavorites') }}
         </li>
-        <li @click="editSongTags(selectedSong!)">编辑歌曲标签</li>
-        <li @click="deleteSong(selectedSong!)" class="danger">删除</li>
+        <li @click="editSongTags(selectedSong!)">{{ t('menu.editTags') }}</li>
+        <li @click="deleteSong(selectedSong!)" class="danger">{{ t('menu.delete') }}</li>
       </ul>
     </div>
     
@@ -521,15 +537,15 @@
     <div v-if="showEditTagsModal" class="modal-overlay" @click="closeEditTagsModal">
       <div class="modal-content edit-tags-modal" @click.stop>
         <div class="modal-header">
-          <h3>编辑歌曲标签</h3>
+          <h3>{{ t('modal.editTagsTitle') }}</h3>
           <button class="close-btn" @click="closeEditTagsModal">×</button>
         </div>
         <div class="modal-body">
           <!-- 在线匹配 -->
           <div class="match-section">
-            <span>不想手动填写标签？</span>
+            <span>{{ t('modal.dontWantToFill') }}</span>
             <button class="match-btn" @click="onlineMatch">
-              自动匹配标签
+              {{ t('modal.autoMatchTags') }}
             </button>
           </div>
           
@@ -541,21 +557,21 @@
                 :class="{ active: activeTab === 'info' }"
                 @click="activeTab = 'info'"
               >
-                基本信息
+                {{ t('modal.basicInfo') }}
               </button>
               <button 
                 class="tab-button" 
                 :class="{ active: activeTab === 'lyric' }"
                 @click="activeTab = 'lyric'"
               >
-                歌词
+                {{ t('modal.lyrics') }}
               </button>
               <button 
                 class="tab-button" 
                 :class="{ active: activeTab === 'cover' }"
                 @click="activeTab = 'cover'"
               >
-                封面
+                {{ t('modal.cover') }}
               </button>
             </div>
             
@@ -563,80 +579,80 @@
             <div v-show="activeTab === 'info'" class="tab-content">
               <div class="form-row">
                 <div class="form-group">
-                  <label>文件名</label>
+                  <label>{{ t('modal.fileName') }}</label>
                   <input type="text" v-model="editTagsForm.fileName" disabled>
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>标题</label>
-                  <input type="text" v-model="editTagsForm.title" placeholder="请输入标题">
+                  <label>{{ t('modal.title') }}</label>
+                  <input type="text" v-model="editTagsForm.title" :placeholder="t('modal.enterTitle')">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>艺术家</label>
-                  <input type="text" v-model="editTagsForm.artist" placeholder="请输入艺术家">
+                  <label>{{ t('modal.artist') }}</label>
+                  <input type="text" v-model="editTagsForm.artist" :placeholder="t('modal.enterArtist')">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>专辑</label>
-                  <input type="text" v-model="editTagsForm.album" placeholder="请输入专辑">
+                  <label>{{ t('modal.album') }}</label>
+                  <input type="text" v-model="editTagsForm.album" :placeholder="t('modal.enterAlbum')">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>专辑艺术家</label>
-                  <input type="text" v-model="editTagsForm.albumArtist" placeholder="请输入专辑艺术家">
+                  <label>{{ t('modal.albumArtist') }}</label>
+                  <input type="text" v-model="editTagsForm.albumArtist" :placeholder="t('modal.enterAlbumArtist')">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>流派</label>
-                  <input type="text" v-model="editTagsForm.genre" placeholder="请输入流派">
+                  <label>{{ t('modal.genre') }}</label>
+                  <input type="text" v-model="editTagsForm.genre" :placeholder="t('modal.enterGenre')">
                 </div>
               </div>
               <div class="form-row three-col">
                 <div class="form-group">
-                  <label>年份</label>
-                  <input type="text" v-model="editTagsForm.year" placeholder="请输入年份">
+                  <label>{{ t('modal.year') }}</label>
+                  <input type="text" v-model="editTagsForm.year" :placeholder="t('modal.enterYear')">
                 </div>
                 <div class="form-group">
-                  <label>音轨号</label>
-                  <input type="text" v-model="editTagsForm.trackNumber" placeholder="请输入音轨号">
+                  <label>{{ t('modal.trackNumber') }}</label>
+                  <input type="text" v-model="editTagsForm.trackNumber" :placeholder="t('modal.enterTrackNumber')">
                 </div>
                 <div class="form-group">
-                  <label>光盘号</label>
-                  <input type="text" v-model="editTagsForm.discNumber" placeholder="请输入光盘号">
+                  <label>{{ t('modal.discNumber') }}</label>
+                  <input type="text" v-model="editTagsForm.discNumber" :placeholder="t('modal.enterDiscNumber')">
                 </div>
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>别名</label>
-                  <input type="text" v-model="editTagsForm.alia" placeholder="请输入别名">
+                  <label>{{ t('modal.alia') }}</label>
+                  <input type="text" v-model="editTagsForm.alia" :placeholder="t('modal.enterAlia')">
                 </div>
               </div>
               
               <!-- CUE信息区域 -->
               <div v-if="songToEdit && songToEdit.isCueTrack" class="cue-info-section">
-                <h4>CUE信息</h4>
+                <h4>{{ t('modal.cueInfo') }}</h4>
                 <div class="form-row">
                   <div class="form-group">
-                    <label>音轨号</label>
-                    <input type="text" v-model="editTagsForm.trackNumber" placeholder="请输入音轨号">
+                    <label>{{ t('modal.trackNumber') }}</label>
+                    <input type="text" v-model="editTagsForm.trackNumber" :placeholder="t('modal.enterTrackNumber')">
                   </div>
                 </div>
                 <div class="form-row">
                   <div class="form-group">
-                    <label>开始时间 (秒)</label>
-                    <input type="number" v-model="songToEdit.startTime" placeholder="开始时间">
+                    <label>{{ t('modal.startTime') }}</label>
+                    <input type="number" v-model="songToEdit.startTime" :placeholder="t('modal.enterStartTime')">
                   </div>
                 </div>
                 <div class="form-row">
                   <div class="form-group">
-                    <label>结束时间 (秒)</label>
-                    <input type="number" v-model="songToEdit.endTime" placeholder="结束时间">
+                    <label>{{ t('modal.endTime') }}</label>
+                    <input type="number" v-model="songToEdit.endTime" :placeholder="t('modal.enterEndTime')">
                   </div>
                 </div>
                 <div v-if="(songToEdit as any).cueInfo" class="cue-info-text">
@@ -645,33 +661,33 @@
               </div>
               <div class="form-row">
                 <div class="form-group">
-                  <label>路径</label>
+                  <label>{{ t('modal.path') }}</label>
                   <div class="input-with-button">
                     <input type="text" :value="songToEdit?.path" disabled>
-                    <button class="copy-btn" @click="copyPath">复制</button>
+                    <button class="copy-btn" @click="copyPath">{{ t('modal.copy') }}</button>
                   </div>
                 </div>
               </div>
               <div class="lyric-actions">
-                <button class="action-btn" @click="readLocalMetadata">从文件读取元数据</button>
-                <button class="action-btn" @click="autoMatchTags">从文件名匹配</button>
-                <button class="action-btn" @click="onlineMatch">在线匹配标签</button>
-                <button class="action-btn" @click="fetchCover">获取封面</button>
+                <button class="action-btn" @click="readLocalMetadata">{{ t('modal.readLocalMetadata') }}</button>
+                <button class="action-btn" @click="autoMatchTags">{{ t('modal.matchFromFilename') }}</button>
+                <button class="action-btn" @click="onlineMatch">{{ t('modal.onlineMatchTags') }}</button>
+                <button class="action-btn" @click="fetchCover">{{ t('modal.getCover') }}</button>
               </div>
             </div>
             
             <!-- 歌词标签页 -->
             <div v-show="activeTab === 'lyric'" class="tab-content">
               <div class="form-group">
-                <label>歌词</label>
+                <label>{{ t('modal.lyrics') }}</label>
                 <textarea 
                   v-model="editTagsForm.lyric" 
-                  placeholder="请输入歌词" 
+                  placeholder="[00:00.00] Lyrics content" 
                   rows="10"
                 ></textarea>
               </div>
               <div class="lyric-actions">
-                <button class="action-btn" @click="fetchLyric">获取歌词</button>
+                <button class="action-btn" @click="fetchLyric">{{ t('modal.getLyrics') }}</button>
               </div>
             </div>
             
@@ -680,19 +696,19 @@
               <div class="cover-section">
                 <div class="cover-preview" @click="changeCover">
                   <img v-if="editTagsForm.cover" :src="editTagsForm.cover" alt="封面">
-                  <div v-else class="cover-placeholder">点击更换封面</div>
+                  <div v-else class="cover-placeholder">{{ t('modal.clickToChangeCover') }}</div>
                 </div>
                 <div class="cover-actions">
-                  <button class="action-btn" @click="changeCover">选择封面</button>
-                  <button class="action-btn" @click="fetchCover">获取封面</button>
+                  <button class="action-btn" @click="changeCover">{{ t('modal.selectCover') }}</button>
+                  <button class="action-btn" @click="fetchCover">{{ t('modal.getCover') }}</button>
                 </div>
               </div>
             </div>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn-cancel" @click="closeEditTagsModal">取消</button>
-          <button class="btn-save" @click="saveSongTags">保存</button>
+          <button class="btn-cancel" @click="closeEditTagsModal">{{ t('common.cancel') }}</button>
+          <button class="btn-save" @click="saveSongTags">{{ t('common.save') }}</button>
         </div>
       </div>
     </div>
@@ -701,7 +717,7 @@
     <div v-if="showSettingsModal" class="modal-overlay" @click="showSettingsModal = false">
       <div class="modal-content settings-modal" @click.stop>
         <div class="modal-header">
-          <h2>设置</h2>
+          <h2>{{ t('common.settings') }}</h2>
           <button class="close-btn" @click="showSettingsModal = false">×</button>
         </div>
         <div class="modal-body">
@@ -711,11 +727,15 @@
             v-model:autoPlayNext="autoPlayNext"
             v-model:theme="theme"
             v-model:language="language"
+            v-model:musicDirectory="musicDirectory"
             v-model:showLyrics="showLyrics"
+            v-model:lyricsPosition="lyricsPosition"
             v-model:equalizerEnabled="equalizerVisible"
             v-model:currentPreset="currentPreset"
             v-model:enableTranscode="enableTranscode"
             v-model:forceTranscode="forceTranscode"
+            :isBrowser="isBrowser"
+            @browseMusicDirectory="browseMusicDirectory"
             @save="showSettingsModal = false"
             @cancel="showSettingsModal = false"
           />
@@ -740,10 +760,10 @@
         >
           <span class="cover-modal-drag-hint">双击全屏 / 拖动移动</span>
           <div class="cover-modal-controls">
-            <button class="cover-modal-btn" @click="toggleCoverModalFullscreen" title="全屏/还原">
-              {{ isCoverModalFullscreen ? '⛶' : '□' }}
+            <button class="cover-modal-btn" @click="toggleCoverModalFullscreen" :title="t('buttons.fullscreen')">
+              {{ isCoverModalFullscreen ? '📱' : '📺' }}
             </button>
-            <button class="cover-modal-btn" @click="closeCoverModal" title="关闭">✕</button>
+            <button class="cover-modal-btn" @click="closeCoverModal" :title="t('buttons.close')">✕</button>
           </div>
         </div>
         
@@ -762,9 +782,10 @@
           </div>
           <div class="cover-modal-right">
             <div v-if="lyrics.length > 0" class="cover-modal-lyrics" ref="coverLyricsContainer">
-              <div 
-                v-for="(line, index) in lyrics" 
+              <div
+                v-for="(line, index) in lyrics"
                 :key="index"
+                :ref="(el) => { if (el) coverLyricLineRefs[index] = el }"
                 class="cover-lyric-line"
                 :class="{ 'active': index === currentLyricIndex }"
               >
@@ -772,7 +793,7 @@
               </div>
             </div>
             <div v-else class="cover-modal-no-lyrics">
-              暂无歌词
+              {{ t('playlist.noLyrics') }}
             </div>
           </div>
         </div>
@@ -810,19 +831,25 @@ const LOG_LEVEL = 0
 
 // 日志函数
 function logInfo(...args: any[]) {
-  // 只输出滚动事件相关的日志
-  if (ENABLE_LOGS && args[0] === '滚动事件触发:') {
+  // 输出所有日志
+  if (ENABLE_LOGS) {
     console.log(...args)
   }
 }
 
 function logError(...args: any[]) {
-  // 禁用错误日志
+  // 输出错误日志
+  if (ENABLE_LOGS) {
+    console.error(...args)
+  }
 }
 
 // 详细日志函数（仅在LOG_LEVEL=3时输出）
 function logDebug(...args: any[]) {
   // 禁用详细日志
+  if (ENABLE_LOGS && LOG_LEVEL >= 3) {
+    console.log(...args)
+  }
 }
 
 // 类型定义 - 独立的Song接口，与local.ts中的Song兼容
@@ -846,6 +873,8 @@ interface Song {
   cueInfo?: string
   // 转码相关
   needs_transcode: boolean
+  // 浏览器环境下的原始文件对象（仅浏览器环境使用）
+  file?: File
 }
 
 // 歌词行类型
@@ -870,12 +899,29 @@ const activeTab = ref('info')
 const lyrics = ref<LyricLine[]>([])
 const currentLyricIndex = ref(-1)
 const showLyrics = ref(true)
+const lyricsPosition = ref<'top' | 'bottom'>('bottom')
 
 // 主题相关状态
 const theme = ref<'dark' | 'light'>('dark')
 
 // 语言相关状态
 const language = ref('zh-CN')
+
+// 音乐目录设置（仅浏览器）
+const musicDirectory = ref('')
+
+// 环境检测 - 使用Tauri v2的isTauri()函数
+const checkIsBrowser = async () => {
+  try {
+    const isTauriEnv = await isTauri()
+    console.log('【环境检测】isTauri():', isTauriEnv)
+    return !isTauriEnv
+  } catch (error) {
+    console.log('【环境检测】isTauri()调用失败，认为是浏览器环境:', error)
+    return true
+  }
+}
+const isBrowser = ref(true) // 默认为浏览器环境，等待异步检测完成
 
 // 播放设置
 const crossfadeEnabled = ref(false)
@@ -913,6 +959,19 @@ const currentSong = ref<Song | null>(null)
 const currentPosition = ref(0)
 const progress = ref(0)
 const isPlaying = ref(false)
+
+// 浏览器环境下的文件对象存储
+const browserFileMap = new Map<string, File>()
+
+// 启用日志输出以便调试
+function enableLogs(): void {
+  (window as any).logInfo = logInfo
+  ;(window as any).logError = logError
+  ;(window as any).browserFileMap = browserFileMap
+}
+
+// 调用以启用全局日志
+enableLogs()
 
 // updateProgress调用计数
 let updateProgressCallCount = 0
@@ -961,11 +1020,13 @@ const equalizerBands = ref<number[]>([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
 // 计算属性
 const currentFilterText = computed(() => {
+  // 依赖语言和翻译状态，确保语言切换时重新计算
+  const currentLang = i18nService.getCurrentLanguage()
   const filters = {
-    all: '全部歌曲',
-    favorites: '我喜欢的歌曲',
-    artists: '艺术家',
-    albums: '专辑',
+    all: t('playlist.allSongs'),
+    favorites: t('playlist.favorites'),
+    artists: t('playlist.artists'),
+    albums: t('playlist.albums'),
     cue: 'CUE专辑'
   }
   return filters[currentFilter.value]
@@ -1077,7 +1138,7 @@ const coverModalContent = ref<HTMLElement | null>(null)
 const songListContainer = ref<HTMLElement | null>(null)
 
 // 滚动相关状态
-const showScrollTopButton = ref(false)
+const showScrollTopButton = ref(true) // 始终显示回到顶部按钮
 const showJumpToCurrentButton = ref(true)
 
 // 封面模态框拖动和全屏状态
@@ -1092,9 +1153,16 @@ let modalStartY = 0
 // 滚动事件处理函数
 const handleScroll = () => {
   if (songListContainer.value) {
+    // 尝试获取实际滚动容器的滚动位置
+    let scrollTop = songListContainer.value.scrollTop
+    const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
+    if (songList && songList.scrollTop > 0) {
+      scrollTop = songList.scrollTop
+    }
+    
     // 控制回到顶部按钮的显示/隐藏
-    showScrollTopButton.value = songListContainer.value.scrollTop > 0
-    logInfo('滚动事件触发: scrollTop=', songListContainer.value.scrollTop, 'showScrollTopButton=', showScrollTopButton.value)
+    // showScrollTopButton.value = scrollTop > 100
+    logInfo('滚动事件触发: scrollTop=', scrollTop, 'showScrollTopButton=', showScrollTopButton.value)
     
     // 控制跳转到当前曲目按钮的显示/隐藏
     if (currentSong.value) {
@@ -1191,11 +1259,14 @@ const playCueTrackInApp = async (track: any) => {
     cover: '',
     year: '',
     genre: '',
+    lyric: '',
+    isFavorite: false,
     isCueTrack: true,
     startTime: startTime,
     endTime: endTime,
     parentFile: track.parentFile || track.parent_file,
-    trackNumber: String(track.trackNumber || track.track_number || '')
+    trackNumber: String(track.trackNumber || track.track_number || ''),
+    needs_transcode: false
   }
 
   logDebug('转换后的song:', song)
@@ -1209,7 +1280,138 @@ const scanMusic = async () => {
     const tauri = isTauri()
     
     if (!tauri) {
-      alert('请在桌面应用中运行此功能')
+      // 浏览器环境处理
+      if (!musicDirectory.value) {
+        alert('请先在设置中设置音乐目录')
+        return
+      }
+      
+      // 显示加载提示
+      const loadingDiv = document.createElement('div')
+      loadingDiv.id = 'loading-overlay'
+      loadingDiv.innerHTML = '<div class="loading-spinner">正在扫描目录，请稍候...</div>'
+      loadingDiv.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.8);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+      `
+      document.body.appendChild(loadingDiv)
+      
+      try {
+        // 在浏览器中，使用File API扫描音乐文件
+        const audioFiles: Song[] = []
+        
+        // 支持的音频格式
+        const audioExtensions = ['.mp3', '.flac', '.wav', '.ogg', '.aac', '.m4a']
+        
+        // 创建文件选择器，允许选择多个文件
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.webkitdirectory = true
+        input.multiple = true
+        
+        input.onchange = async (event) => {
+          try {
+            const target = event.target as HTMLInputElement
+            if (target.files && target.files.length > 0) {
+              const files = Array.from(target.files)
+              
+              // 过滤出音频文件
+              const audioFileList = files.filter(file => {
+                const extension = '.' + file.name.split('.').pop()?.toLowerCase() || ''
+                return audioExtensions.includes(extension)
+              })
+              
+              logInfo(`找到 ${audioFileList.length} 个音频文件`)
+              
+              // 处理每个音频文件
+              for (const file of audioFileList) {
+                try {
+                  // 创建blob URL并存储，播放时直接使用
+                  const objectURL = URL.createObjectURL(file)
+                  
+                  // 从文件名解析艺术家和标题
+                  // 支持格式: "艺术家-标题.mp3" 或 "艺术家 - 标题.mp3"
+                  const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, '')
+                  let title = fileNameWithoutExt
+                  let artist = '未知艺术家'
+                  let album = '未知专辑'
+                  
+                  // 尝试从文件名解析艺术家和标题
+                  // 匹配格式: "艺术家-标题" 或 "艺术家 - 标题"
+                  const match = fileNameWithoutExt.match(/^(.+?)[\s]*-[\s]*(.+)$/)
+                  if (match) {
+                    artist = match[1].trim()
+                    title = match[2].trim()
+                    logInfo(`从文件名解析: 艺术家="${artist}", 标题="${title}"`)
+                  } else {
+                    logInfo(`无法从文件名解析艺术家，使用文件名作为标题: "${title}"`)
+                  }
+                  
+                  const song: Song = {
+                    id: `browser_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+                    title: title,
+                    artist: artist,
+                    album: album,
+                    duration: '未知', // 时长在播放时获取
+                    path: objectURL, // 使用blob URL作为路径
+                    cover: '',
+                    year: '',
+                    genre: '',
+                    lyric: '',
+                    isCueTrack: false,
+                    needs_transcode: false
+                  }
+                  
+                  // 将File对象存储到Map中
+                  browserFileMap.set(song.id, file)
+                  
+                  audioFiles.push(song)
+                  logInfo(`已添加文件: ${file.name}, blob URL: ${objectURL}`)
+                  logInfo(`文件大小: ${file.size}, 文件类型: ${file.type}`)
+                } catch (fileError) {
+                  logError(`处理文件 ${file.name} 时出错:`, fileError)
+                }
+              }
+              
+              // 添加扫描到的歌曲到播放列表
+              if (audioFiles.length > 0) {
+                songs.value = [...songs.value, ...audioFiles]
+                logInfo(`已添加 ${audioFiles.length} 首歌曲到播放列表`)
+                alert(`成功扫描到 ${audioFiles.length} 首歌曲`)
+              } else {
+                alert('未找到音频文件')
+              }
+            }
+          } catch (error) {
+            logError('处理文件时出错:', error)
+            alert(`扫描失败：${error}`)
+          } finally {
+            // 移除加载提示
+            if (document.getElementById('loading-overlay')) {
+              document.body.removeChild(document.getElementById('loading-overlay')!)
+            }
+          }
+        }
+        
+        input.click()
+        
+        return
+      } catch (error) {
+        logError('扫描音乐失败:', error)
+        alert(`扫描失败：${error}`)
+        // 移除加载提示
+        if (document.getElementById('loading-overlay')) {
+          document.body.removeChild(document.getElementById('loading-overlay')!)
+        }
+      }
       return
     }
     
@@ -1285,17 +1487,19 @@ const scanMusic = async () => {
               cover: '',
               year: '',
               genre: '',
+              lyric: '',
               isCueTrack: true,
               startTime: typeof track.startTime === 'string' ? parseFloat(track.startTime) : track.startTime,
               endTime: track.endTime ? (typeof track.endTime === 'string' ? parseFloat(track.endTime) : track.endTime) : undefined,
               parentFile: track.parentFile,
               trackNumber: String(track.trackNumber || ''),
               cueInfo: track.cueInfo,
-              isFavorite: favorites.value.includes(track.id)
-            }))
+              isFavorite: favorites.value.includes(track.id),
+              needs_transcode: false
+            } as Song))
 
             // 过滤掉CUE关联的音频文件
-            const filteredTracks = result.tracks.filter(track => !cueParentFiles.has(track.path))
+            const filteredTracks = result.tracks.filter((track: any) => !cueParentFiles.has(track.path)) as Song[]
             songs.value = [...filteredTracks, ...cueSongs]
             
             if (cueTrackCount > 0) {
@@ -1635,81 +1839,85 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       logDebug('标准化后的路径:', normalizedPath)
     }
 
-    // 检查文件是否存在
+    // 检查文件是否存在（仅桌面应用）
     let finalPlayPath = playPath
-    try {
-      const fileExists = await exists(playPath)
-      logDebug('文件存在性检查:', { path: playPath, exists: fileExists })
-      if (!fileExists) {
-        logError('❌ 音频文件不存在，无法播放:', playPath)
-        errorMessage = '文件不存在: ' + playPath
-        isPlaying.value = false
-        isPlaybackFinished = true
-        throw new Error(errorMessage)
-      }
-    } catch (error) {
-      logError('❌ 文件存在性检查失败:', error)
-      errorMessage = error && typeof error === 'object' && 'message' in error ? (error.message as string) : ('文件检查失败: ' + String(error))
-      isPlaying.value = false
-      isPlaybackFinished = true
-      throw new Error(errorMessage)
-    }
-
-    // 从后端获取音频信息（包含时长、采样率、编码器等）
     let durationFromBackend: number | null = null
     let audioInfoFromBackend: any = null
-    try {
-      const result = await invoke('get_audio_duration', { path: playPath })
-      if (result && typeof result === 'object') {
-        if ('duration' in result) {
-          durationFromBackend = Number(result.duration)
-          logDebug('从后端获取的音频时长:', durationFromBackend, '秒')
-        }
-        // 保存完整的音频信息
-        audioInfoFromBackend = result
-        logDebug('从后端获取的完整音频信息:', audioInfoFromBackend)
-      }
-    } catch (error) {
-      logInfo('获取音频信息失败:', error)
-    }
-
-    // 检查是否需要转码（仅当启用转码功能时）
-    if (enableTranscode.value) {
-      logDebug('转码检查: 文件=' + playPath + ', 启用转码功能')
+    if (!isBrowser.value) {
       try {
-        // 传递音频信息给转码命令，避免重复调用ffprobe
-        // 增加超时时间到600秒（10分钟），以支持大文件转码
-        logInfo('调用get_transcoded_path，原文件路径:', playPath)
-        const transcodedPath = await invoke('get_transcoded_path', {
-          path: playPath, 
-          timeout_secs: 600,
-          audio_info: audioInfoFromBackend
-        }) as string
-        logInfo('get_transcoded_path返回:', transcodedPath)
-        finalPlayPath = transcodedPath
-        logInfo('更新finalPlayPath为转码后的路径:', finalPlayPath)
-        
-        // 验证转码后的文件是否存在
-        // 如果是HTTP URL，跳过文件存在性检查，因为HTTP URL是通过本地HTTP服务器提供的
-        if (!transcodedPath.startsWith('http://') && !transcodedPath.startsWith('https://')) {
-          const transcodedExists = await exists(transcodedPath)
-          if (!transcodedExists) {
-            logError('❌ 转码后的文件不存在:', transcodedPath)
-            errorMessage = '转码文件不存在: ' + transcodedPath
-            isPlaying.value = false
-            isPlaybackFinished = true
-            throw new Error(errorMessage)
-          }
+        const fileExists = await exists(playPath)
+        logDebug('文件存在性检查:', { path: playPath, exists: fileExists })
+        if (!fileExists) {
+          logError('❌ 音频文件不存在，无法播放:', playPath)
+          errorMessage = '文件不存在: ' + playPath
+          isPlaying.value = false
+          isPlaybackFinished = true
+          throw new Error(errorMessage)
         }
-      } catch (transcodeError) {
-        logError('❌ 获取转码文件失败:', transcodeError)
-        errorMessage = '转码失败: ' + (transcodeError && typeof transcodeError === 'object' && 'message' in transcodeError ? (transcodeError.message as string) : String(transcodeError))
-        logInfo('转码检查失败（无法播放原文件，因为原文件格式浏览器不支持）:', errorMessage)
-        // 转码失败时，不尝试播放原文件，因为原文件格式浏览器不支持
+      } catch (error) {
+        logError('❌ 文件存在性检查失败:', error)
+        errorMessage = error && typeof error === 'object' && 'message' in error ? (error.message as string) : ('文件检查失败: ' + String(error))
         isPlaying.value = false
         isPlaybackFinished = true
         throw new Error(errorMessage)
       }
+
+      // 从后端获取音频信息（包含时长、采样率、编码器等）
+      try {
+        const result = await invoke('get_audio_duration', { path: playPath })
+        if (result && typeof result === 'object') {
+          if ('duration' in result) {
+            durationFromBackend = Number(result.duration)
+            logDebug('从后端获取的音频时长:', durationFromBackend, '秒')
+          }
+          // 保存完整的音频信息
+          audioInfoFromBackend = result
+          logDebug('从后端获取的完整音频信息:', audioInfoFromBackend)
+        }
+      } catch (error) {
+        logInfo('获取音频信息失败:', error)
+      }
+
+      // 检查是否需要转码（仅当启用转码功能时）
+      if (enableTranscode.value) {
+        logDebug('转码检查: 文件=' + playPath + ', 启用转码功能')
+        try {
+          // 传递音频信息给转码命令，避免重复调用ffprobe
+          // 增加超时时间到600秒（10分钟），以支持大文件转码
+          logInfo('调用get_transcoded_path，原文件路径:', playPath)
+          const transcodedPath = await invoke('get_transcoded_path', {
+            path: playPath, 
+            timeout_secs: 600,
+            audio_info: audioInfoFromBackend
+          }) as string
+          logInfo('get_transcoded_path返回:', transcodedPath)
+          finalPlayPath = transcodedPath
+          logInfo('更新finalPlayPath为转码后的路径:', finalPlayPath)
+          
+          // 验证转码后的文件是否存在
+          // 如果是HTTP URL，跳过文件存在性检查，因为HTTP URL是通过本地HTTP服务器提供的
+          if (!transcodedPath.startsWith('http://') && !transcodedPath.startsWith('https://')) {
+            const transcodedExists = await exists(transcodedPath)
+            if (!transcodedExists) {
+              logError('❌ 转码后的文件不存在:', transcodedPath)
+              errorMessage = '转码文件不存在: ' + transcodedPath
+              isPlaying.value = false
+              isPlaybackFinished = true
+              throw new Error(errorMessage)
+            }
+          }
+        } catch (transcodeError) {
+          logError('❌ 获取转码文件失败:', transcodeError)
+          errorMessage = '转码失败: ' + (transcodeError && typeof transcodeError === 'object' && 'message' in transcodeError ? (transcodeError.message as string) : String(transcodeError))
+          logInfo('转码检查失败（无法播放原文件，因为原文件格式浏览器不支持）:', errorMessage)
+          // 转码失败时，不尝试播放原文件，因为原文件格式浏览器不支持
+          isPlaying.value = false
+          isPlaybackFinished = true
+          throw new Error(errorMessage)
+        }
+      }
+    } else {
+      logInfo('浏览器环境，跳过文件存在性检查和转码检查')
     }
 
     // 确保CUE track的时间参数正确传递
@@ -1777,19 +1985,64 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       
       // 额外的安全检查，确保音频元素已被清理
       if (audioElement.value) {
-        logWarn('音频元素清理后仍然存在，强制设为null')
+        console.warn('音频元素清理后仍然存在，强制设为null')
         audioElement.value = null
         timeupdateHandler = null
       }
       
       // 确保音频元素的src属性正确设置
       let audioUrl = finalPlayPath
-      if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://')) {
+      
+      // 浏览器环境下的特殊处理
+      if (isBrowser.value) {
+        // 从Map中获取File对象
+        const file = browserFileMap.get(song.id)
+        console.log('浏览器环境，从Map获取File对象:', { songId: song.id, hasFile: !!file, mapSize: browserFileMap.size })
+        if (file) {
+          try {
+            // 直接使用File对象创建blob URL
+            console.log('浏览器环境，File对象信息:', { name: file.name, size: file.size, type: file.type })
+            
+            // 检查文件类型是否被浏览器支持
+            const fileExtension = file.name.split('.').pop()?.toLowerCase() || ''
+            console.log('文件扩展名:', fileExtension)
+            
+            // 检查浏览器是否支持该音频格式
+            const audio = document.createElement('audio')
+            const canPlayType = audio.canPlayType(file.type)
+            console.log('浏览器支持该格式:', canPlayType)
+            
+            if (canPlayType === '') {
+              console.error('浏览器不支持该音频格式:', file.type, '文件:', file.name)
+              errorMessage = `浏览器不支持该音频格式: ${fileExtension.toUpperCase()}。请尝试使用MP3、WAV或OGG格式。`
+              isPlaying.value = false
+              isPlaybackFinished = true
+              throw new Error(errorMessage)
+            }
+            
+            const newObjectURL = URL.createObjectURL(file)
+            audioUrl = newObjectURL
+            console.log('浏览器环境，使用新创建的blob URL:', audioUrl)
+          } catch (error) {
+            console.error('创建blob URL失败:', error)
+            // 如果创建blob URL失败，尝试使用其他方式
+            errorMessage = '无法创建音频URL: ' + String(error)
+            isPlaying.value = false
+            isPlaybackFinished = true
+            throw new Error(errorMessage)
+          }
+        } else {
+          // 如果没有file对象，尝试直接使用path作为URL
+          console.log('浏览器环境，没有原始文件对象，尝试使用path作为URL:', audioUrl)
+          // 这里可以添加其他浏览器环境下的URL处理逻辑
+        }
+      } else if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://') && !audioUrl.startsWith('blob:') && !audioUrl.startsWith('blob:http://')) {
+        // 桌面应用环境，获取HTTP URL
         try {
           audioUrl = await invoke('get_file_http_url', { filePath: audioUrl }) as string
-          logInfo('获取HTTP URL成功:', audioUrl)
+          console.log('获取HTTP URL成功:', audioUrl)
         } catch (urlError) {
-          logError('❌ 前端播放: 获取HTTP URL失败:', urlError)
+          console.error('❌ 前端播放: 获取HTTP URL失败:', urlError)
           errorMessage = '无法获取文件URL: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
           isPlaying.value = false
           isPlaybackFinished = true
@@ -1797,12 +2050,68 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }
       }
       
+      // 不要修改blob URL格式，保持URL.createObjectURL返回的原始格式
+      console.log('最终使用的音频URL:', audioUrl)
+      
       // 创建音频元素并设置src
       logInfo('前端播放: 使用URL:', audioUrl)
       
-      audioElement.value = new Audio(audioUrl)
+      // 直接创建Audio元素并设置src
+      audioElement.value = new Audio()
       // 禁用autoplay，手动控制播放
       audioElement.value.autoplay = false
+      
+      // 浏览器环境下，直接使用File对象设置src
+      if (isBrowser.value) {
+        try {
+          audioElement.value.src = audioUrl
+          logInfo('浏览器环境，设置音频元素src为blob URL:', audioUrl)
+        } catch (error) {
+          logError('设置音频元素src失败:', error)
+          errorMessage = '无法设置音频URL: ' + String(error)
+          isPlaying.value = false
+          isPlaybackFinished = true
+          throw new Error(errorMessage)
+        }
+      } else {
+        // 其他环境，使用普通URL
+        audioElement.value.src = audioUrl
+        logInfo('设置音频元素src为普通URL:', audioUrl)
+      }
+      
+      // 浏览器环境下添加错误事件监听器
+      if (isBrowser.value) {
+        audioElement.value.addEventListener('error', (error) => {
+          logError('浏览器环境音频元素错误:', error, 'URL:', audioUrl)
+          if (error.target && 'error' in error.target) {
+            const audioError = error.target as HTMLAudioElement
+            logError('音频错误代码:', audioError.error?.code, 'URL:', audioUrl)
+            
+            // 错误代码解释：
+            // 1 = MEDIA_ERR_ABORTED - 音频加载被中止
+            // 2 = MEDIA_ERR_NETWORK - 网络错误
+            // 3 = MEDIA_ERR_DECODE - 解码错误
+            // 4 = MEDIA_ERR_SRC_NOT_SUPPORTED - 不支持的音频格式
+            switch (audioError.error?.code) {
+              case 1:
+                logError('音频加载被中止，请检查网络连接')
+                break
+              case 2:
+                logError('网络错误，请检查网络连接')
+                break
+              case 3:
+                logError('音频解码错误，可能是格式不支持')
+                break
+              case 4:
+                logError('不支持的音频格式')
+                break
+              default:
+                logError('未知音频错误')
+            }
+          }
+        })
+      }
+      
       // 添加timeupdate事件监听器，用于更新播放进度
       timeupdateHandler = () => {
         if (isPlaying.value && !isSeeking.value && audioElement.value) {
@@ -1844,6 +2153,10 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             logDebug('更新进度百分比:', progress.value)
           }
         }
+      } else if (isBrowser.value && song.duration === '未知') {
+        // 浏览器环境且时长未知，在播放时获取音频时长
+        logInfo('浏览器环境，等待音频加载以获取时长')
+        // 时长会在音频元素加载时自动更新
       } else {
         logInfo('未获取到音频时长，使用默认值')
       }
@@ -1867,9 +2180,12 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         logInfo('解析歌词，长度:', song.lyric.length)
         lyrics.value = parseLyrics(song.lyric)
         logInfo('歌词解析完成，行数:', lyrics.value.length)
+        // 清空歌词行 refs，等待 DOM 渲染后重新填充
+        coverLyricLineRefs.value = []
       } else {
         logInfo('歌曲无歌词')
         lyrics.value = []
+        coverLyricLineRefs.value = []
       }
       
       // 设置播放位置
@@ -1940,6 +2256,18 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
               resolve()
               return
             }
+            
+            // 浏览器环境，更新音频时长
+            if (isBrowser.value && currentSong.value && currentSong.value.duration === '未知') {
+              const duration = audioElement.value.duration
+              if (duration && !isNaN(duration)) {
+                const totalSeconds = Math.round(duration)
+                const minutes = Math.floor(totalSeconds / 60)
+                const seconds = totalSeconds % 60
+                currentSong.value.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+                logInfo('浏览器环境，更新音频时长:', currentSong.value.duration)
+              }
+            }
           
             try {
               // 设置播放位置
@@ -2008,7 +2336,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           }
           
           // 获取更详细的错误信息
-          const error = event.target.error
+          const error = (event as any).target?.error
           logError('音频元素错误:', event)
           if (error) {
             logError('音频错误详情: code=', error.code, 'message=', error.message)
@@ -2452,7 +2780,10 @@ const togglePlayback = async () => {
     logInfo('togglePlayback 完成,新 isPlaying:', isPlaying.value)
   } catch (error) {
     logError('切换播放状态失败:', error)
-    const errorMessage = error && typeof error === 'string' ? error : '未知错误'
+    const errorMessage = error && typeof error === 'object' && 'message' in error 
+      ? (error as Error).message 
+      : (error && typeof error === 'string' ? error : '未知错误')
+    console.error('详细错误信息:', error)
     alert(`播放控制失败：${errorMessage}`)
   } finally {
     // 释放锁
@@ -3011,21 +3342,38 @@ const scrollToTop = () => {
   console.log('scrollToTop 函数被调用')
   console.log('songListContainer.value:', songListContainer.value)
   if (songListContainer.value) {
-    // 找到实际的滚动容器
-    const scrollableContainer = songListContainer.value.querySelector('.song-list')
-    console.log('实际滚动容器:', scrollableContainer)
+    // 尝试多种方式找到实际的滚动容器
+    let scrollableContainer = songListContainer.value.querySelector('.song-list') as HTMLElement
+    console.log('找到 .song-list:', scrollableContainer)
+    
+    // 如果没有找到 .song-list，或者 .song-list 没有滚动条，则使用 songListContainer 本身
+    if (!scrollableContainer || scrollableContainer.scrollHeight <= scrollableContainer.clientHeight) {
+      // 检查 songListContainer 本身是否可滚动
+      if (songListContainer.value.scrollHeight > songListContainer.value.clientHeight) {
+        scrollableContainer = songListContainer.value
+        console.log('使用 songListContainer 作为滚动容器')
+      } else {
+        // 尝试查找其他可能的滚动容器
+        const allScrollable = songListContainer.value.querySelectorAll('*')
+        for (let i = 0; i < allScrollable.length; i++) {
+          const el = allScrollable[i] as HTMLElement
+          if (el.scrollHeight > el.clientHeight && el.clientHeight > 100) {
+            scrollableContainer = el
+            console.log('找到其他滚动容器:', el.className)
+            break
+          }
+        }
+      }
+    }
+    
     if (scrollableContainer) {
-      console.log('执行滚动到顶部操作')
+      console.log('执行滚动到顶部操作, scrollHeight:', scrollableContainer.scrollHeight)
       scrollableContainer.scrollTo({
         top: 0,
         behavior: 'smooth'
       })
     } else {
-      console.log('未找到实际滚动容器，尝试滚动song-list-container')
-      songListContainer.value.scrollTo({
-        top: 0,
-        behavior: 'smooth'
-      })
+      console.log('未找到可滚动的容器')
     }
   } else {
     console.log('songListContainer.value 为 null，无法执行滚动操作')
@@ -3159,21 +3507,42 @@ const openCoverModal = () => {
 // 滚动到当前歌词（封面模态框）
 const scrollToCurrentLyric = () => {
   const index = currentLyricIndex.value
-  if (index >= 0 && coverLyricsContainer.value) {
-    const lineElement = coverLyricLineRefs.value[index]
-    if (lineElement && coverLyricsContainer.value) {
-      const container = coverLyricsContainer.value
-      const lineTop = lineElement.offsetTop
-      const lineHeight = lineElement.offsetHeight
-      const containerHeight = container.clientHeight
-      const scrollTop = lineTop - containerHeight / 2 + lineHeight / 2
-      
-      container.scrollTo({
-        top: Math.max(0, scrollTop),
-        behavior: 'smooth'
-      })
-      logInfo('歌词滚动: 滚动到歌词行', index)
+  logInfo('封面歌词滚动: 尝试滚动到歌词行', index, 'coverLyricsContainer:', !!coverLyricsContainer.value, 'coverLyricLineRefs:', coverLyricLineRefs.value.length)
+
+  if (index < 0 || !coverLyricsContainer.value) {
+    logInfo('封面歌词滚动: 条件不满足，index=', index, 'container=', !!coverLyricsContainer.value)
+    return
+  }
+
+  // 尝试从 ref 获取元素
+  let lineElement = coverLyricLineRefs.value[index]
+
+  // 如果 ref 不存在，尝试使用 querySelector 作为备用方案
+  if (!lineElement) {
+    logInfo('封面歌词滚动: ref 不存在，尝试使用 querySelector')
+    const allLines = coverLyricsContainer.value.querySelectorAll('.cover-lyric-line')
+    if (allLines[index]) {
+      lineElement = allLines[index] as any
+      logInfo('封面歌词滚动: 通过 querySelector 找到元素')
     }
+  }
+
+  if (lineElement && coverLyricsContainer.value) {
+    const container = coverLyricsContainer.value
+    const lineTop = (lineElement as HTMLElement).offsetTop
+    const lineHeight = (lineElement as HTMLElement).offsetHeight
+    const containerHeight = container.clientHeight
+    const scrollTop = lineTop - containerHeight / 2 + lineHeight / 2
+
+    logInfo('封面歌词滚动: lineTop=', lineTop, 'lineHeight=', lineHeight, 'containerHeight=', containerHeight, 'scrollTop=', scrollTop)
+
+    container.scrollTo({
+      top: Math.max(0, scrollTop),
+      behavior: 'smooth'
+    })
+    logInfo('封面歌词滚动: 成功滚动到歌词行', index)
+  } else {
+    logInfo('封面歌词滚动: 无法获取歌词行元素，所有行数:', coverLyricContainer.value.querySelectorAll('.cover-lyric-line').length)
   }
 }
 
@@ -3768,15 +4137,17 @@ const syncLyrics = () => {
   if (index !== currentLyricIndex.value) {
     const prevIndex = currentLyricIndex.value
     currentLyricIndex.value = index
-    
+
     if (index >= 0 && index < lyrics.value.length) {
       logInfo('歌词同步: 更新当前歌词索引从', prevIndex, '到', index, '文本:', lyrics.value[index].text)
     } else {
       logInfo('歌词同步: 更新当前歌词索引从', prevIndex, '到', index)
     }
-    
+
     // 封面模态框歌词自动滚动到当前行
+    logInfo('歌词同步: 封面模态框状态 showCoverModal=', showCoverModal.value, '当前索引=', index)
     if (showCoverModal.value && index >= 0) {
+      logInfo('歌词同步: 将滚动封面歌词到行', index)
       nextTick(() => {
         scrollToCurrentLyric()
       })
@@ -3786,7 +4157,9 @@ const syncLyrics = () => {
 
 const minimizeWindow = async () => {
   try {
-    await invoke('minimize_window')
+    if (!isBrowser.value) {
+      await invoke('minimize_window')
+    }
   } catch (error) {
     logError('最小化窗口失败:', error)
   }
@@ -3794,7 +4167,9 @@ const minimizeWindow = async () => {
 
 const toggleMaximizeWindow = async () => {
   try {
-    await invoke('toggle_maximize_window')
+    if (!isBrowser.value) {
+      await invoke('toggle_maximize_window')
+    }
   } catch (error) {
     logError('切换最大化状态失败:', error)
   }
@@ -3900,10 +4275,12 @@ const updateProgress = () => {
           if (enableTranscode.value && remainingTime <= 20 && !hasPretranscodedNextSong && nextSong.value) {
             hasPretranscodedNextSong = true
             
-            // 在后台静默开始转码，不等待结果
-            invoke('pretranscode_audio', { path: nextSong.value.path, force_transcode: forceTranscode.value }).catch((error) => {
-              logError('[预转码] 预转码失败:', error)
-            })
+            // 在后台静默开始转码，不等待结果（仅桌面应用）
+            if (!isBrowser.value) {
+              invoke('pretranscode_audio', { path: nextSong.value.path, force_transcode: forceTranscode.value }).catch((error) => {
+                logError('[预转码] 预转码失败:', error)
+              })
+            }
           }
         }
       }
@@ -4025,7 +4402,15 @@ onMounted(() => {
   // 监听滚动事件
   nextTick(() => {
     if (songListContainer.value) {
-      songListContainer.value.addEventListener('scroll', handleScroll)
+      // 尝试找到实际的滚动容器并添加事件监听器
+      const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
+      if (songList) {
+        songList.addEventListener('scroll', handleScroll)
+        console.log('滚动事件监听器已添加到 .song-list 元素')
+      } else {
+        songListContainer.value.addEventListener('scroll', handleScroll)
+        console.log('滚动事件监听器已添加到 songListContainer 元素')
+      }
       // 初始调用一次，设置初始状态
       handleScroll()
     }
@@ -4034,6 +4419,10 @@ onMounted(() => {
 
 // 异步初始化
 ;(async () => {
+  // 首先检测运行环境
+  isBrowser.value = await checkIsBrowser()
+  logInfo('【环境检测】最终结果 isBrowser:', isBrowser.value)
+  
   // 加载保存的歌曲
   const savedSongs = await localStorageService.getSongs()
   if (savedSongs.length > 0) {
@@ -4109,10 +4498,12 @@ onMounted(() => {
   equalizerBands.value = savedSettings.equalizerBands
   theme.value = savedSettings.theme || 'dark'
   language.value = savedSettings.language || 'zh-CN'
+  musicDirectory.value = savedSettings.musicDirectory || ''
   crossfadeEnabled.value = savedSettings.crossfadeEnabled ?? false
   crossfadeDuration.value = savedSettings.crossfadeDuration ?? 1
   autoPlayNext.value = savedSettings.autoPlayNext ?? true
   showLyrics.value = savedSettings.showLyrics ?? true
+  lyricsPosition.value = (savedSettings as any).lyricsPosition || 'bottom'
   enableTranscode.value = savedSettings.enableTranscode ?? true
   
   // 初始化语言服务
@@ -4203,16 +4594,66 @@ watch([currentSong, currentPosition, isPlaying], async ([newSong, newPosition, n
 // 监听语言变化，更新语言服务
 watch(language, async (newLanguage) => {
   await i18nService.changeLanguage(newLanguage)
+  
+  // 更新系统托盘菜单文本
+  if (window.__TAURI__?.event) {
+    try {
+      const trayMenuTexts = {
+        show: t('buttons.show'),
+        next: t('buttons.next'),
+        play_pause: t('buttons.playPause'),
+        previous: t('buttons.previous'),
+        quit: t('buttons.quit')
+      }
+      await (window.__TAURI__.event as any).emit('update-tray-menu', trayMenuTexts)
+    } catch (error) {
+      logError('更新系统托盘菜单失败:', error)
+    }
+  }
 })
 
+// 格式化时长
+const formatDuration = (seconds: number): string => {
+  if (isNaN(seconds)) return '0:00'
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.floor(seconds % 60)
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`
+}
+
+// 浏览音乐目录（仅浏览器）
+const browseMusicDirectory = () => {
+  if (isBrowser.value) {
+    // 在浏览器中，使用input[type="file"]来选择目录
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.webkitdirectory = true
+    input.multiple = false
+    
+    input.onchange = (event) => {
+      const target = event.target as HTMLInputElement
+      if (target.files && target.files.length > 0) {
+        const file = target.files[0]
+        // 获取目录路径
+        const directoryPath = file.webkitRelativePath ? file.webkitRelativePath.split('/')[0] : ''
+        if (directoryPath) {
+          musicDirectory.value = directoryPath
+        }
+      }
+    }
+    
+    input.click()
+  }
+}
+
 // 监听设置变化，自动保存
-watch([volume, playbackMode, currentPreset, equalizerBands, theme, language, crossfadeEnabled, crossfadeDuration, autoPlayNext, showLyrics, enableTranscode, forceTranscode], 
-  async ([newVolume, newPlaybackMode, newPreset, newBands, newTheme, newLanguage, newCrossfadeEnabled, newCrossfadeDuration, newAutoPlayNext, newShowLyrics, newEnableTranscode, newForceTranscode]) => {
+watch([volume, playbackMode, currentPreset, equalizerBands, theme, language, musicDirectory, crossfadeEnabled, crossfadeDuration, autoPlayNext, showLyrics, lyricsPosition, enableTranscode, forceTranscode], 
+  async ([newVolume, newPlaybackMode, newPreset, newBands, newTheme, newLanguage, newMusicDirectory, newCrossfadeEnabled, newCrossfadeDuration, newAutoPlayNext, newShowLyrics, newLyricsPosition, newEnableTranscode, newForceTranscode]) => {
   try {
     // 确保所有数据都是可克隆的
     const serializableSettings = {
       theme: newTheme,
       language: newLanguage,
+      musicDirectory: newMusicDirectory,
       volume: newVolume,
       playbackMode: newPlaybackMode,
       equalizerPreset: newPreset,
@@ -4223,12 +4664,36 @@ watch([volume, playbackMode, currentPreset, equalizerBands, theme, language, cro
       crossfadeDuration: newCrossfadeDuration,
       autoPlayNext: newAutoPlayNext,
       showLyrics: newShowLyrics,
+      lyricsPosition: newLyricsPosition,
       enableTranscode: newEnableTranscode,
       forceTranscode: newForceTranscode
     }
     await localStorageService.saveSettings(serializableSettings)
   } catch (error) {
     logError('保存设置失败:', error)
+  }
+})
+
+// 当当前歌词行变化时，如果是封面模态框打开状态，自动滚动
+watch(currentLyricIndex, (newIndex, oldIndex) => {
+  if (showCoverModal.value && newIndex >= 0 && newIndex !== oldIndex) {
+    logInfo('Watch currentLyricIndex: 索引变化', oldIndex, '->', newIndex, '封面模态框已打开，触发滚动')
+    nextTick(() => {
+      scrollToCurrentLyric()
+    })
+  }
+})
+
+// 当封面模态框打开/关闭时
+watch(showCoverModal, (isOpen) => {
+  if (isOpen && currentLyricIndex.value >= 0) {
+    logInfo('Watch showCoverModal: 模态框打开，当前歌词索引=', currentLyricIndex.value, '触发滚动')
+    // 等待 DOM 完全渲染后再滚动
+    setTimeout(() => {
+      nextTick(() => {
+        scrollToCurrentLyric()
+      })
+    }, 100)
   }
 })
 
@@ -4247,6 +4712,16 @@ onUnmounted(() => {
   if (progressTimer) {
     clearInterval(progressTimer)
     logInfo('前端 进度更新定时器已清理')
+  }
+  
+  // 移除滚动事件监听器
+  if (songListContainer.value) {
+    const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
+    if (songList) {
+      songList.removeEventListener('scroll', handleScroll)
+    } else {
+      songListContainer.value.removeEventListener('scroll', handleScroll)
+    }
   }
 })
 </script>
@@ -4620,14 +5095,33 @@ body, html {
 .filter-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   margin-bottom: 15px;
+  padding: 16px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.filter-title {
+.filter-header-left {
+  flex: 0 0 auto;
+  min-width: 200px;
+}
+
+.filter-header-center {
+  flex: 1;
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  justify-content: center;
+  align-items: center;
+  padding: 0 20px;
+  min-width: 300px;
+}
+
+.filter-header-right {
+  flex: 0 0 auto;
+  min-width: 120px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .filter-header h2 {
@@ -4640,6 +5134,32 @@ body, html {
   font-size: 12px;
   color: #888;
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.current-lyric-display {
+  padding: 4px 12px;
+  background-color: rgba(92, 184, 92, 0.1);
+  border-radius: 16px;
+  border: 1px solid rgba(92, 184, 92, 0.3);
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.current-lyric {
+  color: #5cb85c;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.no-lyric {
+  color: #888;
+  font-size: 14px;
 }
 
 .filter-actions {
@@ -5251,14 +5771,15 @@ body, html {
   border-top: 1px solid #3a3a3a;
   padding: 10px 20px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 20px;
-  transition: height 0.3s ease;
-  height: 200px;
+  transition: all 0.3s ease;
+  min-height: 140px;
+  height: auto;
 }
 
 .player-controls.expanded {
-  height: 240px;
+  min-height: 180px;
 }
 
 .player-left {
@@ -5397,6 +5918,8 @@ body, html {
   gap: 10px;
   min-width: 0;
   overflow: hidden;
+  justify-content: center;
+  min-height: 120px;
 }
 
 .playback-controls {
@@ -5592,10 +6115,17 @@ body, html {
   font-size: 10px;
   font-weight: 500;
   margin-top: 4px;
+  border: none;
+  outline: none;
 }
 
 .skip-next-btn:hover {
   background-color: var(--btn-success-hover);
+}
+
+.skip-next-btn:focus {
+  outline: none;
+  box-shadow: none;
 }
 
 .volume-control {
@@ -5851,10 +6381,17 @@ body, html {
 .match-btn {
   background-color: var(--btn-success);
   color: #ffffff;
+  border: none;
+  outline: none;
 }
 
 .match-btn:hover {
   background-color: var(--btn-success-hover);
+}
+
+.match-btn:focus {
+  outline: none;
+  box-shadow: none;
 }
 
 /* 标签页 */
@@ -6523,11 +7060,16 @@ body, html {
   padding: 32px;
 }
 
+.tplayer-container.light .filter-header {
+  background-color: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
 .tplayer-container.light .filter-header h2 {
   color: #333333;
   font-size: 18px;
   font-weight: 600;
-  margin: 0 0 16px 0;
+  margin: 0;
 }
 
 .tplayer-container.light .song-title {
@@ -6750,6 +7292,31 @@ body, html {
 
 /* 浅色主题 - 播放列表信息 */
 .tplayer-container.light .playlist-info {
+  color: #666666;
+}
+
+/* 浅色主题 - 歌词状态 */
+.tplayer-container.light .lyric-status {
+  background-color: #e0e0e0;
+  color: #666666;
+}
+
+.tplayer-container.light .lyric-status.has-lyrics {
+  background-color: #5cb85c;
+  color: #ffffff;
+}
+
+/* 浅色主题 - 当前歌词显示 */
+.tplayer-container.light .current-lyric-display {
+  background-color: rgba(92, 184, 92, 0.1);
+  border: 1px solid rgba(92, 184, 92, 0.3);
+}
+
+.tplayer-container.light .current-lyric {
+  color: #5cb85c;
+}
+
+.tplayer-container.light .no-lyric {
   color: #666666;
 }
 
@@ -7207,20 +7774,33 @@ body, html {
   background-color: var(--btn-secondary-bg);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
+  outline: none;
 }
 
 .btn-cancel:hover {
   background-color: var(--btn-secondary-hover);
 }
 
+.btn-cancel:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 /* 保存按钮 */
 .btn-save {
   background-color: var(--btn-success);
   color: #ffffff;
+  border: none;
+  outline: none;
 }
 
 .btn-save:hover {
   background-color: var(--btn-success-hover);
+}
+
+.btn-save:focus {
+  outline: none;
+  box-shadow: none;
 }
 
 /* 滚动条样式 - 隐藏滚动条但保留滚动功能 */

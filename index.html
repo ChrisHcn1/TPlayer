@@ -23,9 +23,57 @@
       height: 100%;
       overflow: hidden;
     }
+    
+    /* 浅色主题预加载样式 */
+    body.theme-light,
+    body.theme-light #app {
+      background-color: #f5f5f5 !important;
+      color: #333333 !important;
+    }
+    
+    /* 深色主题预加载样式（默认） */
+    body,
+    body #app {
+      background-color: #1a1a1a !important;
+      color: #ffffff !important;
+    }
   </style>
+  <script>
+    // 在页面加载时立即应用保存的主题，避免闪烁
+    // 这个脚本必须在body标签可用后执行，所以使用document.documentElement
+    (function() {
+      try {
+        var savedSettings = localStorage.getItem('tplayer-settings');
+        if (savedSettings) {
+          var settings = JSON.parse(savedSettings);
+          var theme = settings.theme || 'dark';
+          // 在html元素上设置data-theme属性
+          document.documentElement.setAttribute('data-theme', theme);
+        }
+      } catch (e) {
+        // 忽略错误
+      }
+    })();
+  </script>
 </head>
 <body oncontextmenu="return false;">
+  <script>
+    // 在body开始时立即添加主题类
+    (function() {
+      try {
+        var savedSettings = localStorage.getItem('tplayer-settings');
+        if (savedSettings) {
+          var settings = JSON.parse(savedSettings);
+          var theme = settings.theme || 'dark';
+          if (theme === 'light') {
+            document.body.classList.add('theme-light');
+          }
+        }
+      } catch (e) {
+        // 忽略错误
+      }
+    })();
+  </script>
   <div id="app"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>

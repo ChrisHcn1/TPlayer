@@ -42,6 +42,7 @@ export interface PlaybackProgress {
 export interface UserSettings {
   theme: 'light' | 'dark'
   language: string
+  musicDirectory: string
   volume: number
   playbackMode: 'order' | 'random' | 'repeat'
   equalizerPreset: string
@@ -76,6 +77,7 @@ const STORAGE_KEYS = {
 const DEFAULT_SETTINGS: UserSettings = {
   theme: 'dark',
   language: 'zh-CN',
+  musicDirectory: '',
   volume: 80,
   playbackMode: 'order',
   equalizerPreset: 'flat',

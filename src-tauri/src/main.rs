@@ -12,7 +12,7 @@ mod http_server;
 use commands::PlayerState;
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
-use tauri::{Emitter, Manager, tray::{TrayIconBuilder, TrayIconEvent}};
+use tauri::{Emitter, Listener, Manager, tray::{TrayIconBuilder, TrayIconEvent}};
 
 // 日志开关：设置为 false 可禁用所有日志输出
 const ENABLE_LOGS: bool = true;
@@ -86,6 +86,8 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         // 系统托盘
         .setup(|app| {
+            let app_handle = app.handle();
+            
             // 创建托盘菜单
             let menu = tauri::menu::Menu::with_items(
                 app,
@@ -169,8 +171,64 @@ fn main() {
                 })
                 .build(app)?;
 
-            // 忽略 unused 警告，我们需要保持 tray_icon 的生命周期
-            std::mem::forget(tray_icon);
+            // 保存托盘图标到应用状态
+            let tray_icon_handle = app_handle.clone();
+            app.manage(tray_icon);
+
+            // 监听更新托盘菜单事件
+            let _ = app_handle.listen("update-tray-menu", move |event| {
+                let payload_str = event.payload();
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload_str) {
+                    // 获取托盘图标实例
+                    let tray_icon = tray_icon_handle.state::<tauri::tray::TrayIcon>();
+                    // 创建新的菜单
+                    if let Ok(menu) = tauri::menu::Menu::with_items(
+                        &tray_icon_handle,
+                        &[
+                            &tauri::menu::MenuItem::with_id(
+                                &tray_icon_handle,
+                                "show",
+                                payload.get("show").and_then(|v| v.as_str()).unwrap_or("显示"),
+                                true,
+                                None::<&str>,
+                            ).unwrap(),
+                            &tauri::menu::PredefinedMenuItem::separator(&tray_icon_handle).unwrap(),
+                            &tauri::menu::MenuItem::with_id(
+                                &tray_icon_handle,
+                                "next",
+                                payload.get("next").and_then(|v| v.as_str()).unwrap_or("下一首"),
+                                true,
+                                None::<&str>,
+                            ).unwrap(),
+                            &tauri::menu::MenuItem::with_id(
+                                &tray_icon_handle,
+                                "play_pause",
+                                payload.get("play_pause").and_then(|v| v.as_str()).unwrap_or("播放/暂停"),
+                                true,
+                                None::<&str>,
+                            ).unwrap(),
+                            &tauri::menu::MenuItem::with_id(
+                                &tray_icon_handle,
+                                "previous",
+                                payload.get("previous").and_then(|v| v.as_str()).unwrap_or("上一首"),
+                                true,
+                                None::<&str>,
+                            ).unwrap(),
+                            &tauri::menu::PredefinedMenuItem::separator(&tray_icon_handle).unwrap(),
+                            &tauri::menu::MenuItem::with_id(
+                                &tray_icon_handle,
+                                "quit",
+                                payload.get("quit").and_then(|v| v.as_str()).unwrap_or("退出"),
+                                true,
+                                None::<&str>,
+                            ).unwrap(),
+                        ],
+                    ) {
+                        // 更新托盘菜单
+                        let _ = tray_icon.set_menu(Some(menu));
+                    }
+                }
+            });
 
             Ok(())
         })

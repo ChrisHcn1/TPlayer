@@ -1,13 +1,13 @@
 <template>
   <div class="settings-container">
     <div class="settings-section">
-      <h3>播放设置</h3>
+      <h3>{{ t('settings.playback') }}</h3>
       
       <!-- 交叉淡入淡出设置 -->
       <div class="setting-item">
         <label class="setting-label">
           <input type="checkbox" :checked="localCrossfadeEnabled" @change="handleCrossfadeEnabledChange($event)">
-          交叉淡入淡出
+          {{ t('settings.crossfade') }}
         </label>
         <div class="setting-control" v-if="localCrossfadeEnabled">
           <span>{{ localCrossfadeDuration }}s</span>
@@ -26,7 +26,7 @@
       <div class="setting-item">
         <label class="setting-label">
           <input type="checkbox" :checked="localAutoPlayNext" @change="handleAutoPlayNextChange($event)">
-          自动播放下一首
+          {{ t('settings.autoPlayNext') }}
         </label>
       </div>
       
@@ -34,7 +34,7 @@
       <div class="setting-item">
         <label class="setting-label">
           <input type="checkbox" :checked="localEqualizerEnabled" @change="handleEqualizerEnabledChange($event)">
-          均衡器
+          {{ t('settings.equalizer') }}
         </label>
         <div class="setting-control" v-if="localEqualizerEnabled">
           <select :value="localCurrentPreset" @change="handleCurrentPresetChange($event)">
@@ -52,7 +52,7 @@
       <div class="setting-item">
         <label class="setting-label">
           <input type="checkbox" :checked="localEnableTranscode" @change="handleEnableTranscodeChange($event)">
-          启用转码
+          {{ t('settings.transcode') }}
         </label>
         <div class="setting-control">
           <span>自动转码不支持的格式</span>
@@ -62,7 +62,7 @@
       <div class="setting-item" v-if="localEnableTranscode">
         <label class="setting-label">
           <input type="checkbox" :checked="localForceTranscode" @change="handleForceTranscodeChange($event)">
-          强制转码
+          {{ t('settings.forceTranscode') }}
         </label>
         <div class="setting-control">
           <span>全部转码为FLAC</span>
@@ -71,22 +71,22 @@
     </div>
     
     <div class="settings-section">
-      <h3>界面设置</h3>
+      <h3>{{ t('settings.interface') }}</h3>
       
       <!-- 主题设置 -->
       <div class="setting-item">
-        <label class="setting-label">主题</label>
+        <label class="setting-label">{{ t('settings.theme') }}</label>
         <div class="setting-control">
           <select :value="localTheme" @change="handleThemeChange($event)">
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
+            <option value="dark">{{ t('settings.dark') }}</option>
+            <option value="light">{{ t('settings.light') }}</option>
           </select>
         </div>
       </div>
       
       <!-- 语言设置 -->
       <div class="setting-item">
-        <label class="setting-label">语言</label>
+        <label class="setting-label">{{ t('settings.language') }}</label>
         <div class="setting-control">
           <select :value="localLanguage" @change="handleLanguageChange($event)">
             <option value="zh-CN">简体中文</option>
@@ -99,8 +99,33 @@
       <div class="setting-item">
         <label class="setting-label">
           <input type="checkbox" :checked="localShowLyrics" @change="handleShowLyricsChange($event)">
-          显示歌词
+          {{ t('settings.showLyrics') }}
         </label>
+      </div>
+      
+      <!-- 歌词显示位置 -->
+      <div class="setting-item" v-if="localShowLyrics">
+        <label class="setting-label">{{ t('settings.lyricsPosition') }}</label>
+        <div class="setting-control">
+          <select :value="localLyricsPosition" @change="handleLyricsPositionChange($event)">
+            <option value="bottom">{{ t('settings.bottom') }}</option>
+            <option value="top">{{ t('settings.top') }}</option>
+          </select>
+        </div>
+      </div>
+      
+      <!-- 音乐目录设置（仅浏览器） -->
+      <div class="setting-item" v-if="isBrowser">
+        <label class="setting-label">音乐目录</label>
+        <div class="setting-control">
+          <input 
+            type="text" 
+            :value="localMusicDirectory" 
+            @input="handleMusicDirectoryChange($event)"
+            placeholder="输入音乐目录路径"
+          />
+          <button class="btn btn-secondary" @click="browseMusicDirectory">浏览</button>
+        </div>
       </div>
       
       <!-- 关于 -->
@@ -110,14 +135,15 @@
     </div>
     
     <div class="settings-actions">
-      <button class="btn btn-secondary" @click="cancel">取消</button>
-      <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+      <button class="btn btn-secondary" @click="cancel">{{ t('common.cancel') }}</button>
+      <button class="btn btn-primary" @click="saveSettings">{{ t('common.save') }}</button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { t } from '../services/i18n'
 
 // 定义props
 const props = defineProps({
@@ -145,6 +171,10 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
+  lyricsPosition: {
+    type: String,
+    default: 'bottom'
+  },
   equalizerEnabled: {
     type: Boolean,
     default: false
@@ -160,6 +190,14 @@ const props = defineProps({
   forceTranscode: {
     type: Boolean,
     default: false
+  },
+  musicDirectory: {
+    type: String,
+    default: ''
+  },
+  isBrowser: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -171,10 +209,13 @@ const emit = defineEmits([
   'update:theme',
   'update:language',
   'update:showLyrics',
+  'update:lyricsPosition',
   'update:equalizerEnabled',
   'update:currentPreset',
   'update:enableTranscode',
   'update:forceTranscode',
+  'update:musicDirectory',
+  'browseMusicDirectory',
   'save',
   'cancel'
 ])
@@ -186,10 +227,12 @@ const localAutoPlayNext = ref(props.autoPlayNext)
 const localTheme = ref(props.theme)
 const localLanguage = ref(props.language)
 const localShowLyrics = ref(props.showLyrics)
+const localLyricsPosition = ref(props.lyricsPosition)
 const localEqualizerEnabled = ref(props.equalizerEnabled)
 const localCurrentPreset = ref(props.currentPreset)
 const localEnableTranscode = ref(props.enableTranscode)
 const localForceTranscode = ref(props.forceTranscode)
+const localMusicDirectory = ref(props.musicDirectory)
 
 // 事件处理函数
 const handleCrossfadeEnabledChange = (event: Event) => {
@@ -255,11 +298,29 @@ const handleShowLyricsChange = (event: Event) => {
   }
 }
 
+const handleLyricsPositionChange = (event: Event) => {
+  const target = event.target as HTMLSelectElement
+  if (target) {
+    emit('update:lyricsPosition', target.value)
+  }
+}
+
 const handleLanguageChange = (event: Event) => {
   const target = event.target as HTMLSelectElement
   if (target) {
     emit('update:language', target.value)
   }
+}
+
+const handleMusicDirectoryChange = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  if (target) {
+    emit('update:musicDirectory', target.value)
+  }
+}
+
+const browseMusicDirectory = () => {
+  emit('browseMusicDirectory')
 }
 
 // 保存设置

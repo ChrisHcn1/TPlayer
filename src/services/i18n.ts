@@ -1,5 +1,7 @@
 // 语言服务
 
+import { ref } from 'vue'
+
 // 语言类型定义
 export interface Locale {
   code: string
@@ -17,9 +19,9 @@ export type TranslateFunction = (key: string, fallback?: string) => string
 
 // 语言服务类
 class I18nService {
-  private currentLanguage: string = 'zh-CN'
-  private translations: Record<string, any> = {}
-  private initialized: boolean = false
+  private currentLanguage = ref<string>('zh-CN')
+  private translations = ref<Record<string, any>>({})
+  private initialized = ref<boolean>(false)
 
   // 初始化语言服务
   async initialize(language: string = 'zh-CN'): Promise<void> {
@@ -29,15 +31,15 @@ class I18nService {
         ? language
         : 'zh-CN'
 
-      this.currentLanguage = validLanguage
+      this.currentLanguage.value = validLanguage
       await this.loadTranslations(validLanguage)
-      this.initialized = true
+      this.initialized.value = true
     } catch (error) {
       console.error('Failed to initialize i18n service:', error)
       // 回退到默认语言
-      this.currentLanguage = 'zh-CN'
+      this.currentLanguage.value = 'zh-CN'
       await this.loadTranslations('zh-CN')
-      this.initialized = true
+      this.initialized.value = true
     }
   }
 
@@ -48,7 +50,7 @@ class I18nService {
       if (!response.ok) {
         throw new Error(`Failed to load translations for ${language}`)
       }
-      this.translations = await response.json()
+      this.translations.value = await response.json()
     } catch (error) {
       console.error(`Failed to load translations for ${language}:`, error)
       // 回退到默认语言
@@ -60,25 +62,25 @@ class I18nService {
 
   // 切换语言
   async changeLanguage(language: string): Promise<void> {
-    if (language !== this.currentLanguage) {
+    if (language !== this.currentLanguage.value) {
       await this.initialize(language)
     }
   }
 
   // 获取当前语言
   getCurrentLanguage(): string {
-    return this.currentLanguage
+    return this.currentLanguage.value
   }
 
   // 翻译函数
   t(key: string, fallback: string = key): string {
-    if (!this.initialized) {
+    if (!this.initialized.value) {
       return fallback
     }
 
     // 解析嵌套键，如 'common.appName'
     const keys = key.split('.')
-    let result: any = this.translations
+    let result: any = this.translations.value
 
     for (const k of keys) {
       if (result && typeof result === 'object' && k in result) {
@@ -89,6 +91,16 @@ class I18nService {
     }
 
     return typeof result === 'string' ? result : fallback
+  }
+
+  // 获取当前语言的响应式引用
+  getCurrentLanguageRef() {
+    return this.currentLanguage
+  }
+
+  // 获取翻译的响应式引用
+  getTranslationsRef() {
+    return this.translations
   }
 }
 
