@@ -74,6 +74,7 @@ fn main() {
             commands::toggle_maximize_window,
             commands::close_window,
             commands::toggle_window_visibility,
+            commands::open_readme,
             commands_cue::scan_cue_files,
             commands_cue::parse_cue_file_command,
             ffmpeg_transcoder::check_needs_transcode,

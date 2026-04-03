@@ -133,7 +133,19 @@ impl TranscodeCache {
         }
         
         // 2. 检查 PATH 中的 ffmpeg
-        if Command::new("ffmpeg").arg("-version").output().is_ok() {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        
+        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        if cmd.output().is_ok() {
             return Some("ffmpeg".to_string());
         }
         
@@ -162,7 +174,19 @@ impl TranscodeCache {
         }
         
         // 2. 检查 PATH 中的 ffprobe
-        if Command::new("ffprobe").arg("-version").output().is_ok() {
+        let mut cmd = Command::new("ffprobe");
+        cmd.arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        
+        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        if cmd.output().is_ok() {
             return Some("ffprobe".to_string());
         }
         
@@ -365,15 +389,25 @@ impl TranscodeCache {
             println!("[FFmpeg] 开始获取音频信息: {}", original);
             let probe_cmd = format!("{} -hide_banner {} -show_streams -select_streams a -print_format json", ffprobe_path, original);
             println!("[FFmpeg] 执行ffprobe命令: {}", probe_cmd);
-            let probe_result = Command::new(&ffprobe_path)
-                .arg("-hide_banner")
+            let mut cmd = Command::new(&ffprobe_path);
+            cmd.arg("-hide_banner")
                 .arg(&original)
                 .arg("-show_streams")
                 .arg("-select_streams")
                 .arg("a")
                 .arg("-print_format")
                 .arg("json")
-                .output();
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            
+            // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            
+            let probe_result = cmd.output();
             
             match &probe_result {
                 Ok(result) => {
@@ -492,6 +526,8 @@ impl TranscodeCache {
                 "-compression_level".to_string(),
                 "8".to_string(), // 中等压缩级别，平衡音质和转码速度
                 "-y".to_string(), // 覆盖已存在的文件
+                "-loglevel".to_string(),
+                "quiet".to_string(), // 减少输出，避免命令行窗口显示
             ];
             
             // 检测文件扩展名

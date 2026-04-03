@@ -3,6 +3,7 @@
     <!-- 顶部信息栏 -->
     <header class="top-bar" data-tauri-drag-region>
       <div class="app-logo" data-tauri-drag-region="false">
+        <img src="/logo.png" alt="TPlayer Logo" class="logo-image" />
         <h1>TPlayer</h1>
       </div>
       <div class="window-controls" data-tauri-drag-region="false">
@@ -417,7 +418,17 @@
       <div class="player-left">
         <div class="current-song">
           <div class="song-cover" v-if="currentSong" @click="openCoverModal">
-            <img v-if="currentSong.cover" :src="currentSong.cover" alt="封面" />
+            <!-- 动态封面 -->
+            <video 
+              v-if="currentSong.dynamicCoverUrl" 
+              :src="currentSong.dynamicCoverUrl" 
+              autoplay 
+              loop 
+              muted 
+              class="dynamic-cover"
+            />
+            <!-- 静态封面 -->
+            <img v-else-if="currentSong.cover" :src="currentSong.cover" alt="封面" />
             <div v-else class="cover-placeholder">🎵</div>
           </div>
           <div class="song-info">
@@ -809,6 +820,8 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { localStorageService, type Playlist } from './stores/local'
 import { matchSong, songLyric, searchSong, fetchLyricById } from './api/music'
+import { musicDataService } from './services/musicDataService'
+import { parseSmartLrc } from './services/lyricParser'
 import * as mm from 'music-metadata'
 import Settings from './components/Settings.vue'
 import { i18nService, t } from './services/i18n'
@@ -871,6 +884,7 @@ interface Song {
   parentFile?: string
   trackNumber?: string
   cueInfo?: string
+  dynamicCoverUrl?: string
   // 转码相关
   needs_transcode: boolean
   // 浏览器环境下的原始文件对象（仅浏览器环境使用）
@@ -1139,7 +1153,7 @@ const songListContainer = ref<HTMLElement | null>(null)
 
 // 滚动相关状态
 const showScrollTopButton = ref(true) // 始终显示回到顶部按钮
-const showJumpToCurrentButton = ref(true)
+const showJumpToCurrentButton = ref(true) // 始终显示跳到当前播放曲目的按钮
 
 // 封面模态框拖动和全屏状态
 const isCoverModalFullscreen = ref(false)
@@ -1166,15 +1180,7 @@ const handleScroll = () => {
     
     // 控制跳转到当前曲目按钮的显示/隐藏
     if (currentSong.value) {
-      const currentSongElement = songListContainer.value.querySelector('.song-row.active')
-      if (currentSongElement) {
-        const rect = currentSongElement.getBoundingClientRect()
-        const containerRect = songListContainer.value.getBoundingClientRect()
-        // 检查当前播放曲目是否在可视范围内
-        showJumpToCurrentButton.value = !(rect.top >= containerRect.top && rect.bottom <= containerRect.bottom)
-      } else {
-        showJumpToCurrentButton.value = true
-      }
+      showJumpToCurrentButton.value = true
     } else {
       showJumpToCurrentButton.value = false
     }
@@ -3542,7 +3548,7 @@ const scrollToCurrentLyric = () => {
     })
     logInfo('封面歌词滚动: 成功滚动到歌词行', index)
   } else {
-    logInfo('封面歌词滚动: 无法获取歌词行元素，所有行数:', coverLyricContainer.value.querySelectorAll('.cover-lyric-line').length)
+    logInfo('封面歌词滚动: 无法获取歌词行元素，所有行数:', coverLyricsContainer.value.querySelectorAll('.cover-lyric-line').length)
   }
 }
 
@@ -3700,40 +3706,64 @@ const readLocalMetadata = async () => {
 // 在线查找歌词
 const fetchLyric = async () => {
   try {
-    if (!songToEdit.value) return
+    if (!songToEdit.value) {
+      logInfo('【在线歌词】没有歌曲可编辑')
+      alert('没有歌曲可编辑')
+      return
+    }
     
     logInfo('【在线歌词】开始在线查找歌词')
     
     const title = editTagsForm.value.title || songToEdit.value.title
     const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`
+    const keyword = `${title} ${artist}`.trim()
+    
+    if (!keyword) {
+      logInfo('【在线歌词】关键词为空')
+      alert('请先填写歌曲标题和艺术家信息')
+      return
+    }
     
     logInfo('【在线歌词】搜索关键词:', keyword)
     
-    const response = await searchSong(keyword, 5)
-    const song = response.data.result?.songs?.[0]
+    // 使用新的音乐数据服务获取歌词
+    let result
+    try {
+      result = await musicDataService.getSongInfoWithLyric(keyword)
+    } catch (apiError) {
+      logError('【在线歌词】API调用失败:', apiError)
+      alert('网络请求失败，请检查网络连接')
+      return
+    }
     
-    if (!song || !song.id) {
+    logInfo('【在线歌词】API返回结果:', result)
+    
+    if (!result || !result.song) {
       logInfo('【在线歌词】未找到匹配的歌曲')
       alert('未找到匹配的歌曲，请修改歌曲信息后重试')
       return
     }
     
-    logInfo('【在线歌词】找到歌曲:', song.name, 'ID:', song.id)
-    
-    const lyricResponse = await fetchLyricById(song.id)
-    const lyricContent = lyricResponse.data.lrc?.lyric
-    
-    if (!lyricContent) {
-      logInfo('【在线歌词】该歌曲暂无歌词')
-      alert('该歌曲暂无歌词')
+    const lyricData = result.lyricData
+    if (!lyricData || (!lyricData.lrcData.length && !lyricData.yrcData.length)) {
+      logInfo('【在线歌词】未找到歌词数据')
+      alert('找到歌曲但未找到歌词，请尝试手动搜索')
       return
     }
     
-    logInfo('【在线歌词】获取歌词成功，长度:', lyricContent.length)
-    logInfo('【在线歌词】歌词内容预览:', lyricContent.substring(0, 200))
+    const lyricLines = lyricData.lrcData.length > 0 ? lyricData.lrcData : lyricData.yrcData
     
-    editTagsForm.value.lyric = lyricContent
+    // 转换为LRC格式
+    const lrcContent = lyricLines.map(line => {
+      const text = line.words.map(w => w.word).join('')
+      return `[${formatTime(line.startTime)}]${text}`
+    }).join('\n')
+    
+    editTagsForm.value.lyric = lrcContent
+    
+    logInfo('【在线歌词】找到歌曲:', result.song.title, '歌词行数:', lyricLines.length, 
+             '是否有TTML:', result.hasTTML, '是否有QRC:', result.hasQRC)
+    
     alert('获取歌词成功')
   } catch (error) {
     logError('【在线歌词】获取歌词失败:', error)
@@ -3744,28 +3774,76 @@ const fetchLyric = async () => {
 // 获取封面
 const fetchCover = async () => {
   try {
-    if (!songToEdit.value) return
+    if (!songToEdit.value) {
+      logInfo('【在线封面】没有歌曲可编辑')
+      alert('没有歌曲可编辑')
+      return
+    }
     
     logInfo('【在线封面】开始在线查找封面')
     
     const title = editTagsForm.value.title || songToEdit.value.title
     const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`
+    const keyword = `${title} ${artist}`.trim()
     
-    logInfo('【在线封面】搜索关键词:', keyword)
-    
-    const response = await searchSong(keyword, 5)
-    const song = response.data.result?.songs?.[0]
-    
-    if (!song || !song.album?.picUrl) {
-      logInfo('【在线封面】未找到封面')
-      alert('无法获取封面，请修改歌曲信息后重试')
+    if (!keyword) {
+      logInfo('【在线封面】关键词为空')
+      alert('请先填写歌曲标题和艺术家信息')
       return
     }
     
-    logInfo('【在线封面】获取封面成功:', song.album.picUrl)
+    logInfo('【在线封面】搜索关键词:', keyword)
     
-    editTagsForm.value.cover = song.album.picUrl
+    // 使用新的音乐数据服务获取封面
+    let result
+    try {
+      result = await musicDataService.getSongInfoWithLyric(keyword)
+    } catch (apiError) {
+      logError('【在线封面】API调用失败:', apiError)
+      alert('网络请求失败，请检查网络连接')
+      return
+    }
+    
+    logInfo('【在线封面】API返回结果:', result)
+    
+    if (!result || !result.song) {
+      logInfo('【在线封面】未找到匹配的歌曲')
+      alert('未找到匹配的歌曲，请修改歌曲信息后重试')
+      return
+    }
+    
+    if (!result.song.coverUrl) {
+      logInfo('【在线封面】找到歌曲但没有封面')
+      alert('找到歌曲但未找到封面')
+      return
+    }
+    
+    logInfo('【在线封面】获取封面成功:', result.song.coverUrl)
+    
+    // 下载封面并转换为Base64
+    try {
+      const coverBase64 = await musicDataService.getCoverAsBase64(result.song.coverUrl)
+      
+      if (coverBase64) {
+        editTagsForm.value.cover = coverBase64
+        logInfo('【在线封面】封面已转换为Base64，长度:', coverBase64.length)
+      } else {
+        editTagsForm.value.cover = result.song.coverUrl
+        logInfo('【在线封面】使用原始封面URL')
+      }
+    } catch (coverError) {
+      logError('【在线封面】下载封面失败:', coverError)
+      // 即使下载失败，也尝试使用URL
+      editTagsForm.value.cover = result.song.coverUrl
+      logInfo('【在线封面】使用原始封面URL作为备选')
+    }
+    
+    // 保存动态封面URL
+    if (result.song.dynamicCoverUrl) {
+      songToEdit.value.dynamicCoverUrl = result.song.dynamicCoverUrl
+      logInfo('【在线封面】获取动态封面成功:', result.song.dynamicCoverUrl)
+    }
+    
     alert('获取封面成功')
   } catch (error) {
     logError('【在线封面】获取封面失败:', error)
@@ -3776,71 +3854,115 @@ const fetchCover = async () => {
 // 自动匹配标签
 const autoMatchTags = async () => {
   try {
-    if (!songToEdit.value) return
+    if (!songToEdit.value) {
+      logInfo('【自动匹配】没有歌曲可编辑')
+      alert('没有歌曲可编辑')
+      return
+    }
     
     logInfo('【自动匹配】开始自动匹配标签')
     
     const title = editTagsForm.value.title || songToEdit.value.title
     const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`
+    const keyword = `${title} ${artist}`.trim()
+    
+    if (!keyword) {
+      logInfo('【自动匹配】关键词为空')
+      alert('请先填写歌曲标题和艺术家信息')
+      return
+    }
     
     logInfo('【自动匹配】搜索关键词:', keyword)
     
-    const response = await searchSong(keyword, 5)
-    const song = response.data.result?.songs?.[0]
+    // 使用新的音乐数据服务获取歌曲信息
+    let result
+    try {
+      result = await musicDataService.getSongInfoWithLyric(keyword)
+    } catch (apiError) {
+      logError('【自动匹配】API调用失败:', apiError)
+      alert('网络请求失败，请检查网络连接')
+      return
+    }
     
-    if (!song || !song.id) {
+    logInfo('【自动匹配】API返回结果:', result)
+    
+    if (!result || !result.song) {
       logInfo('【自动匹配】未找到匹配的歌曲')
       alert('未找到匹配的歌曲，请修改歌曲信息后重试')
       return
     }
     
-    logInfo('【自动匹配】找到歌曲:', song.name, 'ID:', song.id)
+    logInfo('【自动匹配】找到歌曲:', result.song.title, '-', result.song.artist)
     
     let matchedCount = 0
     
     // 更新元数据
-    if (song.name && !editTagsForm.value.title) {
-      editTagsForm.value.title = song.name
+    if (result.song.title && !editTagsForm.value.title) {
+      editTagsForm.value.title = result.song.title
       matchedCount++
-      logInfo('【自动匹配】更新标题:', song.name)
+      logInfo('【自动匹配】更新标题:', result.song.title)
     }
     
-    if (song.artists && song.artists.length > 0 && !editTagsForm.value.artist) {
-      editTagsForm.value.artist = song.artists.map((a: any) => a.name).join(', ')
+    if (result.song.artist && !editTagsForm.value.artist) {
+      editTagsForm.value.artist = result.song.artist
       matchedCount++
-      logInfo('【自动匹配】更新艺术家:', editTagsForm.value.artist)
+      logInfo('【自动匹配】更新艺术家:', result.song.artist)
     }
     
-    if (song.album && song.album.name && !editTagsForm.value.album) {
-      editTagsForm.value.album = song.album.name
+    if (result.song.album && !editTagsForm.value.album) {
+      editTagsForm.value.album = result.song.album
       matchedCount++
-      logInfo('【自动匹配】更新专辑:', song.album.name)
+      logInfo('【自动匹配】更新专辑:', result.song.album)
     }
     
     // 获取封面
-    if (song.album?.picUrl && !editTagsForm.value.cover) {
-      editTagsForm.value.cover = song.album.picUrl
-      matchedCount++
-      logInfo('【自动匹配】更新封面:', song.album.picUrl)
+    if (result.song.coverUrl && !editTagsForm.value.cover) {
+      try {
+        // 下载封面并转换为Base64
+        const coverBase64 = await musicDataService.getCoverAsBase64(result.song.coverUrl)
+        if (coverBase64) {
+          editTagsForm.value.cover = coverBase64
+          matchedCount++
+          logInfo('【自动匹配】更新封面成功')
+        }
+      } catch (coverError) {
+        logError('【自动匹配】下载封面失败:', coverError)
+      }
+    }
+    
+    // 保存动态封面URL
+    if (result.song.dynamicCoverUrl) {
+      songToEdit.value.dynamicCoverUrl = result.song.dynamicCoverUrl
+      logInfo('【自动匹配】获取动态封面:', result.song.dynamicCoverUrl)
     }
     
     // 获取歌词
-    try {
-      const lyricResponse = await fetchLyricById(song.id)
-      const lyricContent = lyricResponse.data.lrc?.lyric
-      
-      if (lyricContent && !editTagsForm.value.lyric) {
-        editTagsForm.value.lyric = lyricContent
+    const lyricData = result.lyricData
+    if (lyricData && (lyricData.lrcData.length > 0 || lyricData.yrcData.length > 0) && !editTagsForm.value.lyric) {
+      try {
+        const lyricLines = lyricData.lrcData.length > 0 ? lyricData.lrcData : lyricData.yrcData
+        
+        // 转换为LRC格式
+        const lrcContent = lyricLines.map(line => {
+          const text = line.words.map(w => w.word).join('')
+          return `[${formatTime(line.startTime)}]${text}`
+        }).join('\n')
+        
+        editTagsForm.value.lyric = lrcContent
         matchedCount++
-        logInfo('【自动匹配】更新歌词，长度:', lyricContent.length)
+        logInfo('【自动匹配】更新歌词，行数:', lyricLines.length)
+      } catch (lyricError) {
+        logError('【自动匹配】处理歌词失败:', lyricError)
       }
-    } catch (error) {
-      logInfo('【自动匹配】获取歌词失败:', error)
     }
     
     logInfo('【自动匹配】自动匹配完成，共匹配', matchedCount, '项')
-    alert(`自动匹配完成，共匹配 ${matchedCount} 项`)
+    
+    if (matchedCount > 0) {
+      alert(`自动匹配完成，共匹配 ${matchedCount} 项`)
+    } else {
+      alert('已找到歌曲，但没有新的信息可以匹配（可能已有完整信息）')
+    }
   } catch (error) {
     logError('【自动匹配】自动匹配失败:', error)
     alert('自动匹配失败，请检查网络连接后重试')
@@ -4077,30 +4199,43 @@ const formatTime = (seconds: number): string => {
 
 // 解析歌词
 const parseLyrics = (lyricContent: string): LyricLine[] => {
-  const lines: LyricLine[] = []
-  if (!lyricContent) return lines
+  if (!lyricContent) return []
   
-  const lyricLines = lyricContent.split('\n')
-  const timeRegex = /\[(\d+):(\d+\.\d+)\]/g
-  
-  for (const line of lyricLines) {
-    const matches = [...line.matchAll(timeRegex)]
-    if (matches.length > 0) {
-      const text = line.replace(timeRegex, '').trim()
-      if (text) {
-        for (const match of matches) {
-          const minutes = parseInt(match[1])
-          const seconds = parseFloat(match[2])
-          const time = minutes * 60 + seconds
-          lines.push({ time, text })
+  try {
+    const parsed = parseSmartLrc(lyricContent)
+    logInfo('歌词解析完成，格式:', parsed.format, '行数:', parsed.lines.length)
+    
+    // 转换为现有的LyricLine格式
+    return parsed.lines.map(line => ({
+      time: line.startTime / 1000, // 转换为秒
+      text: line.words.map(w => w.word).join('')
+    }))
+  } catch (error) {
+    logError('歌词解析失败，使用简单解析:', error)
+    
+    // 回退到简单解析
+    const lines: LyricLine[] = []
+    const lyricLines = lyricContent.split('\n')
+    const timeRegex = /\[(\d+):(\d+\.\d+)\]/g
+    
+    for (const line of lyricLines) {
+      const matches = [...line.matchAll(timeRegex)]
+      if (matches.length > 0) {
+        const text = line.replace(timeRegex, '').trim()
+        if (text) {
+          for (const match of matches) {
+            const minutes = parseInt(match[1])
+            const seconds = parseFloat(match[2])
+            const time = minutes * 60 + seconds
+            lines.push({ time, text })
+          }
         }
       }
     }
+    
+    lines.sort((a, b) => a.time - b.time)
+    return lines
   }
-  
-  // 按时间排序
-  lines.sort((a, b) => a.time - b.time)
-  return lines
 }
 
 // 同步歌词显示
@@ -4537,6 +4672,24 @@ onMounted(() => {
   nextTick(() => {
     handleScroll()
   })
+  
+  // 检查是否是首次运行，如果是，则显示README.md文件
+  nextTick(() => {
+    try {
+      const firstRun = localStorage.getItem('tplayer-first-run');
+      if (firstRun === null && isTauri()) {
+        // 首次运行，显示README.md文件
+        invoke('open_readme').catch(err => {
+          logError('无法打开README.md文件:', err);
+        });
+        
+        // 设置首次运行标志为false
+        localStorage.setItem('tplayer-first-run', 'false');
+      }
+    } catch (e) {
+      logError('检查首次运行状态失败:', e);
+    }
+  })
 })()
 
 // 进度更新定时器
@@ -4812,11 +4965,21 @@ body, html {
   app-region: drag;
 }
 
-.app-logo,
+.app-logo {
+  /* Tauri 窗口拖动排除区域属性 */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .window-controls {
   /* Tauri 窗口拖动排除区域属性 */
   -webkit-app-region: no-drag;
   app-region: no-drag;
+  display: flex;
+  gap: 10px;
 }
 
 .app-logo h1 {
@@ -4824,6 +4987,13 @@ body, html {
   font-size: 18px;
   font-weight: bold;
   color: var(--btn-success);
+}
+
+.logo-image {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
 }
 
 .window-controls {
@@ -5807,9 +5977,22 @@ body, html {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: transform 0.3s ease;
+}
+
+.song-cover:hover {
+  transform: scale(1.05);
 }
 
 .song-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 动态封面样式 */
+.song-cover .dynamic-cover {
   width: 100%;
   height: 100%;
   object-fit: contain;

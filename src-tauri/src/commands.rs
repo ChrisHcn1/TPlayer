@@ -1242,15 +1242,25 @@ pub async fn get_audio_duration(path: String) -> Result<serde_json::Value, Strin
     
     // lofty失败时，使用ffprobe作为备用，获取完整音频信息
     if let Some(ffprobe_path) = ffmpeg_transcoder::TranscodeCache::get_ffprobe_path() {
-        let probe_result = Command::new(&ffprobe_path)
-            .arg("-hide_banner")
+        let mut cmd = Command::new(&ffprobe_path);
+        cmd.arg("-hide_banner")
             .arg(&path)
             .arg("-show_streams")
             .arg("-select_streams")
             .arg("a")
             .arg("-print_format")
             .arg("json")
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        
+        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        let probe_result = cmd.output();
         
         match &probe_result {
             Ok(result) => {
@@ -1435,5 +1445,75 @@ impl Source for CueSegmentSource {
         let duration = self.end_time - self.current_time;
         Some(std::time::Duration::from_secs_f64(duration))
     }
+}
+
+// 打开README.md文件
+#[tauri::command]
+pub async fn open_readme() -> Result<(), String> {
+    use std::path::Path;
+    use std::process::Command;
+    
+    // 获取应用可执行文件所在目录
+    let exe_path = std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {}", e))?;
+    let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+    
+    // 构建README.md的路径（向上两级，因为可执行文件在target目录下）
+    let readme_path = exe_dir.join("..").join("..").join("README.md");
+    
+    // 检查README.md文件是否存在
+    if !readme_path.exists() {
+        // 如果在应用目录中找不到，尝试在当前工作目录查找
+        let cwd = std::env::current_dir().map_err(|e| format!("获取当前工作目录失败: {}", e))?;
+        let cwd_readme_path = cwd.join("README.md");
+        if !cwd_readme_path.exists() {
+            return Err(format!("README.md文件不存在: {:?} 或 {:?}", readme_path, cwd_readme_path));
+        }
+        
+        // 打开README.md文件
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "start", "", cwd_readme_path.to_str().unwrap()]);
+            
+            // 设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            
+            cmd.spawn()
+                .map_err(|e| format!("打开README.md文件失败: {}", e))?;
+        }
+        
+        #[cfg(not(windows))]
+        {
+            Command::new("open")
+                .arg(cwd_readme_path.to_str().unwrap())
+                .spawn()
+                .map_err(|e| format!("打开README.md文件失败: {}", e))?;
+        }
+    } else {
+        // 打开README.md文件
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "start", "", readme_path.to_str().unwrap()]);
+            
+            // 设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            
+            cmd.spawn()
+                .map_err(|e| format!("打开README.md文件失败: {}", e))?;
+        }
+        
+        #[cfg(not(windows))]
+        {
+            Command::new("open")
+                .arg(readme_path.to_str().unwrap())
+                .spawn()
+                .map_err(|e| format!("打开README.md文件失败: {}", e))?;
+        }
+    }
+    
+    Ok(())
 }
 

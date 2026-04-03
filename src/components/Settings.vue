@@ -130,7 +130,10 @@
       
       <!-- 关于 -->
       <div class="setting-item">
-        <span class="setting-value">TPlayer V1.0.1-20260322</span>
+        <div class="version-info">
+          <img src="/logo.png" alt="TPlayer Logo" class="version-logo" />
+          <span class="setting-value">TPlayer V1.0.1-20260322</span>
+        </div>
       </div>
     </div>
     
@@ -452,6 +455,19 @@ h3 {
 .setting-value {
   color: #b0b0b0;
   font-size: 13px;
+}
+
+.version-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.version-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: cover;
 }
 
 .btn {
