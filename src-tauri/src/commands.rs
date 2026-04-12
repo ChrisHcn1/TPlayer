@@ -608,6 +608,66 @@ pub async fn play_song(
     println!("[播放] 解析后: start_time={:?}, end_time={:?}", start_time_val, end_time_val);
     println!("[播放] ======================");
     
+    // 检查是否需要使用FFplay播放（原引擎不支持的无损音频）
+    if ffmpeg_transcoder::needs_ffplay_playback(&path) {
+        println!("[播放] 检测到需要FFplay播放的格式: {}", path);
+        
+        // 停止当前的rodio播放
+        unsafe {
+            if let Some(player) = &mut GLOBAL_PLAYER {
+                if let Some(old_sink) = player.sink.take() {
+                    println!("[播放] 停止旧的rodio播放");
+                    old_sink.stop();
+                }
+            }
+        }
+        
+        // 使用FFplay播放
+        let start_position = position.unwrap_or(start_time_val.unwrap_or(0.0));
+        // 传递None作为duration参数，让后端自己获取
+        match ffmpeg_transcoder::play_with_ffplay(path.clone(), Some(start_position), None).await {
+            Ok(result) => {
+                println!("[播放] FFplay播放已启动");
+                
+                // 从结果中获取音频时长
+                let duration = result.get("duration").and_then(|d| d.as_f64()).unwrap_or(180.0);
+                println!("[播放] 音频时长: {}秒", duration);
+                
+                // 更新播放状态
+                let mut state_guard = state.lock().unwrap();
+                state_guard.is_playing = true;
+                state_guard.volume = volume.unwrap_or(state_guard.volume);
+                state_guard.position = start_position;
+                state_guard.cue_start_time = start_time_val;
+                state_guard.cue_end_time = end_time_val;
+                
+                // 发送事件通知前端
+                let _ = window.emit("song-changed", serde_json::json!({
+                    "path": path,
+                    "title": title.unwrap_or_else(|| "".to_string()),
+                    "artist": "".to_string(),
+                    "album": "".to_string(),
+                    "duration": duration,
+                    "position": start_position,
+                    "is_ffplay": true
+                }));
+                
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "message": "FFplay播放已启动",
+                    "path": path,
+                    "duration": duration,
+                    "position": start_position,
+                    "is_ffplay": true
+                }));
+            }
+            Err(e) => {
+                eprintln!("[播放] FFplay播放失败: {}", e);
+                return Err(format!("FFplay播放失败: {}", e));
+            }
+        }
+    }
+    
     let _lock = PLAYER_MUTEX.lock().unwrap();
     
     // 先停止当前的播放，避免多首同时播放
@@ -1075,6 +1135,9 @@ pub async fn stop_song(
             }
         }
     }
+
+    // 停止FFplay播放
+    let _ = ffmpeg_transcoder::stop_ffplay();
 
     // 停止进度更新线程
     stop_progress_updater();

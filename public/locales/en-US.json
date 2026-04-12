@@ -30,7 +30,9 @@
     "bottom": "Bottom",
     "top": "Top",
     "dark": "Dark",
-    "light": "Light"
+    "light": "Light",
+    "about": "About",
+    "viewAbout": "View About"
   },
   "playlist": {
     "title": "Playlist",

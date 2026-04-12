@@ -125,7 +125,26 @@ impl TranscodeCache {
     
     // 获取 FFmpeg 路径（公共方法，用于检查FFmpeg是否可用）
     pub fn get_ffmpeg_path() -> Option<String> {
-        // 1. 首先检查环境变量
+        // 0. 首先检查应用内置的ffmpeg
+        // 开发环境：直接检查src-tauri/bin/ffmpeg.exe
+        let current_dir = std::env::current_dir().ok()?;
+        let dev_ffmpeg = current_dir.join("src-tauri").join("bin").join("ffmpeg.exe");
+        if dev_ffmpeg.exists() {
+            println!("[FFmpeg] 使用开发环境的内置ffmpeg: {:?}", dev_ffmpeg);
+            return Some(dev_ffmpeg.to_string_lossy().to_string());
+        }
+        
+        // 生产环境：检查应用目录下的bin/ffmpeg.exe
+        if let Ok(resource_dir) = std::env::current_exe() {
+            let app_dir = resource_dir.parent()?;
+            let builtin_ffmpeg = app_dir.join("bin").join("ffmpeg.exe");
+            if builtin_ffmpeg.exists() {
+                println!("[FFmpeg] 使用生产环境的内置ffmpeg: {:?}", builtin_ffmpeg);
+                return Some(builtin_ffmpeg.to_string_lossy().to_string());
+            }
+        }
+        
+        // 1. 检查环境变量
         if let Ok(ffmpeg_path) = env::var("FFMPEG_PATH") {
             if Path::new(&ffmpeg_path).exists() {
                 return Some(ffmpeg_path);
@@ -133,21 +152,21 @@ impl TranscodeCache {
         }
         
         // 2. 检查 PATH 中的 ffmpeg
-        let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        
-        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        
-        if cmd.output().is_ok() {
-            return Some("ffmpeg".to_string());
-        }
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    
+    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    if cmd.output().is_ok() {
+        return Some("ffmpeg".to_string());
+    }
         
         // 3. 检查常见安装路径
         let common_paths = [
@@ -166,7 +185,26 @@ impl TranscodeCache {
     }
     
     pub fn get_ffprobe_path() -> Option<String> {
-        // 1. 首先检查环境变量
+        // 0. 首先检查应用内置的ffprobe
+        // 开发环境：直接检查src-tauri/bin/ffprobe.exe
+        let current_dir = std::env::current_dir().ok()?;
+        let dev_ffprobe = current_dir.join("src-tauri").join("bin").join("ffprobe.exe");
+        if dev_ffprobe.exists() {
+            println!("[FFmpeg] 使用开发环境的内置ffprobe: {:?}", dev_ffprobe);
+            return Some(dev_ffprobe.to_string_lossy().to_string());
+        }
+        
+        // 生产环境：检查应用目录下的bin/ffprobe.exe
+        if let Ok(resource_dir) = std::env::current_exe() {
+            let app_dir = resource_dir.parent()?;
+            let builtin_ffprobe = app_dir.join("bin").join("ffprobe.exe");
+            if builtin_ffprobe.exists() {
+                println!("[FFmpeg] 使用生产环境的内置ffprobe: {:?}", builtin_ffprobe);
+                return Some(builtin_ffprobe.to_string_lossy().to_string());
+            }
+        }
+        
+        // 1. 检查环境变量
         if let Ok(ffprobe_path) = env::var("FFPROBE_PATH") {
             if Path::new(&ffprobe_path).exists() {
                 return Some(ffprobe_path);
@@ -195,6 +233,71 @@ impl TranscodeCache {
             r"C:\ffmpeg\bin\ffprobe.exe",
             r"C:\Program Files\ffmpeg\bin\ffprobe.exe",
             r"C:\Program Files (x86)\ffmpeg\bin\ffprobe.exe",
+        ];
+        
+        for path in &common_paths {
+            if Path::new(path).exists() {
+                return Some(path.to_string());
+            }
+        }
+        
+        None
+    }
+    
+    // 获取 FFplay 路径（公共方法，用于检查FFplay是否可用）
+    pub fn get_ffplay_path() -> Option<String> {
+        // 0. 首先检查应用内置的ffplay
+        // 开发环境：使用CARGO_MANIFEST_DIR检查src-tauri/bin/ffplay.exe
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dev_ffplay = manifest_dir.join("bin").join("ffplay.exe");
+        if dev_ffplay.exists() {
+            println!("[FFmpeg] 使用开发环境的内置ffplay: {:?}", dev_ffplay);
+            return Some(dev_ffplay.to_string_lossy().to_string());
+        } else {
+            println!("[FFmpeg] 开发环境内置ffplay不存在: {:?}", dev_ffplay);
+        }
+        
+        // 生产环境：检查应用目录下的bin/ffplay.exe
+        if let Ok(resource_dir) = std::env::current_exe() {
+            let app_dir = resource_dir.parent()?;
+            let builtin_ffplay = app_dir.join("bin").join("ffplay.exe");
+            if builtin_ffplay.exists() {
+                println!("[FFmpeg] 使用生产环境的内置ffplay: {:?}", builtin_ffplay);
+                return Some(builtin_ffplay.to_string_lossy().to_string());
+            } else {
+                println!("[FFmpeg] 生产环境内置ffplay不存在: {:?}", builtin_ffplay);
+            }
+        }
+        
+        // 1. 检查环境变量
+        if let Ok(ffplay_path) = env::var("FFPLAY_PATH") {
+            if Path::new(&ffplay_path).exists() {
+                return Some(ffplay_path);
+            }
+        }
+        
+        // 2. 检查 PATH 中的 ffplay
+        let mut cmd = Command::new("ffplay");
+        cmd.arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        
+        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        if cmd.output().is_ok() {
+            return Some("ffplay".to_string());
+        }
+        
+        // 3. 检查常见安装路径
+        let common_paths = [
+            r"C:\ffmpeg\bin\ffplay.exe",
+            r"C:\Program Files\ffmpeg\bin\ffplay.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffplay.exe",
         ];
         
         for path in &common_paths {
@@ -819,4 +922,566 @@ pub async fn get_transcoded_path(path: String, timeout_secs: Option<u64>, audio_
         }
         None => Err("转码超时".to_string()),
     }
+}
+
+// FFplay播放器模块
+use std::process::Child;
+
+// FFplay播放器状态
+#[derive(Clone, serde::Serialize)]
+pub struct FFplayStatus {
+    pub is_playing: bool,
+    pub duration: f64,
+    pub position: f64,
+    pub volume: f32,
+}
+
+// 全局FFplay进程句柄
+static FFPLAY_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static FFPLAY_STATUS: Mutex<FFplayStatus> = Mutex::new(FFplayStatus {
+    is_playing: false,
+    duration: 0.0,
+    position: 0.0,
+    volume: 1.0,
+});
+
+// 保存暂停时的播放位置
+static PAUSED_POSITION: Mutex<Option<f64>> = Mutex::new(None);
+
+// 监控线程句柄
+static MONITOR_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+// 清理FFplay资源（在程序退出时调用）
+pub fn cleanup_ffplay() {
+    println!("[FFplay] 清理FFplay资源");
+    
+    // 停止FFplay播放
+    let _ = stop_ffplay();
+    
+    // 确保进程已完全停止
+    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    if let Some(mut child) = process.take() {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                println!("[FFplay] 进程已结束");
+            }
+            Ok(None) => {
+                // 进程仍在运行，强制终止
+                println!("[FFplay] 强制终止FFplay进程");
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Err(e) => {
+                println!("[FFplay] 检查进程状态失败: {:?}", e);
+            }
+        }
+    }
+    
+    println!("[FFplay] FFplay资源清理完成");
+}
+
+// 使用FFplay播放音频文件
+#[tauri::command]
+pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: Option<f64>) -> Result<serde_json::Value, String> {
+    // 先停止当前播放
+    stop_ffplay()?;
+    
+    // 检查FFplay是否可用
+    let ffplay_path = TranscodeCache::get_ffplay_path()
+        .ok_or_else(|| "FFplay未找到，请确保已安装FFplay或使用内置版本".to_string())?;
+    
+    println!("[FFplay] 使用ffplay播放: {}", path);
+    
+    // 构建FFplay命令
+    let mut cmd = Command::new(&ffplay_path);
+    
+    // 设置FFplay参数
+    cmd.arg("-autoexit"); // 播放完成后自动退出
+    cmd.arg("-nodisp");  // 不显示视频窗口
+    cmd.arg("-loglevel"); cmd.arg("error"); // 错误模式，只显示错误
+    
+    // 设置起始时间
+    if let Some(start) = start_time {
+        cmd.arg("-ss");
+        cmd.arg(start.to_string());
+    }
+    
+    // 设置音量
+    cmd.arg("-volume");
+    cmd.arg("100");
+    
+    // 添加音频文件路径
+    cmd.arg(&path);
+    
+    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    // 重定向输出到文件，便于调试
+    let temp_dir = std::env::temp_dir();
+    let log_path = temp_dir.join("ffplay_output.log");
+    let log_file = std::fs::File::create(&log_path).map_err(|e| format!("创建日志文件失败: {}", e))?;
+    cmd.stdout(log_file.try_clone().map_err(|e| format!("克隆文件句柄失败: {}", e))?);
+
+    // 不重定向错误输出，以便捕获FFplay的错误信息
+    // cmd.stderr(Stdio::null());
+
+    // 重定向stdin，以便发送控制命令
+    cmd.stdin(Stdio::piped());
+    
+    // 打印完整的FFplay命令
+    println!("[FFplay] 启动命令: {:?}", cmd);
+    println!("[FFplay] FFplay日志文件: {:?}", log_path);
+
+    // 启动FFplay进程
+    let child = cmd.spawn()
+        .map_err(|e| format!("启动FFplay失败: {}", e))?;
+
+    println!("[FFplay] 进程已启动，PID: {}", child.id());
+
+    // 保存进程句柄
+    {
+        let mut process = FFPLAY_PROCESS.lock().unwrap();
+        *process = Some(child);
+    }
+
+    // 获取音频文件信息
+    let audio_info = get_audio_info(&path);
+    let mut final_duration = 300.0; // 先设置默认值
+    
+    // 更新播放状态
+    {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing = true;
+        status.position = start_time.unwrap_or(0.0);
+
+    // 尝试获取音频时长，优先使用ffprobe获取的时长
+        if let Some(info) = &audio_info {
+            status.duration = info.duration;
+            final_duration = info.duration;
+            println!("[FFplay] 使用ffprobe获取的音频时长: {}秒", info.duration);
+        } else if let Some(d) = duration {
+            status.duration = d;
+            final_duration = d;
+            println!("[FFplay] 使用前端传递的音频时长: {}秒", d);
+        } else {
+            status.duration = 300.0;
+            println!("[FFplay] 无法获取音频时长，使用默认值: 300秒");
+        }
+
+        // 打印初始状态
+        println!("[FFplay] 初始状态: is_playing={}, position={}, duration={}",
+            status.is_playing, status.position, status.duration);
+    }
+    
+    // 启动状态监控线程
+    start_ffplay_monitor();
+    
+    // 构建返回对象，包含音频文件信息
+    let mut response = serde_json::json!({
+        "success": true,
+        "message": format!("FFplay已开始播放: {}", path),
+        "path": path,
+        "duration": final_duration,
+        "position": start_time.unwrap_or(0.0),
+        "is_ffplay": true
+    });
+    
+    // 添加音频文件详细信息
+    if let Some(info) = audio_info {
+        response["format"] = serde_json::Value::String(info.format);
+        if let Some(sample_rate) = info.sample_rate {
+            response["sample_rate"] = serde_json::Value::Number(serde_json::Number::from(sample_rate));
+        }
+        if let Some(channels) = info.channels {
+            response["channels"] = serde_json::Value::Number(serde_json::Number::from(channels));
+        }
+        if let Some(bit_rate) = info.bit_rate {
+            response["bit_rate"] = serde_json::Value::Number(serde_json::Number::from(bit_rate));
+        }
+        if let Some(bit_depth) = info.bit_depth {
+            response["bit_depth"] = serde_json::Value::Number(serde_json::Number::from(bit_depth));
+        }
+    }
+    
+    Ok(response)
+}
+
+// 停止FFplay播放
+#[tauri::command]
+pub fn stop_ffplay() -> Result<String, String> {
+    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    
+    if let Some(mut child) = process.take() {
+        // 尝试优雅地终止进程
+        match child.kill() {
+            Ok(_) => {
+                println!("[FFplay] 已停止播放");
+                // 不等待进程结束，避免阻塞
+                // let _ = child.wait();
+            }
+            Err(e) => {
+                println!("[FFplay] 停止播放失败: {}", e);
+                return Err(format!("停止FFplay失败: {}", e));
+            }
+        }
+    }
+    
+    // 更新播放状态
+    {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing = false;
+        // 不重置position，避免播放进度回到0
+        // status.position = 0.0;
+    }
+    
+    Ok("FFplay已停止".to_string())
+}
+
+// 暂停FFplay播放（通过发送空格键）
+#[tauri::command]
+pub fn pause_ffplay() -> Result<String, String> {
+    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    
+    if let Some(ref mut child) = *process {
+        // 向FFplay发送暂停命令（p键）
+        if let Some(ref mut stdin) = child.stdin {
+            use std::io::Write;
+            if let Err(e) = stdin.write_all(b"p") {
+                println!("[FFplay] 发送暂停命令失败: {}", e);
+                return Err(format!("发送暂停命令失败: {}", e));
+            }
+            if let Err(e) = stdin.flush() {
+                println!("[FFplay] 刷新stdin失败: {}", e);
+                return Err(format!("刷新stdin失败: {}", e));
+            }
+            println!("[FFplay] 已发送暂停命令");
+            
+            // 更新播放状态
+            let mut status = FFPLAY_STATUS.lock().unwrap();
+            status.is_playing = false;
+            
+            // 保存当前播放位置
+            let paused_position = status.position;
+            drop(status);
+            
+            // 保存到全局变量
+            let mut paused_pos = PAUSED_POSITION.lock().unwrap();
+            *paused_pos = Some(paused_position);
+            drop(paused_pos);
+            
+            println!("[FFplay] 暂停播放，保存位置: {:.2}秒", paused_position);
+            
+            return Ok("FFplay已暂停".to_string());
+        }
+        return Err("无法访问FFplay进程的stdin".to_string());
+    }
+    
+    Err("FFplay未在播放".to_string())
+}
+
+// 恢复FFplay播放
+#[tauri::command]
+pub fn resume_ffplay() -> Result<String, String> {
+    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    
+    if let Some(ref mut child) = *process {
+        // 向FFplay发送恢复命令（p键）
+        if let Some(ref mut stdin) = child.stdin {
+            use std::io::Write;
+            if let Err(e) = stdin.write_all(b"p") {
+                println!("[FFplay] 发送恢复命令失败: {}", e);
+                return Err(format!("发送恢复命令失败: {}", e));
+            }
+            if let Err(e) = stdin.flush() {
+                println!("[FFplay] 刷新stdin失败: {}", e);
+                return Err(format!("刷新stdin失败: {}", e));
+            }
+            println!("[FFplay] 已发送恢复命令");
+            
+            // 保存当前播放位置
+            let paused_position = {
+                let paused_pos = PAUSED_POSITION.lock().unwrap();
+                *paused_pos
+            };
+            
+            // 更新播放状态
+            let mut status = FFPLAY_STATUS.lock().unwrap();
+            status.is_playing = true;
+            
+            // 从保存的位置恢复
+            if let Some(pos) = paused_position {
+                status.position = pos;
+            }
+            
+            println!("[FFplay] 恢复播放");
+            
+            return Ok("FFplay已恢复播放".to_string());
+        }
+        return Err("无法访问FFplay进程的stdin".to_string());
+    }
+    
+    Err("FFplay未在播放".to_string())
+}
+
+// 跳转到指定位置
+#[tauri::command]
+pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Value, String> {
+    println!("[FFplay] 开始seek到位置: {:.2}秒, 路径: {}", position, path);
+    
+    // 获取当前播放状态
+    let was_playing = {
+        let status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing
+    };
+    
+    // 停止当前播放
+    stop_ffplay()?;
+    
+    // 从指定位置重新开始播放
+    let result = play_with_ffplay(path, Some(position), None).await;
+    
+    // 如果之前在播放，确保恢复播放状态
+    if was_playing {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing = true;
+    }
+    
+    println!("[FFplay] seek完成: {:?}", result);
+    result
+}
+
+// 设置音量
+#[tauri::command]
+pub fn set_ffplay_volume(volume: f32) -> Result<String, String> {
+    let mut status = FFPLAY_STATUS.lock().unwrap();
+    status.volume = volume.clamp(0.0, 1.0);
+    
+    // FFplay不支持动态调整音量，需要重新启动
+    Ok(format!("音量已设置为: {}", status.volume))
+}
+
+// 启动FFplay状态监控线程
+fn start_ffplay_monitor() {
+    // 停止之前的监控线程
+    let mut old_thread = MONITOR_THREAD.lock().unwrap();
+    if let Some(handle) = old_thread.take() {
+        drop(old_thread);
+        // 等待旧线程结束
+        let _ = handle.join();
+        println!("[FFplay] 已停止旧的监控线程");
+    }
+    
+    let thread = std::thread::spawn(|| {
+        println!("[FFplay] 状态监控线程已启动");
+        
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500)); // 每500毫秒更新一次，提高响应速度
+            
+            // 检查是否有FFplay进程在运行
+            let mut process = FFPLAY_PROCESS.lock().unwrap();
+            if let Some(child) = process.as_mut() {
+                // 检查进程是否还在运行
+                match child.try_wait() {
+                    Ok(Some(exit_status)) => {
+                        // 进程已结束，更新状态
+                        println!("[FFplay] 进程已结束，退出状态: {:?}", exit_status);
+                        drop(process);
+                        let _ = stop_ffplay();
+                        break;
+                    }
+                    Ok(None) => {
+                        // 进程仍在运行，更新播放位置
+                        drop(process);
+                        
+                        let mut status = FFPLAY_STATUS.lock().unwrap();
+                        // 检查是否正在播放且进程在运行
+                        if status.is_playing && status.position < status.duration {
+                            // 只有当位置小于时长时才增加
+                            if status.position < status.duration - 0.5 {
+                                status.position += 0.5; // 每500毫秒增加0.5秒
+                            } else {
+                                // 已经接近结尾，将位置设置为时长，标记为播放完成
+                                status.position = status.duration;
+                                status.is_playing = false;
+                                println!("[FFplay] 播放状态: 播放完成, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
+                            }
+                            println!("[FFplay] 播放状态: 正在播放, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
+                        } else if !status.is_playing {
+                            // 暂停状态，不更新位置
+                            println!("[FFplay] 播放状态: 已暂停, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
+                        }
+                    }
+                    Err(e) => {
+                        // 检查失败，继续监控
+                        println!("[FFplay] 检查进程状态失败: {:?}", e);
+                    }
+                }
+            } else {
+                // 没有FFplay进程，退出监控
+                println!("[FFplay] 没有FFplay进程，退出监控");
+                break;
+            }
+        }
+        
+        println!("[FFplay] 状态监控线程已退出");
+    });
+    
+    // 保存线程句柄
+    let mut thread_handle = MONITOR_THREAD.lock().unwrap();
+    *thread_handle = Some(thread);
+}
+
+// 获取FFplay播放状态
+#[tauri::command]
+pub fn get_ffplay_status() -> Result<FFplayStatus, String> {
+    let status = FFPLAY_STATUS.lock().unwrap();
+    println!("[get_ffplay_status] 返回状态: is_playing={}, position={:.2}, duration={:.2}",
+        status.is_playing, status.position, status.duration);
+    Ok(status.clone())
+}
+
+// 音频文件信息结构体
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AudioFileInfo {
+    pub duration: f64,         // 时长（秒）
+    pub format: String,        // 音频格式
+    pub sample_rate: Option<u32>, // 采样率（Hz）
+    pub channels: Option<u32>,   // 声道数
+    pub bit_rate: Option<u32>,   // 比特率（bps）
+    pub bit_depth: Option<u32>,  // 比特深度
+}
+
+// 获取音频文件信息（使用ffprobe）
+fn get_audio_info(path: &str) -> Option<AudioFileInfo> {
+    let ffprobe_path = TranscodeCache::get_ffprobe_path()?;
+    println!("[FFplay] 正在使用ffprobe获取音频文件信息: {}, 路径: {}", ffprobe_path, path);
+    
+    // 使用ffprobe获取详细的音频文件信息
+    let output = Command::new(&ffprobe_path)
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration,format_name,bit_rate:stream=codec_name,sample_rate,channels,bits_per_raw_sample")
+        .arg("-of")
+        .arg("json")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    
+    if output.status.success() {
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        println!("[FFplay] ffprobe输出: {}", output_str);
+        
+        // 解析JSON输出
+        #[derive(Debug, serde::Deserialize)]
+        struct Stream {
+            codec_name: Option<String>,
+            sample_rate: Option<String>,
+            channels: Option<u32>,
+            bits_per_raw_sample: Option<String>,
+        }
+        
+        #[derive(Debug, serde::Deserialize)]
+        struct Format {
+            duration: Option<String>,
+            format_name: Option<String>,
+            bit_rate: Option<String>,
+        }
+        
+        #[derive(Debug, serde::Deserialize)]
+        struct FFprobeOutput {
+            streams: Vec<Stream>,
+            format: Format,
+        }
+        
+        match serde_json::from_str::<FFprobeOutput>(&output_str) {
+            Ok(parsed) => {
+                // 提取音频流信息（通常是第一个流）
+                let audio_stream = parsed.streams.first();
+                
+                // 解析时长
+                let duration = parsed.format.duration
+                    .and_then(|d| d.parse::<f64>().ok())
+                    .unwrap_or(300.0); // 默认300秒
+                
+                // 解析格式名称
+                let format = audio_stream
+                    .and_then(|s| s.codec_name.clone())
+                    .or_else(|| parsed.format.format_name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                
+                // 解析采样率
+                let sample_rate = audio_stream
+                    .and_then(|s| s.sample_rate.as_ref().and_then(|sr| sr.parse::<u32>().ok()));
+                
+                // 解析声道数
+                let channels = audio_stream.and_then(|s| s.channels);
+                
+                // 解析比特率
+                let bit_rate = parsed.format.bit_rate
+                    .and_then(|br| br.parse::<u32>().ok());
+                
+                // 解析比特深度
+                let bit_depth = audio_stream
+                    .and_then(|s| s.bits_per_raw_sample.as_ref().and_then(|bd| bd.parse::<u32>().ok()));
+                
+                let info = AudioFileInfo {
+                    duration,
+                    format,
+                    sample_rate,
+                    channels,
+                    bit_rate,
+                    bit_depth,
+                };
+                
+                println!("[FFplay] 解析音频文件信息成功: {:?}", info);
+                Some(info)
+            }
+            Err(e) => {
+                println!("[FFplay] 解析ffprobe输出失败: {}", e);
+                None
+            }
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("[FFplay] ffprobe执行失败: {}", stderr);
+        None
+    }
+}
+
+// 获取音频时长（使用ffprobe）
+fn get_audio_duration(path: &str) -> Option<f64> {
+    get_audio_info(path).map(|info| info.duration)
+}
+
+// 检查文件是否需要使用FFplay播放（原引擎不支持的无损音频）
+pub fn needs_ffplay_playback(path: &str) -> bool {
+    // 检查文件扩展名
+    let path_lower = path.to_lowercase();
+    let unsupported_formats = [
+        ".dsf",  // DSD格式
+        ".dff",  // DSD格式
+        ".dsd",  // DSD格式
+        ".mqa",  // MQA格式
+        ".wv",   // WavPack格式
+        ".tta",  // TTA格式
+        ".ape",  // Monkey's Audio格式
+        ".wma",  // Windows Media Audio
+        ".m4a",  // AAC格式（某些情况下）
+        ".aac",  // AAC格式
+    ];
+    
+    for ext in &unsupported_formats {
+        if path_lower.ends_with(ext) {
+            return true;
+        }
+    }
+    
+    false
 }

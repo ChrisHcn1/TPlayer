@@ -49,6 +49,13 @@ fn main() {
             } else {
                 log_info!("FFmpeg未检测到，转码功能不可用");
             }
+            
+            // 检查FFplay是否可用
+            if ffmpeg_transcoder::TranscodeCache::get_ffplay_path().is_some() {
+                log_info!("FFplay检测成功，无损音频播放功能已启用");
+            } else {
+                log_info!("FFplay未检测到，无损音频播放功能不可用");
+            }
         }
         Err(e) => {
             log_error!("初始化转码缓存失败: {}", e);
@@ -80,6 +87,13 @@ fn main() {
             ffmpeg_transcoder::check_needs_transcode,
             ffmpeg_transcoder::pretranscode_audio,
             ffmpeg_transcoder::get_transcoded_path,
+            ffmpeg_transcoder::play_with_ffplay,
+            ffmpeg_transcoder::stop_ffplay,
+            ffmpeg_transcoder::pause_ffplay,
+            ffmpeg_transcoder::resume_ffplay,
+            ffmpeg_transcoder::seek_ffplay,
+            ffmpeg_transcoder::set_ffplay_volume,
+            ffmpeg_transcoder::get_ffplay_status,
             http_server::get_file_http_url
         ])
         // 注册插件
@@ -88,6 +102,13 @@ fn main() {
         // 系统托盘
         .setup(|app| {
             let app_handle = app.handle();
+            
+            // 监听应用退出事件，清理FFplay资源
+            let app_handle_for_cleanup = app_handle.clone();
+            app.listen("tauri://close-requested", move |_| {
+                println!("[应用] 收到退出请求，清理FFplay资源");
+                ffmpeg_transcoder::cleanup_ffplay();
+            });
             
             // 创建托盘菜单
             let menu = tauri::menu::Menu::with_items(
@@ -128,6 +149,8 @@ fn main() {
                             let _ = app.emit("tray-previous-song", ());
                         }
                         "quit" => {
+                            // 清理FFplay资源
+                            ffmpeg_transcoder::cleanup_ffplay();
                             // 退出应用
                             app.exit(0);
                         }

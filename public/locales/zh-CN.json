@@ -30,7 +30,9 @@
     "bottom": "底部",
     "top": "顶部",
     "dark": "深色",
-    "light": "浅色"
+    "light": "浅色",
+    "about": "关于",
+    "viewAbout": "查看关于"
   },
   "playlist": {
     "title": "播放列表",

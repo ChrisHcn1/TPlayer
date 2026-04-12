@@ -1,5 +1,18 @@
 <template>
-  <div id="app" class="tplayer-container" :class="{ 'light': theme === 'light' }">
+  <!-- 启动画面 -->
+  <div v-if="isLoading" class="splash-screen">
+    <div class="splash-content">
+      <img src="/logo.png" alt="TPlayer Logo" class="splash-logo" />
+      <h1 class="splash-title">TPlayer</h1>
+      <p class="splash-slogan">让音乐触动心灵</p>
+      <div class="splash-loading">
+        <div class="loading-spinner"></div>
+        <span>加载中...</span>
+      </div>
+    </div>
+  </div>
+  
+  <div id="app" class="tplayer-container" :class="{ 'light': theme === 'light' }" v-if="!isLoading">
     <!-- 顶部信息栏 -->
     <header class="top-bar" data-tauri-drag-region>
       <div class="app-logo" data-tauri-drag-region="false">
@@ -840,7 +853,7 @@ import { exists } from '@tauri-apps/plugin-fs'
 const ENABLE_LOGS = true
 
 // 调试日志级别：0=无日志，1=仅错误，2=基本信息，3=详细信息
-const LOG_LEVEL = 0
+const LOG_LEVEL = 2
 
 // 日志函数
 function logInfo(...args: any[]) {
@@ -908,6 +921,7 @@ const showEditTagsModal = ref(false)
 const showSettingsModal = ref(false)
 const showCoverModal = ref(false)
 const activeTab = ref('info')
+const isLoading = ref(true) // 加载状态
 
 // 歌词相关状态
 const lyrics = ref<LyricLine[]>([])
@@ -973,6 +987,13 @@ const currentSong = ref<Song | null>(null)
 const currentPosition = ref(0)
 const progress = ref(0)
 const isPlaying = ref(false)
+
+// FFplay播放器状态
+const isFFplayPlaying = ref(false)
+const ffplayDuration = ref(0)
+const ffplayPosition = ref(0)
+const ffplayVolume = ref(1.0)
+let ffplayStatusInterval: number | null = null
 
 // 浏览器环境下的文件对象存储
 const browserFileMap = new Map<string, File>()
@@ -1530,6 +1551,11 @@ const scanMusic = async () => {
   }
 }
 
+// 记录上次后端状态更新的时间
+let lastBackendUpdateTime = Date.now()
+// 记录前端计算的播放位置
+let frontendPosition = 0
+
 // 播放状态管理
 let playSongLock: Promise<void> | null = null
 let currentPlayId = 0 // 用于跟踪当前播放请求的唯一ID
@@ -1541,20 +1567,11 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
   
   let errorMessage = ''
   
-  // 如果有正在执行的播放操作，等待它完成
+  // 取消之前的播放操作，直接响应用户的最新操作
   if (playSongLock) {
-    logInfo(`[播放保护] 播放请求 ${thisPlayId}: 检测到正在进行的播放操作，等待完成`)
-    try {
-      await playSongLock
-    } catch {
-      // 忽略之前操作的错误
-    }
-    
-    // 等待完成后，检查是否已经有更新的播放请求（不是当前这个）
-    if (thisPlayId !== currentPlayId) {
-      logInfo(`[播放保护] 播放请求 ${thisPlayId}: 等待完成后发现有更新的请求 ${currentPlayId}，跳过本次调用`)
-      return
-    }
+    logInfo(`[播放保护] 检测到正在进行的播放操作，取消并直接处理最新请求`)
+    // 重置锁定状态，允许新的播放请求立即执行
+    playSongLock = null
   }
   
   // 再次检查，确保没有其他请求在此期间进入
@@ -1843,6 +1860,436 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       // 统一使用Windows风格的分隔符
       const normalizedPath = playPath.replace(/\//g, '\\')
       logDebug('标准化后的路径:', normalizedPath)
+    }
+
+    // 检查是否需要使用FFplay播放（原引擎不支持的无损音频）
+    const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma', '.m4a', '.aac']
+    const needsFFplay = unsupportedFormats.some(ext => playPath.toLowerCase().endsWith(ext))
+    
+    if (needsFFplay && !isBrowser.value) {
+      logInfo('检测到需要FFplay播放的格式:', playPath)
+      
+      // 停止之前的FFplay播放
+      if (isFFplayPlaying.value) {
+        try {
+          await invoke('stop_ffplay')
+          isFFplayPlaying.value = false
+        } catch (error) {
+          logError('停止FFplay播放失败:', error)
+        }
+      }
+      
+      // 停止当前的rodio播放
+      if (audioElement.value) {
+        try {
+          audioElement.value.pause()
+          if (timeupdateHandler) {
+            audioElement.value.removeEventListener('timeupdate', timeupdateHandler)
+          }
+          audioElement.value.oncanplay = null
+          audioElement.value.onerror = null
+          audioElement.value.onended = null
+          audioElement.value.src = ''
+          audioElement.value.load()
+          audioElement.value = null
+          timeupdateHandler = null
+        } catch (error) {
+          logError('清理音频元素失败:', error)
+        }
+      }
+      
+      // 清除之前的播放完成检测定时器
+      if (playbackTimerId !== null) {
+        clearTimeout(playbackTimerId)
+        playbackTimerId = null
+      }
+      
+      // 停止FFplay状态监控
+      if (ffplayStatusInterval !== null) {
+        clearInterval(ffplayStatusInterval)
+        ffplayStatusInterval = null
+        logInfo('已清除FFplay状态监控定时器')
+      }
+      
+      try {
+        // 使用FFplay播放
+        const start_position = positionForCue
+        let result
+        try {
+          // 解析歌曲时长（如果有的话）
+          let durationSeconds = 300; // 默认值
+          if (currentSong.value && currentSong.value.duration) {
+            const durationStr = currentSong.value.duration;
+            const parts = durationStr.split(':');
+            if (parts.length === 2) {
+              const minutes = parseInt(parts[0]);
+              const seconds = parseInt(parts[1]);
+              durationSeconds = minutes * 60 + seconds;
+            }
+          }
+          
+          result = await invoke('play_with_ffplay', { 
+            path: playPath, 
+            start_time: start_position,
+            duration: durationSeconds
+          })
+          logInfo('FFplay播放已启动:', result)
+          logInfo('result类型:', typeof result)
+          logInfo('result.duration:', result.duration)
+        } catch (invokeError) {
+          logError('FFplay播放失败:', invokeError)
+          // 如果是ffplay未找到，给出更明确的提示
+          const errorMsg = String(invokeError)
+          if (errorMsg.includes('未找到') || errorMsg.includes('not found') || errorMsg.includes('FFplay')) {
+            logError('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
+          }
+          return
+        }
+        
+        // 检查是否返回错误（ffplay未找到）
+        if (result && typeof result === 'string' && result.includes('未找到')) {
+          logError('FFplay未找到，无法播放此格式:', result)
+          return
+        }
+        
+        // 获取音频时长和详细信息
+        try {
+          if (result && result.duration) {
+            ffplayDuration.value = result.duration
+            ffplayPosition.value = start_position
+            
+            // 更新歌曲时长
+            const totalSeconds = Math.round(result.duration)
+            const minutes = Math.floor(totalSeconds / 60)
+            const seconds = totalSeconds % 60
+            song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+            
+            // 更新音频文件详细信息
+            if (result.format) {
+              song.format = result.format
+            }
+            if (result.sample_rate) {
+              song.sample_rate = result.sample_rate
+            }
+            if (result.channels) {
+              song.channels = result.channels
+            }
+            if (result.bit_rate) {
+              song.bit_rate = result.bit_rate
+            }
+            if (result.bit_depth) {
+              song.bit_depth = result.bit_depth
+            }
+            
+            // 计算进度百分比
+            if (totalSeconds > 0) {
+              progress.value = Math.min((start_position / totalSeconds) * 100, 100)
+            }
+            
+            console.log('【FFplay】音频文件信息:', {
+              format: result.format,
+              sample_rate: result.sample_rate,
+              channels: result.channels,
+              bit_rate: result.bit_rate,
+              bit_depth: result.bit_depth
+            })
+            logInfo('音频文件信息:', {
+              format: result.format,
+              sample_rate: result.sample_rate,
+              channels: result.channels,
+              bit_rate: result.bit_rate,
+              bit_depth: result.bit_depth
+            })
+          }
+        } catch (error) {
+          logError('获取音频时长失败:', error)
+        }
+        
+        // 更新播放状态
+        currentSong.value = song
+        isPlaying.value = true
+        isFFplayPlaying.value = true
+        currentPosition.value = start_position
+        
+        // 启动FFplay状态监控
+        console.log('【FFplay】启动FFplay状态监控定时器')
+        logInfo('启动FFplay状态监控定时器')
+        // 清除可能存在的旧定时器
+        if (ffplayStatusInterval) {
+          clearInterval(ffplayStatusInterval)
+          ffplayStatusInterval = null
+          console.log('【FFplay】已清除旧的FFplay状态监控定时器')
+          logInfo('已清除旧的FFplay状态监控定时器')
+        }
+        // 初始化全局变量
+        lastBackendUpdateTime = Date.now()
+        frontendPosition = currentPosition.value
+        
+        // 确保isFFplayPlaying.value为true
+        isFFplayPlaying.value = true
+        console.log('【FFplay】设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+        logInfo('设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+        
+        // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
+        (async () => {
+          try {
+            console.log('【FFplay】立即执行FFplay状态更新')
+            logInfo('立即执行FFplay状态更新')
+            const status = await invoke('get_ffplay_status') as any
+            console.log('【FFplay】立即获取FFplay状态成功:', JSON.stringify(status))
+            logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+
+            if (status) {
+              // 更新上次后端状态更新的时间
+              lastBackendUpdateTime = Date.now()
+              console.log('【FFplay】立即处理FFplay状态:', {
+                duration: status.duration,
+                position: status.position,
+                volume: status.volume,
+                is_playing: status.is_playing
+              })
+              logInfo('立即处理FFplay状态:', {
+                duration: status.duration,
+                position: status.position,
+                volume: status.volume,
+                is_playing: status.is_playing
+              })
+              
+              ffplayDuration.value = status.duration || ffplayDuration.value
+              ffplayPosition.value = status.position || ffplayPosition.value
+              ffplayVolume.value = status.volume || ffplayVolume.value
+
+              // 更新播放状态
+              isPlaying.value = status.is_playing || false
+              console.log('【FFplay】isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+              logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+
+              // 只有当status.position有效时才更新currentPosition
+              if (status.position !== undefined && status.position !== null) {
+                console.log('【FFplay】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                currentPosition.value = status.position
+                // 更新前端计算的播放位置
+                frontendPosition = status.position
+                console.log('【FFplay】立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+              }
+              
+              // 计算进度百分比
+              if (ffplayDuration.value > 0) {
+                const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
+                console.log('【FFplay】立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                progress.value = newProgress
+                console.log('【FFplay】立即更新进度百分比:', progress.value, '%')
+                logInfo('立即更新进度百分比:', progress.value, '%')
+              }
+            }
+          } catch (error) {
+            console.error('【FFplay】立即获取FFplay状态失败:', error)
+            logError('立即获取FFplay状态失败:', error)
+          }
+        })()
+        
+        ffplayStatusInterval = window.setInterval(() => {
+          // 检查是否应该继续运行定时器
+          if (!isFFplayPlaying.value) {
+            console.log('【FFplay】isFFplayPlaying为false，停止监控定时器')
+            logInfo('isFFplayPlaying为false，停止监控定时器')
+            if (ffplayStatusInterval) {
+              clearInterval(ffplayStatusInterval)
+              ffplayStatusInterval = null
+            }
+            return
+          }
+          
+          console.log('【FFplay】FFplay状态监控定时器触发')
+          logInfo('FFplay状态监控定时器触发')
+          // 使用IIFE包装async函数
+          (async () => {
+            try {
+              console.log('【FFplay】准备调用get_ffplay_status')
+              logInfo('准备调用get_ffplay_status')
+              const status = await invoke('get_ffplay_status') as any
+              console.log('【FFplay】获取FFplay状态成功:', JSON.stringify(status))
+              logInfo('获取FFplay状态成功:', JSON.stringify(status))
+
+              if (status) {
+                // 更新上次后端状态更新的时间
+                lastBackendUpdateTime = Date.now()
+                console.log('【FFplay】处理FFplay状态:', {
+                  duration: status.duration,
+                  position: status.position,
+                  volume: status.volume,
+                  is_playing: status.is_playing
+                })
+                logInfo('处理FFplay状态:', {
+                  duration: status.duration,
+                  position: status.position,
+                  volume: status.volume,
+                  is_playing: status.is_playing
+                })
+                
+                ffplayDuration.value = status.duration || ffplayDuration.value
+                ffplayPosition.value = status.position || ffplayPosition.value
+                ffplayVolume.value = status.volume || ffplayVolume.value
+
+                // 更新播放状态
+                isPlaying.value = status.is_playing || false
+                console.log('【FFplay】isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+
+                // 只有当status.position有效时才更新currentPosition
+                if (status.position !== undefined && status.position !== null) {
+                  console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  currentPosition.value = status.position
+                  // 更新前端计算的播放位置
+                  frontendPosition = status.position
+                  console.log('【FFplay】更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                  logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                }
+                
+                // 计算进度百分比
+                if (ffplayDuration.value > 0) {
+                  const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
+                  console.log('【FFplay】更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  logInfo('更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  progress.value = newProgress
+                  console.log('【FFplay】更新进度百分比:', progress.value, '%')
+                  logInfo('更新进度百分比:', progress.value, '%')
+                }
+              
+                // 检查播放是否完成
+                // 只有当满足以下所有条件时才认为播放完成：
+                // 1. is_playing 为 false
+                // 2. duration > 0 (确保已获取到有效时长)
+                // 3. position >= duration - 1 (播放到接近结尾，允许1秒误差)
+                // 4. ffplayDuration.value > 0 (确保前端也获取到了时长)
+                // 5. isFFplayPlaying.value 为 true (确保当前确实在使用 ffplay)
+                const isPlaybackComplete =
+                  status.is_playing === false &&
+                  status.duration > 0 &&
+                  status.position >= status.duration - 1 &&
+                  ffplayDuration.value > 0 &&
+                  isFFplayPlaying.value
+
+                console.log('【FFplay】播放完成检测: is_playing=', status.is_playing, 'position=', status.position.toFixed(2), 'duration=', status.duration.toFixed(2), 'ffplayDuration=', ffplayDuration.value, 'isFFplayPlaying=', isFFplayPlaying.value, 'isPlaybackComplete=', isPlaybackComplete)
+                logInfo('播放完成检测: is_playing=', status.is_playing, 'position=', status.position.toFixed(2), 'duration=', status.duration.toFixed(2), 'ffplayDuration=', ffplayDuration.value, 'isFFplayPlaying=', isFFplayPlaying.value, 'isPlaybackComplete=', isPlaybackComplete)
+
+                if (isPlaybackComplete) {
+                  console.log('【FFplay】FFplay播放完成, position:', status.position, 'duration:', status.duration)
+                  logInfo('FFplay播放完成, position:', status.position, 'duration:', status.duration)
+                  isPlaybackFinished = true
+
+                  // 停止状态监控定时器
+                  if (ffplayStatusInterval) {
+                    clearInterval(ffplayStatusInterval)
+                    ffplayStatusInterval = null
+                  }
+
+                  // 重置FFplay相关状态
+                  isFFplayPlaying.value = false
+
+                  if (autoPlayNext.value) {
+                    // 延迟执行 playNext()，确保当前播放状态已经完全更新
+                    console.log('【FFplay】准备播放下一首歌曲');
+                    logInfo('准备播放下一首歌曲');
+                    setTimeout(() => {
+                      console.log('【FFplay】执行playNext()');
+                      logInfo('执行playNext()');
+                      playNext();
+                    }, 1000)
+                  } else if (autoPlay) {
+                    isPlaying.value = false
+                    console.log('【FFplay】播放完成，停止播放');
+                    logInfo('播放完成，停止播放');
+                  }
+                }
+                
+
+              }
+            } catch (error) {
+              console.error('【FFplay】获取FFplay状态失败:', error)
+              logError('获取FFplay状态失败:', error)
+              // 即使在获取状态失败的情况下，也保持isFFplayPlaying.value为true
+              // 确保即使在状态获取失败的情况下，前端也能正确检测到FFplay播放状态
+              isFFplayPlaying.value = true
+              console.log('【FFplay】获取FFplay状态失败，确保isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+              logInfo('获取FFplay状态失败，确保isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+            }
+          })()
+        }, 500) // 每500毫秒更新一次状态，提高响应速度
+        
+        // 添加前端进度更新定时器，作为备份
+        console.log('【FFplay】启动前端进度更新定时器')
+        logInfo('启动前端进度更新定时器')
+        if (progressTimer) {
+          clearInterval(progressTimer)
+          console.log('【FFplay】已清除旧的前端进度更新定时器')
+          logInfo('已清除旧的前端进度更新定时器')
+        }
+        
+        progressTimer = window.setInterval(() => {
+          // 检查是否正在使用FFplay播放
+          if (isFFplayPlaying.value && isPlaying.value && ffplayDuration.value > 0) {
+            // 无论是否收到后端状态更新，都使用前端计算的播放位置
+            // 每次+300毫秒更新一次，直至曲目播放结束
+            frontendPosition += 0.3 // 每300毫秒增加0.3秒
+            if (frontendPosition < ffplayDuration.value) {
+              currentPosition.value = frontendPosition
+              progress.value = Math.min((frontendPosition / ffplayDuration.value) * 100, 100)
+              console.log('【FFplay】前端进度更新(备份): currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+              logInfo('前端进度更新(备份): currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+            } else {
+              // 曲目播放结束
+              currentPosition.value = ffplayDuration.value
+              progress.value = 100
+              console.log('【FFplay】前端进度更新(备份): 曲目播放结束, currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+              logInfo('前端进度更新(备份): 曲目播放结束, currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+            }
+          } else {
+            // 播放暂停或停止，重置前端计算的播放位置
+            frontendPosition = currentPosition.value
+          }
+        }, 300) // 每300毫秒更新一次，符合用户要求
+        
+        // 解析歌词
+        if (song.lyric) {
+          logInfo('解析歌词，长度:', song.lyric.length)
+          lyrics.value = parseLyrics(song.lyric)
+          logInfo('歌词解析完成，行数:', lyrics.value.length)
+          coverLyricLineRefs.value = []
+        } else {
+          logInfo('歌曲无歌词')
+          lyrics.value = []
+          coverLyricLineRefs.value = []
+        }
+        
+        // 自动滚动到当前播放歌曲
+        scrollToCurrentSong()
+        
+        // 预先确定下一首歌曲（用于随机播放模式）
+        if (playbackMode.value === 'random' && songs.value.length > 1) {
+          let nextIndex
+          do {
+            nextIndex = Math.floor(Math.random() * songs.value.length)
+          } while (nextIndex === currentIndex && songs.value.length > 1)
+          randomNextIndex.value = nextIndex
+          logInfo('随机模式：预先确定下一首索引:', nextIndex, '歌曲:', songs.value[nextIndex].title)
+        } else {
+          randomNextIndex.value = null
+        }
+        
+        return
+      } catch (ffplayError) {
+        logError('FFplay播放失败:', ffplayError)
+        errorMessage = 'FFplay播放失败: ' + String(ffplayError)
+        isPlaying.value = false
+        isFFplayPlaying.value = false
+        isPlaybackFinished = true
+        throw new Error(errorMessage)
+      }
     }
 
     // 检查文件是否存在（仅桌面应用）
@@ -2732,6 +3179,42 @@ const togglePlayback = async () => {
       return
     }
 
+    // 如果使用FFplay播放
+    logInfo('检查isFFplayPlaying.value:', isFFplayPlaying.value)
+    if (isFFplayPlaying.value) {
+      logInfo('使用FFplay播放，切换播放状态')
+
+      if (isPlaying.value) {
+        logInfo('暂停FFplay播放')
+        try {
+          await invoke('pause_ffplay')
+          isPlaying.value = false
+          // 不要将isFFplayPlaying.value设置为false，否则后续的恢复播放会失败
+          // isFFplayPlaying.value = false
+        } catch (error) {
+          logError('暂停FFplay播放失败:', error)
+        }
+      } else {
+        logInfo('恢复FFplay播放')
+        try {
+          const result = await invoke('resume_ffplay') as any
+          logInfo('FFplay播放已恢复:', result)
+          isPlaying.value = true
+          // isFFplayPlaying.value 应该保持 true
+        } catch (error) {
+          logError('恢复FFplay播放失败:', error)
+          // 如果恢复失败，可能是 ffplay 进程已结束，尝试重新播放
+          if (currentSong.value) {
+            logInfo('尝试重新播放当前歌曲')
+            await playSong(currentSong.value, currentPosition.value)
+          }
+        }
+      }
+
+      isToggling = false
+      return
+    }
+
     if (isPlaying.value) {
       logInfo('暂停播放')
       // 记录暂停开始时间
@@ -2748,7 +3231,12 @@ const togglePlayback = async () => {
       logInfo('恢复播放')
       // 检查音频元素是否存在
       if (!audioElement.value) {
-        logError('没有音频元素，无法恢复播放')
+        logError('没有音频元素，尝试使用FFplay播放')
+        // 尝试使用FFplay播放当前歌曲
+        if (currentSong.value) {
+          logInfo('尝试使用FFplay播放当前歌曲')
+          await playSong(currentSong.value, currentPosition.value)
+        }
         return
       }
       
@@ -3072,6 +3560,7 @@ const handleSeeking = () => {
   console.log('【SEEK】progress.value:', progress.value)
   console.log('【SEEK】isSeeking.value:', isSeeking.value)
   console.log('【SEEK】isPlaying.value:', isPlaying.value)
+  console.log('【SEEK】isFFplayPlaying.value:', isFFplayPlaying.value)
   console.log('【SEEK】audioElement.value:', audioElement.value)
   if (audioElement.value) {
     console.log('【SEEK】audioElement.currentTime:', audioElement.value.currentTime)
@@ -3087,13 +3576,9 @@ const handleSeeking = () => {
     console.log('【SEEK】设置 wasPlayingBeforeSeek =', wasPlayingBeforeSeek)
   }
 
-  // 只有在有音频元素时才设置isSeeking为true
-  if (audioElement.value) {
-    isSeeking.value = true
-    console.log('【SEEK】设置 isSeeking.value = true')
-  } else {
-    console.log('【SEEK】音频元素为null，不设置isSeeking为true')
-  }
+  // 无论是否有音频元素，都设置isSeeking为true
+  isSeeking.value = true
+  console.log('【SEEK】设置 isSeeking.value = true')
   console.log('【SEEK】========== handleSeeking 结束 ==========')
 }
 
@@ -3102,11 +3587,218 @@ const seek = async () => {
   console.log('【SEEK】========== seek 函数开始 ==========')
   console.log('【SEEK】progress.value:', progress.value, '%')
   console.log('【SEEK】isPlaying.value:', isPlaying.value)
+  console.log('【SEEK】isFFplayPlaying.value:', isFFplayPlaying.value)
   console.log('【SEEK】isSeeking.value:', isSeeking.value)
   console.log('【SEEK】wasPlayingBeforeSeek:', wasPlayingBeforeSeek)
   console.log('【SEEK】currentSong.value:', currentSong.value)
   console.log('【SEEK】audioElement.value:', audioElement.value)
   logInfo('【SEEK】seek函数被调用, progress.value:', progress.value, '%, isPlaying:', isPlaying.value)
+
+  // 检查是否需要使用FFplay播放（基于文件格式）
+  const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma', '.m4a', '.aac']
+  const shouldUseFFplay = currentSong.value && unsupportedFormats.some(ext => currentSong.value.path.toLowerCase().endsWith(ext))
+  console.log('【SEEK】shouldUseFFplay:', shouldUseFFplay)
+
+  // 如果应该使用FFplay播放，使用FFplay的seek功能
+  if (shouldUseFFplay && currentSong.value) {
+    console.log('【SEEK】使用FFplay seek')
+    
+    try {
+      // 解析时长格式 "mm:ss"
+      const parts = currentSong.value.duration.split(':')
+      if (parts.length === 2) {
+        const minutes = parseInt(parts[0])
+        const seconds = parseInt(parts[1])
+        const totalSeconds = minutes * 60 + seconds
+        
+        if (totalSeconds > 0) {
+          // 计算目标位置（秒）
+          const clampedProgress = Math.min(Math.max(progress.value, 0), 100)
+          const relativePosition = (clampedProgress / 100) * totalSeconds
+          let actualPosition = relativePosition
+          
+          // 对于CUE track，将相对位置转换为绝对位置
+          if (currentSong.value.isCueTrack && currentSong.value.startTime) {
+            const startTimeNum = Number(currentSong.value.startTime)
+            if (!isNaN(startTimeNum) && startTimeNum >= 0) {
+              actualPosition = startTimeNum + relativePosition
+              
+              // 确保不超出CUE track的范围
+              if (currentSong.value.endTime) {
+                const endTimeNum = Number(currentSong.value.endTime)
+                if (!isNaN(endTimeNum) && endTimeNum > 0 && actualPosition > endTimeNum) {
+                  actualPosition = endTimeNum
+                }
+              }
+              if (actualPosition < startTimeNum) {
+                actualPosition = startTimeNum
+              }
+            }
+          }
+          
+          // 调用FFplay seek
+          const result = await invoke('seek_ffplay', {
+            path: currentSong.value.path,
+            position: actualPosition
+          }) as any
+          
+          console.log('【SEEK】FFplay seek成功:', result)
+          
+          // 更新进度相关变量
+          playbackStartTime.value = Date.now() - (actualPosition * 1000)
+          currentPosition.value = actualPosition
+          frontendPosition = actualPosition // 更新前端计算的播放位置
+          progress.value = clampedProgress
+          ffplayPosition.value = actualPosition
+          
+          // 确保isFFplayPlaying.value为true
+          isFFplayPlaying.value = true
+          logInfo('【SEEK】FFplay seek完成: currentPosition=', actualPosition, 's, progress=', progress.value, '%')
+          
+          // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
+          (async () => {
+            try {
+              console.log('【SEEK】立即执行FFplay状态更新')
+              logInfo('立即执行FFplay状态更新')
+              const status = await invoke('get_ffplay_status') as any
+              console.log('【SEEK】立即获取FFplay状态成功:', JSON.stringify(status))
+              logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+
+              if (status) {
+                console.log('【SEEK】立即处理FFplay状态:', {
+                  duration: status.duration,
+                  position: status.position,
+                  volume: status.volume,
+                  is_playing: status.is_playing
+                })
+                logInfo('立即处理FFplay状态:', {
+                  duration: status.duration,
+                  position: status.position,
+                  volume: status.volume,
+                  is_playing: status.is_playing
+                })
+                
+                ffplayDuration.value = status.duration || ffplayDuration.value
+                ffplayPosition.value = status.position || ffplayPosition.value
+                ffplayVolume.value = status.volume || ffplayVolume.value
+
+                // 更新播放状态
+                isPlaying.value = status.is_playing || false
+                console.log('【SEEK】isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+
+                // 只有当status.position有效时才更新currentPosition
+                if (status.position !== undefined && status.position !== null) {
+                  console.log('【SEEK】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  currentPosition.value = status.position
+                  frontendPosition = status.position // 更新前端计算的播放位置
+                  console.log('【SEEK】立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                  logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                }
+                
+                // 计算进度百分比
+                if (ffplayDuration.value > 0) {
+                  const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
+                  console.log('【SEEK】立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  progress.value = newProgress
+                  console.log('【SEEK】立即更新进度百分比:', progress.value, '%')
+                  logInfo('立即更新进度百分比:', progress.value, '%')
+                }
+              }
+            } catch (error) {
+              console.error('【SEEK】立即获取FFplay状态失败:', error)
+              logError('立即获取FFplay状态失败:', error)
+            }
+          })()
+          
+          // 确保FFplay状态监控定时器正在运行
+          if (!ffplayStatusInterval) {
+            console.log('【SEEK】FFplay状态监控定时器未运行，启动一个新的')
+            logInfo('FFplay状态监控定时器未运行，启动一个新的')
+            // 启动FFplay状态监控定时器
+            ffplayStatusInterval = window.setInterval(() => {
+              console.log('【FFplay】状态监控定时器触发')
+              logInfo('FFplay状态监控定时器触发')
+              // 使用IIFE包装async函数
+              (async () => {
+                try {
+                  console.log('【FFplay】准备调用get_ffplay_status')
+                  logInfo('准备调用get_ffplay_status')
+                  const status = await invoke('get_ffplay_status') as any
+                  console.log('【FFplay】获取FFplay状态成功:', JSON.stringify(status))
+                  logInfo('获取FFplay状态成功:', JSON.stringify(status))
+
+                  if (status) {
+                    console.log('【FFplay】处理FFplay状态:', {
+                      duration: status.duration,
+                      position: status.position,
+                      volume: status.volume,
+                      is_playing: status.is_playing
+                    })
+                    logInfo('处理FFplay状态:', {
+                      duration: status.duration,
+                      position: status.position,
+                      volume: status.volume,
+                      is_playing: status.is_playing
+                    })
+                    
+                    ffplayDuration.value = status.duration || ffplayDuration.value
+                    ffplayPosition.value = status.position || ffplayPosition.value
+                    ffplayVolume.value = status.volume || ffplayVolume.value
+
+                    // 更新播放状态
+                    isPlaying.value = status.is_playing || false
+                    console.log('【FFplay】isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                    logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+
+                    // 只有当status.position有效时才更新currentPosition
+                    if (status.position !== undefined && status.position !== null) {
+                      console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                      logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                      currentPosition.value = status.position
+                      // 更新前端计算的播放位置
+                      frontendPosition = status.position
+                      console.log('【FFplay】更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                      logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                    }
+                    
+                    // 计算进度百分比
+                    if (ffplayDuration.value > 0) {
+                      const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
+                      console.log('【FFplay】更新进度百分比前:', progress.value, '更新后:', newProgress)
+                      logInfo('更新进度百分比前:', progress.value, '更新后:', newProgress)
+                      progress.value = newProgress
+                      console.log('【FFplay】更新进度百分比:', progress.value, '%')
+                      logInfo('更新进度百分比:', progress.value, '%')
+                    }
+                  }
+                } catch (error) {
+                  console.error('【FFplay】获取FFplay状态失败:', error)
+                  logError('获取FFplay状态失败:', error)
+                }
+              })()
+            }, 500) // 每500毫秒更新一次状态，提高响应速度
+          } else {
+            console.log('【SEEK】FFplay状态监控定时器已经在运行，不需要重新启动')
+            logInfo('FFplay状态监控定时器已经在运行，不需要重新启动')
+          }
+        }
+      }
+      
+      isSeeking.value = false
+      wasPlayingBeforeSeek = false
+      console.log('【SEEK】========== seek 函数结束（FFplay） ==========')
+      return
+    } catch (error) {
+      console.log('【SEEK】❌ FFplay seek失败:', error)
+      logError('【SEEK】FFplay seek失败:', error)
+      isSeeking.value = false
+      wasPlayingBeforeSeek = false
+      return
+    }
+  }
 
   // 保存对 audioElement 的引用，防止在 seek 过程中被清理
   const audioElementRef = audioElement.value
@@ -3548,7 +4240,10 @@ const scrollToCurrentLyric = () => {
     })
     logInfo('封面歌词滚动: 成功滚动到歌词行', index)
   } else {
-    logInfo('封面歌词滚动: 无法获取歌词行元素，所有行数:', coverLyricsContainer.value.querySelectorAll('.cover-lyric-line').length)
+    logInfo('封面歌词滚动: 无法获取歌词行元素')
+    if (coverLyricsContainer.value) {
+      logInfo('封面歌词滚动: 所有行数:', coverLyricsContainer.value.querySelectorAll('.cover-lyric-line').length)
+    }
   }
 }
 
@@ -4505,191 +5200,223 @@ const handlePlaybackFinished = async (autoPlay: boolean = true) => {
 
 // 生命周期
 onMounted(() => {
-  // 初始化应用
-  logInfo('TPlayer initialized')
+  try {
+    // 初始化应用
+    logInfo('TPlayer initialized')
 
-  // 禁用右键菜单
-  document.addEventListener('contextmenu', (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    return false
-  })
+    // 禁用右键菜单
+    document.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      return false
+    })
 
-  // 禁用开发者工具快捷键 (可选,如果不需要开发工具可以启用)
-  // document.addEventListener('keydown', (e) => {
-  //   if (e.ctrlKey && e.shiftKey && e.key === 'I') {
-  //     e.preventDefault()
-  //     e.stopPropagation()
-  //     return false
-  //   }
-  //   if (e.ctrlKey && e.shiftKey && e.key === 'J') {
-  //     e.preventDefault()
-  //     e.stopPropagation()
-  //     return false
-  //   }
-  //   if (e.key === 'F12') {
-  //     e.preventDefault()
-  //     e.stopPropagation()
-  //     return false
-  //   }
-  // })
-  
-  // 监听滚动事件
-  nextTick(() => {
-    if (songListContainer.value) {
-      // 尝试找到实际的滚动容器并添加事件监听器
-      const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
-      if (songList) {
-        songList.addEventListener('scroll', handleScroll)
-        console.log('滚动事件监听器已添加到 .song-list 元素')
-      } else {
-        songListContainer.value.addEventListener('scroll', handleScroll)
-        console.log('滚动事件监听器已添加到 songListContainer 元素')
+    // 禁用开发者工具快捷键 (可选,如果不需要开发工具可以启用)
+    // document.addEventListener('keydown', (e) => {
+    //   if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+    //     e.preventDefault()
+    //     e.stopPropagation()
+    //     return false
+    //   }
+    //   if (e.ctrlKey && e.shiftKey && e.key === 'J') {
+    //     e.preventDefault()
+    //     e.stopPropagation()
+    //     return false
+    //   }
+    //   if (e.key === 'F12') {
+    //     e.preventDefault()
+    //     e.stopPropagation()
+    //     return false
+    //   }
+    // })
+    
+    // 监听滚动事件
+    nextTick(() => {
+      try {
+        if (songListContainer.value) {
+          // 尝试找到实际的滚动容器并添加事件监听器
+          const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
+          if (songList) {
+            songList.addEventListener('scroll', handleScroll)
+            console.log('滚动事件监听器已添加到 .song-list 元素')
+          } else {
+            songListContainer.value.addEventListener('scroll', handleScroll)
+            console.log('滚动事件监听器已添加到 songListContainer 元素')
+          }
+          // 初始调用一次，设置初始状态
+          handleScroll()
+        }
+      } catch (error) {
+        logError('添加滚动事件监听器失败:', error)
       }
-      // 初始调用一次，设置初始状态
-      handleScroll()
-    }
-  })
+    })
+  } catch (error) {
+    logError('onMounted 初始化失败:', error)
+  }
 })
 
 // 异步初始化
 ;(async () => {
-  // 首先检测运行环境
-  isBrowser.value = await checkIsBrowser()
-  logInfo('【环境检测】最终结果 isBrowser:', isBrowser.value)
-  
-  // 加载保存的歌曲
-  const savedSongs = await localStorageService.getSongs()
-  if (savedSongs.length > 0) {
-    songs.value = savedSongs as Song[]
-  }
-  
-  // 加载歌单和收藏
-  favorites.value = await localStorageService.getFavorites()
-  playlists.value = await localStorageService.getPlaylists()
-  
-  // 更新歌曲的收藏状态
-  songs.value.forEach(song => {
-    song.isFavorite = favorites.value.includes(song.id)
-  })
-  
-  // 加载保存的播放进度
-  const savedProgress = await localStorageService.getPlaybackProgress()
-  if (savedProgress) {
-    // 查找对应的歌曲
-    const savedSong = songs.value.find(song => song.id === savedProgress.songId)
-    if (savedSong) {
-      currentSong.value = savedSong
-      currentPosition.value = savedProgress.position
-      isPlaying.value = savedProgress.isPlaying || false
-      // 只有当时长不是"未知"时才计算进度百分比
-      if (savedSong.duration && savedSong.duration !== '未知') {
-        const parts = savedSong.duration.split(':')
-        if (parts.length === 2) {
-          const minutes = parseInt(parts[0])
-          const seconds = parseInt(parts[1])
-          const totalSeconds = minutes * 60 + seconds
-          if (totalSeconds > 0) {
-            progress.value = (savedProgress.position / totalSeconds) * 100
+  try {
+    logInfo('【初始化】开始异步初始化')
+    
+    // 首先检测运行环境
+    isBrowser.value = await checkIsBrowser()
+    logInfo('【环境检测】最终结果 isBrowser:', isBrowser.value)
+    
+    // 加载保存的设置
+    logInfo('【初始化】开始加载保存的设置')
+    const savedSettings = await localStorageService.getSettings()
+    logInfo('【初始化】加载到的设置:', savedSettings)
+    volume.value = savedSettings.volume
+    playbackMode.value = savedSettings.playbackMode
+    currentPreset.value = savedSettings.equalizerPreset
+    equalizerBands.value = savedSettings.equalizerBands
+    theme.value = savedSettings.theme || 'dark'
+    language.value = savedSettings.language || 'zh-CN'
+    musicDirectory.value = savedSettings.musicDirectory || ''
+    crossfadeEnabled.value = savedSettings.crossfadeEnabled ?? false
+    crossfadeDuration.value = savedSettings.crossfadeDuration ?? 1
+    autoPlayNext.value = savedSettings.autoPlayNext ?? true
+    showLyrics.value = savedSettings.showLyrics ?? true
+    lyricsPosition.value = (savedSettings as any).lyricsPosition || 'bottom'
+    enableTranscode.value = savedSettings.enableTranscode ?? true
+    forceTranscode.value = savedSettings.forceTranscode ?? false
+    
+    // 初始化语言服务
+    logInfo('【初始化】开始初始化语言服务')
+    await i18nService.initialize(language.value)
+    logInfo('【初始化】语言服务初始化完成')
+
+    // 加载保存的歌曲
+    logInfo('【初始化】开始加载保存的歌曲')
+    const savedSongs = await localStorageService.getSongs()
+    logInfo('【初始化】加载到的歌曲数量:', savedSongs.length)
+    if (savedSongs.length > 0) {
+      songs.value = savedSongs as Song[]
+      logInfo('【初始化】歌曲列表已更新')
+    }
+    
+    // 加载歌单和收藏
+    logInfo('【初始化】开始加载歌单和收藏')
+    favorites.value = await localStorageService.getFavorites()
+    playlists.value = await localStorageService.getPlaylists()
+    logInfo('【初始化】收藏列表长度:', favorites.value.length)
+    logInfo('【初始化】歌单列表长度:', playlists.value.length)
+    
+    // 更新歌曲的收藏状态
+    songs.value.forEach(song => {
+      song.isFavorite = favorites.value.includes(song.id)
+    })
+    logInfo('【初始化】歌曲收藏状态已更新')
+    
+    // 加载保存的播放进度
+    logInfo('【初始化】开始加载保存的播放进度')
+    const savedProgress = await localStorageService.getPlaybackProgress()
+    logInfo('【初始化】加载到的播放进度:', savedProgress)
+    if (savedProgress) {
+      // 查找对应的歌曲
+      const savedSong = songs.value.find(song => song.id === savedProgress.songId)
+      logInfo('【初始化】找到的保存歌曲:', savedSong)
+      if (savedSong) {
+        currentSong.value = savedSong
+        currentPosition.value = savedProgress.position
+        isPlaying.value = savedProgress.isPlaying || false
+        // 只有当时长不是"未知"时才计算进度百分比
+        if (savedSong.duration && savedSong.duration !== '未知') {
+          const parts = savedSong.duration.split(':')
+          if (parts.length === 2) {
+            const minutes = parseInt(parts[0])
+            const seconds = parseInt(parts[1])
+            const totalSeconds = minutes * 60 + seconds
+            if (totalSeconds > 0) {
+              progress.value = (savedProgress.position / totalSeconds) * 100
+            } else {
+              progress.value = 0
+            }
           } else {
             progress.value = 0
           }
         } else {
           progress.value = 0
         }
-      } else {
-        progress.value = 0
+        logInfo('【初始化】播放进度已恢复')
       }
     }
-  }
 
-  // 自动播放上次的歌曲
-  if (currentSong.value && songs.value.length > 0) {
-    // 延迟一小段时间确保应用完全加载
-    setTimeout(async () => {
-      try {
-        await playSong(currentSong.value!, currentPosition.value)
-        isPlaying.value = true
-      } catch (error) {
-        logError('自动播放失败:', error)
-        // 如果自动播放失败,播放第一首歌曲
-        if (songs.value.length > 0) {
-          await playSong(songs.value[0])
+    // 监听播放完成事件
+    if (window.__TAURI__?.event) {
+      window.__TAURI__.event.listen('playback_finished', async () => {
+        logInfo('播放完成,播放下一首')
+        await handlePlaybackFinished()
+      })
+
+      // 监听系统托盘事件
+      window.__TAURI__.event.listen('play-pause', () => {
+        togglePlayback()
+      })
+
+      window.__TAURI__.event.listen('tray-next-song', () => {
+        playNext()
+      })
+
+      window.__TAURI__.event.listen('tray-previous-song', () => {
+        playPrevious()
+      })
+    }
+
+    logInfo('前端 初始化完成')
+    
+    // 标记加载完成
+    isLoading.value = false
+    logInfo('【初始化】加载完成，isLoading设为false')
+    
+    // 初始化悬浮按钮状态
+    nextTick(() => {
+      handleScroll()
+    })
+    
+    // 自动播放上次的歌曲或第一首歌曲
+    nextTick(() => {
+      setTimeout(async () => {
+        try {
+          if (currentSong.value && songs.value.length > 0) {
+            // 播放上次的歌曲
+            logInfo('【初始化】自动播放上次的歌曲:', currentSong.value.title)
+            await playSong(currentSong.value, currentPosition.value)
+            isPlaying.value = true
+          } else if (songs.value.length > 0) {
+            // 播放第一首歌曲
+            logInfo('【初始化】自动播放第一首歌曲:', songs.value[0].title)
+            await playSong(songs.value[0])
+            isPlaying.value = true
+          }
+        } catch (error) {
+          logError('【初始化】自动播放失败:', error)
         }
+      }, 500)
+    })
+    
+    // 检查是否是首次运行，如果是，则显示README.md文件
+    nextTick(() => {
+      try {
+        const firstRun = localStorage.getItem('tplayer-first-run');
+        if (firstRun === null && !isBrowser.value) {
+          // 首次运行，显示README.md文件
+          invoke('open_readme').catch(err => {
+            logError('无法打开README.md文件:', err);
+          });
+          
+          // 设置首次运行标志为false
+          localStorage.setItem('tplayer-first-run', 'false');
+        }
+      } catch (e) {
+        logError('检查首次运行状态失败:', e);
       }
-    }, 500)
-  } else if (songs.value.length > 0) {
-    // 如果没有保存的歌曲,播放第一首
-    setTimeout(async () => {
-      await playSong(songs.value[0])
-    }, 500)
+    })
+  } catch (error) {
+    logError('初始化失败:', error)
   }
-
-  // 加载保存的设置
-  const savedSettings = await localStorageService.getSettings()
-  volume.value = savedSettings.volume
-  playbackMode.value = savedSettings.playbackMode
-  currentPreset.value = savedSettings.equalizerPreset
-  equalizerBands.value = savedSettings.equalizerBands
-  theme.value = savedSettings.theme || 'dark'
-  language.value = savedSettings.language || 'zh-CN'
-  musicDirectory.value = savedSettings.musicDirectory || ''
-  crossfadeEnabled.value = savedSettings.crossfadeEnabled ?? false
-  crossfadeDuration.value = savedSettings.crossfadeDuration ?? 1
-  autoPlayNext.value = savedSettings.autoPlayNext ?? true
-  showLyrics.value = savedSettings.showLyrics ?? true
-  lyricsPosition.value = (savedSettings as any).lyricsPosition || 'bottom'
-  enableTranscode.value = savedSettings.enableTranscode ?? true
-  
-  // 初始化语言服务
-  await i18nService.initialize(language.value)
-  forceTranscode.value = savedSettings.forceTranscode ?? false
-
-  // 监听播放完成事件
-  if (window.__TAURI__?.event) {
-    window.__TAURI__.event.listen('playback_finished', async () => {
-      logInfo('播放完成,播放下一首')
-      await handlePlaybackFinished()
-    })
-
-    // 监听系统托盘事件
-    window.__TAURI__.event.listen('play-pause', () => {
-      togglePlayback()
-    })
-
-    window.__TAURI__.event.listen('tray-next-song', () => {
-      playNext()
-    })
-
-    window.__TAURI__.event.listen('tray-previous-song', () => {
-      playPrevious()
-    })
-  }
-
-  logInfo('前端 初始化完成')
-  
-  // 初始化悬浮按钮状态
-  nextTick(() => {
-    handleScroll()
-  })
-  
-  // 检查是否是首次运行，如果是，则显示README.md文件
-  nextTick(() => {
-    try {
-      const firstRun = localStorage.getItem('tplayer-first-run');
-      if (firstRun === null && isTauri()) {
-        // 首次运行，显示README.md文件
-        invoke('open_readme').catch(err => {
-          logError('无法打开README.md文件:', err);
-        });
-        
-        // 设置首次运行标志为false
-        localStorage.setItem('tplayer-first-run', 'false');
-      }
-    } catch (e) {
-      logError('检查首次运行状态失败:', e);
-    }
-  })
 })()
 
 // 进度更新定时器
@@ -4698,6 +5425,14 @@ let progressTimer: number | null = null
 // 监听播放状态变化，动态控制定时器
 watch(isPlaying, (playing, oldPlaying) => {
   logInfo('【前端】isPlaying.value变化: 从', oldPlaying, '变为', playing)
+  
+  // 如果正在使用FFplay播放，不启动普通的进度更新定时器
+  // FFplay有自己的进度更新定时器
+  if (isFFplayPlaying.value) {
+    logInfo('【前端】正在使用FFplay播放，跳过普通进度更新定时器')
+    return
+  }
+  
   if (playing) {
     logInfo('【前端】播放状态变为true，启动进度更新定时器')
     if (!progressTimer) {
@@ -4880,6 +5615,43 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 加载页面样式 */
+.loading-page {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #1a1a1a;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+}
+
+.loading-spinner {
+  width: 60px;
+  height: 60px;
+  border: 5px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: #5cb85c;
+  animation: spin 1s ease-in-out infinite;
+  margin-bottom: 20px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-page h2 {
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 500;
+}
+
 /* 全局样式 */
 * {
   margin: 0;
@@ -7986,62 +8758,156 @@ body, html {
   box-shadow: none;
 }
 
+/* 启动画面 */
+.splash-screen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+.splash-content {
+  text-align: center;
+  color: white;
+  padding: 40px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  max-width: 400px;
+  width: 90%;
+  animation: slideUp 0.8s ease-out;
+}
+
+.splash-logo {
+  width: 100px;
+  height: 100px;
+  margin-bottom: 20px;
+  animation: pulse 2s infinite ease-in-out;
+}
+
+.splash-title {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: 10px;
+  color: #ffffff;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.splash-slogan {
+  font-size: 1.2rem;
+  margin-bottom: 30px;
+  color: rgba(255, 255, 255, 0.8);
+  font-style: italic;
+}
+
+.splash-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid rgba(255, 255, 255, 0.3);
+  border-top: 4px solid #ffffff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.splash-loading span {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 1rem;
+}
+
+/* 动画效果 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .splash-content {
+    padding: 30px;
+  }
+  
+  .splash-title {
+    font-size: 2rem;
+  }
+  
+  .splash-slogan {
+    font-size: 1rem;
+  }
+  
+  .splash-logo {
+    width: 80px;
+    height: 80px;
+  }
+}
+
 /* 滚动条样式 - 隐藏滚动条但保留滚动功能 */
 .tplayer-container ::-webkit-scrollbar,
 .tplayer-container ::-webkit-scrollbar-horizontal,
 .tplayer-container ::-webkit-scrollbar-vertical {
-  width: 0px;
-  height: 0px;
+  width: 0;
+  height: 0;
   display: none;
 }
 
-/* Firefox */
 .tplayer-container {
   scrollbar-width: none;
-}
-
-/* IE 和 Edge */
-.tplayer-container {
   -ms-overflow-style: none;
 }
 
 /* 确保body和html不显示滚动条 */
 body, html {
   overflow: hidden !important;
-}
-
-/* 响应式设计 */
-@media (max-width: 768px) {
-  .sidebar {
-    width: 200px;
-  }
-  
-  .sidebar.collapsed {
-    width: 50px;
-  }
-  
-  .content-area {
-    padding: 10px;
-  }
-  
-  .player-controls {
-    padding: 10px;
-  }
-  
-  .player-left {
-    flex: 1;
-  }
-  
-  .player-center {
-    flex: 1;
-  }
-  
-  .player-right {
-    flex: 1;
-  }
-  
-  .volume-control {
-    width: 100px;
-  }
 }
 </style>
