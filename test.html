@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TPlayer Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background-color: #1a1a1a;
+      color: #ffffff;
+    }
+    h1 {
+      color: #4CAF50;
+    }
+    .test-section {
+      margin: 20px 0;
+      padding: 15px;
+      border: 1px solid #333;
+      border-radius: 5px;
+    }
+    .success {
+      border-color: #4CAF50;
+      background-color: rgba(76, 175, 80, 0.1);
+    }
+    .error {
+      border-color: #f44336;
+      background-color: rgba(244, 67, 54, 0.1);
+    }
+    button {
+      margin: 5px;
+      padding: 10px 20px;
+      background-color: #333;
+      color: #fff;
+      border: 1px solid #555;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #555;
+    }
+  </style>
+</head>
+<body>
+  <h1>TPlayer 测试页面</h1>
+  
+  <div class="test-section">
+    <h2>基本测试</h2>
+    <button onclick="testBasic()">测试基本功能</button>
+    <div id="basic-test-result"></div>
+  </div>
+  
+  <div class="test-section">
+    <h2>LocalStorage 测试</h2>
+    <button onclick="testLocalStorage()">测试 LocalStorage</button>
+    <div id="localstorage-test-result"></div>
+  </div>
+  
+  <script>
+    function testBasic() {
+      const resultDiv = document.getElementById('basic-test-result');
+      try {
+        resultDiv.innerHTML = '<div class="success">基本功能测试通过！</div>';
+        console.log('基本功能测试通过');
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">基本功能测试失败: ${error.message}</div>`;
+        console.error('基本功能测试失败:', error);
+      }
+    }
+    
+    function testLocalStorage() {
+      const resultDiv = document.getElementById('localstorage-test-result');
+      try {
+        // 测试 LocalStorage
+        localStorage.setItem('test-key', 'test-value');
+        const value = localStorage.getItem('test-key');
+        localStorage.removeItem('test-key');
+        
+        if (value === 'test-value') {
+          resultDiv.innerHTML = '<div class="success">LocalStorage 测试通过！</div>';
+          console.log('LocalStorage 测试通过');
+        } else {
+          resultDiv.innerHTML = '<div class="error">LocalStorage 测试失败: 无法正确存储和读取数据</div>';
+          console.error('LocalStorage 测试失败: 无法正确存储和读取数据');
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<div class="error">LocalStorage 测试失败: ${error.message}</div>`;
+        console.error('LocalStorage 测试失败:', error);
+      }
+    }
+    
+    // 页面加载时自动运行基本测试
+    window.onload = function() {
+      testBasic();
+    };
+  </script>
+</body>
+</html>

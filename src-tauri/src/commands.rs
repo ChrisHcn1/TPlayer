@@ -209,6 +209,70 @@ fn is_audio_file(entry: &DirEntry) -> bool {
     false
 }
 
+// 使用ffprobe获取音频文件时长
+fn get_duration_with_ffprobe(path: &Path) -> Option<f64> {
+    use std::process::{Command, Stdio};
+    
+    // 尝试获取ffprobe路径
+    let ffprobe_path = if let Some(path) = ffmpeg_transcoder::TranscodeCache::get_ffprobe_path() {
+        path
+    } else {
+        println!("[FFprobe] 未找到ffprobe，无法获取音频时长");
+        return None;
+    };
+    
+    let path_str = path.to_str()?;
+    println!("[FFprobe] 开始获取音频时长: {}", path_str);
+    
+    let mut cmd = Command::new(&ffprobe_path);
+    cmd.arg("-hide_banner")
+        .arg(path_str)
+        .arg("-show_streams")
+        .arg("-select_streams")
+        .arg("a")
+        .arg("-print_format")
+        .arg("json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    
+    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let result = cmd.output().ok()?;
+    
+    if !result.status.success() {
+        println!("[FFprobe] 执行失败，退出码: {:?}", result.status.code());
+        return None;
+    }
+    
+    let stdout_str = String::from_utf8_lossy(&result.stdout);
+    
+    if stdout_str.is_empty() {
+        println!("[FFprobe] 输出为空");
+        return None;
+    }
+    
+    let json: serde_json::Value = serde_json::from_str(&stdout_str).ok()?;
+    
+    if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+        if let Some(first_stream) = streams.first() {
+            if let Some(duration_str) = first_stream.get("duration").and_then(|d| d.as_str()) {
+                if let Ok(duration) = duration_str.parse::<f64>() {
+                    println!("[FFprobe] 成功获取时长: {} 秒", duration);
+                    return Some(duration);
+                }
+            }
+        }
+    }
+    
+    println!("[FFprobe] 无法从ffprobe输出中获取时长");
+    None
+}
+
 // 解析音频文件元数据
 fn parse_audio_file(path: &Path) -> Option<Song> {
     let path_str = path.to_str()?.to_string();
@@ -354,7 +418,7 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
     let is_special_format = if let Some(ext) = path.extension() {
         if let Some(ext_str) = ext.to_str() {
             let ext_lower = ext_str.to_lowercase();
-            matches!(ext_lower.as_str(), "dsf" | "dff" | "dsd" | "dts")
+            matches!(ext_lower.as_str(), "dsf" | "dff" | "dsd" | "dts" | "ape")
         } else {
             false
         }
@@ -362,12 +426,17 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         false
     };
 
-    // 如果duration为0或为特殊格式，给一个特殊标记
+    // 如果duration为0或为特殊格式，尝试使用ffprobe获取时长
     if duration <= 0.0 || is_special_format {
-        if is_special_format {
-            duration = -1.0; // 特殊标记：时长未知
+        if let Some(ffprobe_duration) = get_duration_with_ffprobe(path) {
+            println!("[FFprobe] 成功获取时长: {} 秒", ffprobe_duration);
+            duration = ffprobe_duration;
         } else {
-            duration = 180.0; // 默认3分钟
+            if is_special_format {
+                duration = -1.0; // 特殊标记：时长未知
+            } else {
+                duration = 180.0; // 默认3分钟
+            }
         }
     }
 
@@ -622,15 +691,15 @@ pub async fn play_song(
             }
         }
         
-        // 使用FFplay播放
+        // 使用 FFplay 播放
         let start_position = position.unwrap_or(start_time_val.unwrap_or(0.0));
-        // 传递None作为duration参数，让后端自己获取
+        // 传递 None 作为 duration 参数，让后端自己获取
         match ffmpeg_transcoder::play_with_ffplay(path.clone(), Some(start_position), None).await {
             Ok(result) => {
-                println!("[播放] FFplay播放已启动");
+                println!("[播放] FFplay 播放已启动");
                 
                 // 从结果中获取音频时长
-                let duration = result.get("duration").and_then(|d| d.as_f64()).unwrap_or(180.0);
+                let duration = result.get("duration").and_then(|d: &serde_json::Value| d.as_f64()).unwrap_or(180.0);
                 println!("[播放] 音频时长: {}秒", duration);
                 
                 // 更新播放状态

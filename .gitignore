@@ -33,6 +33,10 @@ dist-ssr
 # Tauri
 /src-tauri/target
 /src-tauri/gen
+/src-tauri/bin/*.dll
+/src-tauri/bin/ffmpeg.exe
+/src-tauri/bin/ffplay.exe
+/src-tauri/bin/ffprobe.exe
 
 # Player state and cache files
 /src-tauri/player_state.json

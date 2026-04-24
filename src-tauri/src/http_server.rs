@@ -35,10 +35,10 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    // 创建并启动HTTP服务器
+    // 创建并启动 HTTP 服务器
     pub fn start() -> Result<Self, String> {
-        // 尝试在8080-8100端口范围内找到一个可用端口
-        let port = (8080..=8100)
+        // 尝试在 8000-9000 端口范围内找到一个可用端口
+        let port = (8000..=9000)
             .find(|&p| TcpListener::bind("127.0.0.1:".to_string() + &p.to_string()).is_ok())
             .ok_or_else(|| "无法找到可用端口".to_string())?;
 
@@ -83,6 +83,12 @@ impl HttpServer {
     fn handle_connection(mut stream: TcpStream) {
         let mut buffer = [0; 1024];
         let _ = stream.read(&mut buffer);
+        
+        // 检查请求是否为空
+        if buffer.iter().all(|&b| b == 0) {
+            log_error!("收到空请求");
+            return;
+        }
 
         let request = String::from_utf8_lossy(&buffer[..]);
         log_info!("收到请求: {}", request.lines().next().unwrap_or(""));
@@ -97,16 +103,22 @@ impl HttpServer {
         // 处理文件请求
         if path.starts_with("/file/") {
             // 提取文件路径（移除/file/前缀）
-            let file_path = &path[6..];
+            let encoded_path = &path[6..];
             // 解码URL编码的路径
-            let file_path = urlencoding::decode(file_path)
-                .map_err(|e| format!("解码路径失败: {}", e))
-                .unwrap();
+            let decoded = match urlencoding::decode(encoded_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    log_error!("解码路径失败: {}", e);
+                    Self::send_error(&mut stream, 400, "Bad Request", "Invalid URL encoding");
+                    return;
+                }
+            };
+            let file_path = decoded.as_ref();
 
             log_info!("请求文件: {}", file_path);
 
             // 读取文件
-            match File::open(&*file_path) {
+            match File::open(file_path) {
                 Ok(mut file) => {
                     // 获取文件大小
                     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -243,14 +255,9 @@ impl HttpServer {
                     }
                 }
                 Err(e) => {
-                    log_error!("打开文件失败: {}", e);
-                    let response = "HTTP/1.1 404 Not Found\r\n"
-                        .to_string() + "Content-Type: text/plain\r\n"
-                        + "Content-Length: 9\r\n"
-                        + "Connection: close\r\n"
-                        + "\r\n"
-                        + "Not Found";
-                    let _ = stream.write(response.as_bytes());
+                    log_error!("打开文件失败: {} - 路径: {}", e, file_path);
+                    let body = format!("File not found: {}", e);
+                    Self::send_error(&mut stream, 404, "Not Found", &body);
                 }
             }
         } else {
@@ -276,6 +283,23 @@ impl HttpServer {
         if self.listener.is_some() {
             log_info!("HTTP服务器已停止");
         }
+    }
+    
+    // 发送HTTP错误响应
+    fn send_error(stream: &mut TcpStream, code: u16, status: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            code,
+            status,
+            body.len(),
+            body
+        );
+        let _ = stream.write(response.as_bytes());
     }
 }
 

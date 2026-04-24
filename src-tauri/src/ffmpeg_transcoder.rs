@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::collections::HashMap;
 use std::time::{SystemTime, Duration};
 use std::fs;
@@ -944,6 +944,10 @@ static FFPLAY_STATUS: Mutex<FFplayStatus> = Mutex::new(FFplayStatus {
     position: 0.0,
     volume: 1.0,
 });
+// FFplay 进程计数器
+static FFPLAY_PROCESS_COUNT: AtomicU32 = AtomicU32::new(0);
+// FFplay 进程数量限制
+const MAX_FFPLAY_PROCESSES: u32 = 3;
 
 // 保存暂停时的播放位置
 static PAUSED_POSITION: Mutex<Option<f64>> = Mutex::new(None);
@@ -969,7 +973,9 @@ pub fn cleanup_ffplay() {
                 // 进程仍在运行，强制终止
                 println!("[FFplay] 强制终止FFplay进程");
                 let _ = child.kill();
-                let _ = child.wait();
+                // 减少进程计数
+            FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
+            println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
             }
             Err(e) => {
                 println!("[FFplay] 检查进程状态失败: {:?}", e);
@@ -1121,7 +1127,9 @@ pub fn stop_ffplay() -> Result<String, String> {
             Ok(_) => {
                 println!("[FFplay] 已停止播放");
                 // 不等待进程结束，避免阻塞
-                // let _ = child.wait();
+                // // 减少进程计数
+            FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
+            println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
             }
             Err(e) => {
                 println!("[FFplay] 停止播放失败: {}", e);
