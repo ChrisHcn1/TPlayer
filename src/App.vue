@@ -2271,15 +2271,30 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         const songForLyric = songs.value.find(s => s.id === song.id)
         logInfo('[歌词调试] 从 songs.value 找到的歌曲:', songForLyric ? songForLyric.title : '未找到')
         logInfo('[歌词调试] songForLyric.lyric 长度:', songForLyric && songForLyric.lyric ? songForLyric.lyric.length : 0)
-        if (songForLyric && songForLyric.lyric) {
-          logInfo('解析歌词，长度:', songForLyric.lyric.length)
-          logInfo('[歌词调试] 歌词预览:', songForLyric.lyric.substring(0, 100))
-          lyrics.value = parseLyrics(songForLyric.lyric)
+        
+        // 获取歌词数据（优先使用歌曲对象中的，如果没有则动态读取.lrc文件）
+        let lyricContent = songForLyric?.lyric || song.lyric || ''
+        if (!lyricContent && songForLyric) {
+          logInfo('[歌词调试] 歌曲对象中没有歌词，尝试动态读取.lrc文件')
+          try {
+            const { readTextFile } = await import('@tauri-apps/plugin-fs')
+            const lyricPath = songForLyric.path.replace(/\.[^/.]+$/, '.lrc')
+            logInfo('[歌词调试] 尝试读取歌词文件:', lyricPath)
+            lyricContent = await readTextFile(lyricPath)
+            logInfo('[歌词调试] 成功读取歌词文件，长度:', lyricContent.length)
+          } catch (e) {
+            logInfo('[歌词调试] 读取歌词文件失败:', e)
+          }
+        }
+        
+        if (lyricContent) {
+          logInfo('解析歌词，长度:', lyricContent.length)
+          logInfo('[歌词调试] 歌词预览:', lyricContent.substring(0, 100))
+          lyrics.value = parseLyrics(lyricContent)
           logInfo('歌词解析完成，行数:', lyrics.value.length)
           coverLyricLineRefs.value = []
         } else {
-          logInfo('歌曲无歌词，songForLyric 存在:', !!songForLyric)
-          logInfo('[歌词调试] songs.value 中所有歌曲的 ID:', songs.value.map(s => s.id).join(', '))
+          logInfo('歌曲无歌词')
           lyrics.value = []
           coverLyricLineRefs.value = []
         }
@@ -2648,9 +2663,25 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       
       // 解析歌词（使用最新的歌曲数据）
       const songForLyric = songs.value.find(s => s.id === song.id) || song
-      if (songForLyric.lyric) {
-        logInfo('解析歌词，长度:', songForLyric.lyric.length)
-        lyrics.value = parseLyrics(songForLyric.lyric)
+      
+      // 获取歌词数据（优先使用歌曲对象中的，如果没有则动态读取.lrc文件）
+      let lyricContent = songForLyric.lyric || song.lyric || ''
+      if (!lyricContent && songForLyric) {
+        logInfo('[歌词调试] 歌曲对象中没有歌词，尝试动态读取.lrc文件')
+        try {
+          const { readTextFile } = await import('@tauri-apps/plugin-fs')
+          const lyricPath = songForLyric.path.replace(/\.[^/.]+$/, '.lrc')
+          logInfo('[歌词调试] 尝试读取歌词文件:', lyricPath)
+          lyricContent = await readTextFile(lyricPath)
+          logInfo('[歌词调试] 成功读取歌词文件，长度:', lyricContent.length)
+        } catch (e) {
+          logInfo('[歌词调试] 读取歌词文件失败:', e)
+        }
+      }
+      
+      if (lyricContent) {
+        logInfo('解析歌词，长度:', lyricContent.length)
+        lyrics.value = parseLyrics(lyricContent)
         logInfo('歌词解析完成，行数:', lyrics.value.length)
         // 清空歌词行 refs，等待 DOM 渲染后重新填充
         coverLyricLineRefs.value = []
