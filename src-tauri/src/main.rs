@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 mod commands;
+mod commands_cache;
 mod commands_cue;
 mod cue_parser;
 mod equalizer;
@@ -94,7 +95,11 @@ fn main() {
             ffmpeg_transcoder::seek_ffplay,
             ffmpeg_transcoder::set_ffplay_volume,
             ffmpeg_transcoder::get_ffplay_status,
-            http_server::get_file_http_url
+            http_server::get_file_http_url,
+            commands_cache::save_to_cache,
+            commands_cache::get_cached_file,
+            commands_cache::get_cache_dir,
+            commands_cache::clear_cache
         ])
         // 注册插件
         .plugin(tauri_plugin_dialog::init())
