@@ -14,7 +14,8 @@
   "type": "commonjs",
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1",
-    "@types/lodash-es": "^4.17.12"
+    "@types/lodash-es": "^4.17.12",
+    "json-autotranslate": "^1.16.2"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

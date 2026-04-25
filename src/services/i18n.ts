@@ -11,7 +11,17 @@ export interface Locale {
 // 支持的语言列表
 export const supportedLocales: Locale[] = [
   { code: 'zh-CN', name: '简体中文' },
-  { code: 'en-US', name: 'English' }
+  { code: 'zh-TW', name: '繁體中文' },
+  { code: 'en-US', name: 'English' },
+  { code: 'hi-IN', name: 'हिन्दी' },
+  { code: 'es-ES', name: 'Español' },
+  { code: 'ar-SA', name: 'العربية' },
+  { code: 'fr-FR', name: 'Français' },
+  { code: 'bn-BD', name: 'বাংলা' },
+  { code: 'ru-RU', name: 'Русский' },
+  { code: 'pt-PT', name: 'Português' },
+  { code: 'ms-MY', name: 'Bahasa Melayu' },
+  { code: 'de-DE', name: 'Deutsch' }
 ]
 
 // 翻译函数类型
