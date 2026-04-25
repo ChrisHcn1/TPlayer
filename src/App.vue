@@ -2277,7 +2277,9 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         let lyricSource = ''
         const songForLyric = songs.value.find(s => s.id === song.id) || song
         logInfo('[歌词加载] songForLyric 找到:', songForLyric ? songForLyric.title : '未找到')
-        logInfo('[歌词加载] songForLyric.path:', songForLyric ? songForLyric.path : '无路径')
+        logInfo('[歌词加载] songForLyric.id:', songForLyric?.id)
+        logInfo('[歌词加载] songForLyric.path:', songForLyric?.path)
+        logInfo('[歌词加载] song.lyric:', song?.lyric ? '有值(' + song.lyric.length + ')' : '为空')
         
         // 优先级 1: 在线匹配缓存歌词
         try {
