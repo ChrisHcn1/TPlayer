@@ -1923,10 +1923,12 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       }
       
       try {
+        logInfo('【FFplay】开始调用 play_with_ffplay')
         // 使用FFplay播放
         const start_position = positionForCue
         let result
         try {
+          logInfo('【FFplay】准备调用 invoke，path:', playPath, 'start_time:', start_position)
           // 解析歌曲时长（如果有的话）
           let durationSeconds = 300; // 默认值
           if (currentSong.value && currentSong.value.duration) {
@@ -1939,12 +1941,12 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }
           }
           
-          result = await invoke('play_with_ffplay', { 
-            path: playPath, 
+          result = await invoke('play_with_ffplay', {
+            path: playPath,
             start_time: start_position,
             duration: durationSeconds
           })
-          logInfo('FFplay播放已启动:', result)
+          logInfo('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
           logInfo('result类型:', typeof result)
           logInfo('result.duration:', result.duration)
         } catch (invokeError) {
@@ -2032,9 +2034,13 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           console.log('【FFplay】已清除旧的FFplay状态监控定时器')
           logInfo('已清除旧的FFplay状态监控定时器')
         }
-        // 初始化全局变量
+        
+        // 重置进度变量，避免累计上一首歌曲的进度
+        logInfo('【FFplay】重置进度变量，start_position:', start_position)
+        currentPosition.value = start_position
+        progress.value = 0
+        frontendPosition = start_position
         lastBackendUpdateTime = Date.now()
-        frontendPosition = currentPosition.value
         
         // 确保isFFplayPlaying.value为true
         isFFplayPlaying.value = true
@@ -2269,6 +2275,9 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         logInfo('[歌词加载] 开始加载歌词，song.id:', song.id)
         let lyricContent = ''
         let lyricSource = ''
+        const songForLyric = songs.value.find(s => s.id === song.id) || song
+        logInfo('[歌词加载] songForLyric 找到:', songForLyric ? songForLyric.title : '未找到')
+        logInfo('[歌词加载] songForLyric.path:', songForLyric ? songForLyric.path : '无路径')
         
         // 优先级 1: 在线匹配缓存歌词
         try {
@@ -2285,7 +2294,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }
         
         // 优先级 2: 同名 .lrc 文件（必须非空）
-        if (!lyricContent && songForLyric) {
+        if (!lyricContent && songForLyric && songForLyric.path) {
           try {
             const { readTextFile } = await import('@tauri-apps/plugin-fs')
             const lyricPath = songForLyric.path.replace(/\.[^/.]+$/, '.lrc')
@@ -2301,6 +2310,8 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           } catch (e) {
             logInfo('[歌词加载] 优先级 2: 读取.lrc文件失败:', e)
           }
+        } else if (!lyricContent) {
+          logInfo('[歌词加载] 优先级 2: 跳过，songForLyric 或 path 不存在')
         }
         
         // 优先级 3: 音频文件内嵌歌词（来自后端扫描）
