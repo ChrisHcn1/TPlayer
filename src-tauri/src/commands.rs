@@ -501,7 +501,7 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 if let Some(tag) = tagged_file.primary_tag() {
                     println!("【后端歌词扫描】primary_tag 存在");
                     // 使用 ItemKey::Lyrics 获取歌词
-                    let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                    let lyrics: Vec<&str> = tag.get_strings(&ItemKey::Lyrics).collect();
                     println!("【后端歌词扫描】get_strings 返回的歌词数量：{}", lyrics.len());
                     for lyric_text in lyrics {
                         if !lyric_text.is_empty() {
@@ -517,7 +517,7 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 if lyric.is_empty() {
                     println!("【后端歌词扫描】primary_tag 没有歌词，尝试所有标签");
                     for tag in tagged_file.tags() {
-                        let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                        let lyrics: Vec<&str> = tag.get_strings(&ItemKey::Lyrics).collect();
                         println!("【后端歌词扫描】标签中 get_strings 返回的歌词数量：{}", lyrics.len());
                         for lyric_text in lyrics {
                             if !lyric_text.is_empty() {
