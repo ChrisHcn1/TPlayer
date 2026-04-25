@@ -1142,8 +1142,8 @@ pub fn stop_ffplay() -> Result<String, String> {
     {
         let mut status = FFPLAY_STATUS.lock().unwrap();
         status.is_playing = false;
-        // 不重置position，避免播放进度回到0
-        // status.position = 0.0;
+        // 重置position，避免下一首歌曲继承上一首的进度
+        status.position = 0.0;
     }
     
     Ok("FFplay已停止".to_string())
