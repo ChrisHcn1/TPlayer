@@ -2265,36 +2265,65 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           }
         }, 300) // 每 300 毫秒更新一次，符合用户要求
         
-        // 解析歌词（使用最新的歌曲数据）
-        logInfo('[歌词调试] 开始解析歌词，song.id:', song.id)
-        logInfo('[歌词调试] 传入的 song.lyric 长度:', song.lyric ? song.lyric.length : 0)
-        const songForLyric = songs.value.find(s => s.id === song.id)
-        logInfo('[歌词调试] 从 songs.value 找到的歌曲:', songForLyric ? songForLyric.title : '未找到')
-        logInfo('[歌词调试] songForLyric.lyric 长度:', songForLyric && songForLyric.lyric ? songForLyric.lyric.length : 0)
+        // 歌词加载优先级策略
+        logInfo('[歌词加载] 开始加载歌词，song.id:', song.id)
+        let lyricContent = ''
+        let lyricSource = ''
         
-        // 获取歌词数据（优先使用歌曲对象中的，如果没有则动态读取.lrc文件）
-        let lyricContent = songForLyric?.lyric || song.lyric || ''
+        // 优先级 1: 在线匹配缓存歌词
+        try {
+          const cachedLyric = await localStorageService.getCachedLyric(song.id)
+          if (cachedLyric && cachedLyric.trim()) {
+            lyricContent = cachedLyric
+            lyricSource = '在线匹配缓存'
+            logInfo('[歌词加载] 优先级 1: 使用在线匹配缓存歌词，长度:', lyricContent.length)
+          } else {
+            logInfo('[歌词加载] 优先级 1: 无在线匹配缓存歌词')
+          }
+        } catch (e) {
+          logInfo('[歌词加载] 优先级 1: 读取缓存歌词失败:', e)
+        }
+        
+        // 优先级 2: 同名 .lrc 文件（必须非空）
         if (!lyricContent && songForLyric) {
-          logInfo('[歌词调试] 歌曲对象中没有歌词，尝试动态读取.lrc文件')
           try {
             const { readTextFile } = await import('@tauri-apps/plugin-fs')
             const lyricPath = songForLyric.path.replace(/\.[^/.]+$/, '.lrc')
-            logInfo('[歌词调试] 尝试读取歌词文件:', lyricPath)
-            lyricContent = await readTextFile(lyricPath)
-            logInfo('[歌词调试] 成功读取歌词文件，长度:', lyricContent.length)
+            logInfo('[歌词加载] 优先级 2: 尝试读取.lrc文件:', lyricPath)
+            const content = await readTextFile(lyricPath)
+            if (content && content.trim()) {
+              lyricContent = content
+              lyricSource = '同名.lrc文件'
+              logInfo('[歌词加载] 优先级 2: 成功读取.lrc文件，长度:', lyricContent.length)
+            } else {
+              logInfo('[歌词加载] 优先级 2: .lrc文件存在但内容为空，跳过')
+            }
           } catch (e) {
-            logInfo('[歌词调试] 读取歌词文件失败:', e)
+            logInfo('[歌词加载] 优先级 2: 读取.lrc文件失败:', e)
           }
         }
         
+        // 优先级 3: 音频文件内嵌歌词（来自后端扫描）
+        if (!lyricContent) {
+          const embeddedLyric = songForLyric?.lyric || song.lyric || ''
+          if (embeddedLyric && embeddedLyric.trim()) {
+            lyricContent = embeddedLyric
+            lyricSource = '内嵌歌词'
+            logInfo('[歌词加载] 优先级 3: 使用内嵌歌词，长度:', lyricContent.length)
+          } else {
+            logInfo('[歌词加载] 优先级 3: 无内嵌歌词')
+          }
+        }
+        
+        // 解析歌词
         if (lyricContent) {
-          logInfo('解析歌词，长度:', lyricContent.length)
-          logInfo('[歌词调试] 歌词预览:', lyricContent.substring(0, 100))
+          logInfo('[歌词加载] 最终使用来源:', lyricSource, '长度:', lyricContent.length)
+          logInfo('[歌词加载] 歌词预览:', lyricContent.substring(0, 100))
           lyrics.value = parseLyrics(lyricContent)
           logInfo('歌词解析完成，行数:', lyrics.value.length)
           coverLyricLineRefs.value = []
         } else {
-          logInfo('歌曲无歌词')
+          logInfo('[歌词加载] 最终结果: 无歌词')
           lyrics.value = []
           coverLyricLineRefs.value = []
         }
@@ -2661,32 +2690,67 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         currentSong.value = song
       }
       
-      // 解析歌词（使用最新的歌曲数据）
+      // 歌词加载优先级策略
+      logInfo('[歌词加载] 开始加载歌词，song.id:', song.id)
+      let lyricContent = ''
+      let lyricSource = ''
       const songForLyric = songs.value.find(s => s.id === song.id) || song
       
-      // 获取歌词数据（优先使用歌曲对象中的，如果没有则动态读取.lrc文件）
-      let lyricContent = songForLyric.lyric || song.lyric || ''
+      // 优先级 1: 在线匹配缓存歌词
+      try {
+        const cachedLyric = await localStorageService.getCachedLyric(song.id)
+        if (cachedLyric && cachedLyric.trim()) {
+          lyricContent = cachedLyric
+          lyricSource = '在线匹配缓存'
+          logInfo('[歌词加载] 优先级 1: 使用在线匹配缓存歌词，长度:', lyricContent.length)
+        } else {
+          logInfo('[歌词加载] 优先级 1: 无在线匹配缓存歌词')
+        }
+      } catch (e) {
+        logInfo('[歌词加载] 优先级 1: 读取缓存歌词失败:', e)
+      }
+      
+      // 优先级 2: 同名 .lrc 文件（必须非空）
       if (!lyricContent && songForLyric) {
-        logInfo('[歌词调试] 歌曲对象中没有歌词，尝试动态读取.lrc文件')
         try {
           const { readTextFile } = await import('@tauri-apps/plugin-fs')
           const lyricPath = songForLyric.path.replace(/\.[^/.]+$/, '.lrc')
-          logInfo('[歌词调试] 尝试读取歌词文件:', lyricPath)
-          lyricContent = await readTextFile(lyricPath)
-          logInfo('[歌词调试] 成功读取歌词文件，长度:', lyricContent.length)
+          logInfo('[歌词加载] 优先级 2: 尝试读取.lrc文件:', lyricPath)
+          const content = await readTextFile(lyricPath)
+          if (content && content.trim()) {
+            lyricContent = content
+            lyricSource = '同名.lrc文件'
+            logInfo('[歌词加载] 优先级 2: 成功读取.lrc文件，长度:', lyricContent.length)
+          } else {
+            logInfo('[歌词加载] 优先级 2: .lrc文件存在但内容为空，跳过')
+          }
         } catch (e) {
-          logInfo('[歌词调试] 读取歌词文件失败:', e)
+          logInfo('[歌词加载] 优先级 2: 读取.lrc文件失败:', e)
         }
       }
       
+      // 优先级 3: 音频文件内嵌歌词（来自后端扫描）
+      if (!lyricContent) {
+        const embeddedLyric = songForLyric.lyric || song.lyric || ''
+        if (embeddedLyric && embeddedLyric.trim()) {
+          lyricContent = embeddedLyric
+          lyricSource = '内嵌歌词'
+          logInfo('[歌词加载] 优先级 3: 使用内嵌歌词，长度:', lyricContent.length)
+        } else {
+          logInfo('[歌词加载] 优先级 3: 无内嵌歌词')
+        }
+      }
+      
+      // 解析歌词
       if (lyricContent) {
-        logInfo('解析歌词，长度:', lyricContent.length)
+        logInfo('[歌词加载] 最终使用来源:', lyricSource, '长度:', lyricContent.length)
+        logInfo('[歌词加载] 歌词预览:', lyricContent.substring(0, 100))
         lyrics.value = parseLyrics(lyricContent)
         logInfo('歌词解析完成，行数:', lyrics.value.length)
         // 清空歌词行 refs，等待 DOM 渲染后重新填充
         coverLyricLineRefs.value = []
       } else {
-        logInfo('歌曲无歌词')
+        logInfo('[歌词加载] 最终结果: 无歌词')
         lyrics.value = []
         coverLyricLineRefs.value = []
       }

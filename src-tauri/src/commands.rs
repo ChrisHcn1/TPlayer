@@ -462,52 +462,57 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         }
     }
 
-    // 尝试查找并解析歌词文件
+    // 歌词加载优先级策略
     let mut lyric = String::new();
-    println!("【后端歌词扫描】开始扫描歌词文件，歌曲路径: {:?}", path);
+    println!("【后端歌词扫描】开始扫描歌词，歌曲路径: {:?}", path);
+    
+    // 优先级 1: 读取同名 .lrc 文件（必须非空）
     if let Some(parent) = path.parent() {
-        // 尝试同名的 .lrc 文件
         if let Some(file_stem) = path.file_stem() {
             if let Some(stem_str) = file_stem.to_str() {
                 let lrc_path = parent.join(format!("{}.lrc", stem_str));
-                println!("【后端歌词扫描】尝试读取歌词文件: {:?}", lrc_path);
+                println!("【后端歌词扫描】优先级 1: 检查同名.lrc文件: {:?}", lrc_path);
                 if lrc_path.exists() {
-                    println!("【后端歌词扫描】歌词文件存在: {:?}", lrc_path);
                     match std::fs::read_to_string(&lrc_path) {
                         Ok(content) => {
-                            lyric = content;
-                            println!("【后端歌词扫描】成功读取歌词文件，长度: {}", lyric.len());
+                            // 检查文件内容是否非空（至少包含一个非空白字符）
+                            let trimmed = content.trim();
+                            if !trimmed.is_empty() {
+                                lyric = content;
+                                println!("【后端歌词扫描】优先级 1: 成功读取.lrc文件，长度: {}", lyric.len());
+                            } else {
+                                println!("【后端歌词扫描】优先级 1: .lrc文件存在但内容为空，跳过");
+                            }
                         }
                         Err(e) => {
-                            println!("【后端歌词扫描】读取歌词文件失败: {}", e);
+                            println!("【后端歌词扫描】优先级 1: 读取.lrc文件失败: {}", e);
                         }
                     }
                 } else {
-                    println!("【后端歌词扫描】歌词文件不存在: {:?}", lrc_path);
+                    println!("【后端歌词扫描】优先级 1: .lrc文件不存在");
                 }
             }
         }
     } else {
-        println!("【后端歌词扫描】无法获取父目录");
+        println!("【后端歌词扫描】优先级 1: 无法获取父目录");
     }
 
-    // 如果没有找到外部歌词文件，尝试从音频文件读取内嵌歌词
+    // 优先级 2: 读取音频文件内嵌歌词
     if lyric.is_empty() {
-        println!("【后端歌词扫描】未找到外部歌词文件，尝试读取内嵌歌词");
+        println!("【后端歌词扫描】优先级 2: 尝试读取内嵌歌词");
         match lofty::read_from_path(&path) {
             Ok(tagged_file) => {
-                println!("【后端歌词扫描】成功读取音频文件元数据");
+                println!("【后端歌词扫描】优先级 2: 成功读取音频文件元数据");
                 // 尝试从 primary_tag 读取歌词
                 if let Some(tag) = tagged_file.primary_tag() {
-                    println!("【后端歌词扫描】primary_tag 存在");
-                    // 使用 ItemKey::Lyrics 获取歌词
+                    println!("【后端歌词扫描】优先级 2: primary_tag 存在");
                     let lyrics: Vec<&str> = tag.get_strings(&ItemKey::Lyrics).collect();
-                    println!("【后端歌词扫描】get_strings 返回的歌词数量：{}", lyrics.len());
+                    println!("【后端歌词扫描】优先级 2: get_strings 返回的歌词数量：{}", lyrics.len());
                     for lyric_text in lyrics {
-                        if !lyric_text.is_empty() {
+                        if !lyric_text.trim().is_empty() {
                             lyric = lyric_text.to_string();
-                            println!("【后端歌词扫描】成功读取内嵌歌词 (Lyrics)，长度：{}", lyric.len());
-                            println!("【后端歌词扫描】歌词预览：{}", lyric.chars().take(100).collect::<String>());
+                            println!("【后端歌词扫描】优先级 2: 成功读取内嵌歌词 (Lyrics)，长度：{}", lyric.len());
+                            println!("【后端歌词扫描】优先级 2: 歌词预览：{}", lyric.chars().take(100).collect::<String>());
                             break;
                         }
                     }
@@ -515,14 +520,14 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 
                 // 如果 primary_tag 没有歌词，尝试所有标签
                 if lyric.is_empty() {
-                    println!("【后端歌词扫描】primary_tag 没有歌词，尝试所有标签");
+                    println!("【后端歌词扫描】优先级 2: primary_tag 没有歌词，尝试所有标签");
                     for tag in tagged_file.tags() {
                         let lyrics: Vec<&str> = tag.get_strings(&ItemKey::Lyrics).collect();
-                        println!("【后端歌词扫描】标签中 get_strings 返回的歌词数量：{}", lyrics.len());
+                        println!("【后端歌词扫描】优先级 2: 标签中 get_strings 返回的歌词数量：{}", lyrics.len());
                         for lyric_text in lyrics {
-                            if !lyric_text.is_empty() {
+                            if !lyric_text.trim().is_empty() {
                                 lyric = lyric_text.to_string();
-                                println!("【后端歌词扫描】从标签读取内嵌歌词，长度：{}", lyric.len());
+                                println!("【后端歌词扫描】优先级 2: 从标签读取内嵌歌词，长度：{}", lyric.len());
                                 break;
                             }
                         }
@@ -533,7 +538,7 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 }
             }
             Err(e) => {
-                println!("【后端歌词扫描】读取音频文件元数据失败：{}", e);
+                println!("【后端歌词扫描】优先级 2: 读取音频文件元数据失败：{}", e);
             }
         }
     }

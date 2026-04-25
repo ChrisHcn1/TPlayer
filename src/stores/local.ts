@@ -70,7 +70,8 @@ const STORAGE_KEYS = {
   PLAYLISTS: 'playlists',
   FAVORITES: 'favorites',
   PLAYBACK_PROGRESS: 'playback_progress',
-  SETTINGS: 'settings'
+  SETTINGS: 'settings',
+  LYRIC_CACHE: 'lyric_cache'  // 在线匹配歌词缓存
 }
 
 // 默认设置
@@ -211,6 +212,28 @@ class LocalStorageService {
       ...updates
     }
     await this.saveSettings(newSettings)
+  }
+
+  // 歌词缓存相关
+  async getCachedLyric(songId: string): Promise<string> {
+    const cache = await localforage.getItem<Record<string, string>>(STORAGE_KEYS.LYRIC_CACHE)
+    return cache?.[songId] || ''
+  }
+
+  async saveCachedLyric(songId: string, lyric: string): Promise<void> {
+    const cache = await localforage.getItem<Record<string, string>>(STORAGE_KEYS.LYRIC_CACHE) || {}
+    cache[songId] = lyric
+    await localforage.setItem(STORAGE_KEYS.LYRIC_CACHE, cache)
+  }
+
+  async clearCachedLyric(songId: string): Promise<void> {
+    const cache = await localforage.getItem<Record<string, string>>(STORAGE_KEYS.LYRIC_CACHE) || {}
+    delete cache[songId]
+    await localforage.setItem(STORAGE_KEYS.LYRIC_CACHE, cache)
+  }
+
+  async clearAllCachedLyrics(): Promise<void> {
+    await localforage.removeItem(STORAGE_KEYS.LYRIC_CACHE)
   }
 
   // 清空所有数据
