@@ -80,8 +80,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useI18n } from 'vue-i18n'
-import { onlineMusicService, type OnlineSong, type LyricResult } from '@/services/onlineMusicService'
+import { t } from '../services/i18n'
+import { onlineMusicService, type OnlineSong, type LyricResult } from '../services/onlineMusicService'
 
 interface Props {
   currentTitle?: string
@@ -97,8 +97,6 @@ const emit = defineEmits<{
   close: []
   apply: [data: { title?: string; artist?: string; album?: string; lyric?: string; coverUrl?: string }]
 }>()
-
-const { t } = useI18n()
 
 const searchKeyword = ref('')
 const searching = ref(false)
