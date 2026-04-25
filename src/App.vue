@@ -568,8 +568,8 @@
           <!-- 在线匹配 -->
           <div class="match-section">
             <span>{{ t('modal.dontWantToFill') }}</span>
-            <button class="match-btn" @click="onlineMatch">
-              {{ t('modal.autoMatchTags') }}
+            <button class="match-btn" @click="openOnlineMatch">
+              {{ t('modal.onlineMatchTags') }}
             </button>
           </div>
           
@@ -695,7 +695,7 @@
               <div class="lyric-actions">
                 <button class="action-btn" @click="readLocalMetadata">{{ t('modal.readLocalMetadata') }}</button>
                 <button class="action-btn" @click="autoMatchTags">{{ t('modal.matchFromFilename') }}</button>
-                <button class="action-btn" @click="onlineMatch">{{ t('modal.onlineMatchTags') }}</button>
+                <button class="action-btn" @click="openOnlineMatch">{{ t('modal.onlineMatchTags') }}</button>
                 <button class="action-btn" @click="fetchCover">{{ t('modal.getCover') }}</button>
               </div>
             </div>
@@ -823,6 +823,15 @@
         </div>
       </div>
     </div>
+    
+    <!-- 在线匹配对话框 -->
+    <OnlineMatchModal
+      v-if="showOnlineMatchModal"
+      :current-title="songToEdit?.title || ''"
+      :current-artist="songToEdit?.artist || ''"
+      @close="showOnlineMatchModal = false"
+      @apply="handleOnlineMatchApply"
+    />
   </div>
 </template>
 
@@ -837,6 +846,7 @@ import { musicDataService } from './services/musicDataService'
 import { parseSmartLrc } from './services/lyricParser'
 import * as mm from 'music-metadata'
 import Settings from './components/Settings.vue'
+import OnlineMatchModal from './components/OnlineMatchModal.vue'
 import { i18nService, t } from './services/i18n'
 import {
   cueAlbums,
@@ -920,6 +930,7 @@ const selectedSong = ref<Song | null>(null)
 const showEditTagsModal = ref(false)
 const showSettingsModal = ref(false)
 const showCoverModal = ref(false)
+const showOnlineMatchModal = ref(false)
 const activeTab = ref('info')
 const isLoading = ref(true) // 加载状态
 
@@ -4544,6 +4555,58 @@ const fetchCover = async () => {
     logError('【在线封面】获取封面失败:', error)
     alert('获取封面失败，请检查网络连接后重试')
   }
+}
+
+// 格式化时间为 LRC 格式
+const formatTimeForLrc = (ms: number): string => {
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const centiseconds = Math.floor((ms % 1000) / 10)
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`
+}
+
+// 打开在线匹配对话框
+const openOnlineMatch = () => {
+  if (!songToEdit.value) return
+  showOnlineMatchModal.value = true
+}
+
+// 处理在线匹配结果
+const handleOnlineMatchApply = (data: { 
+  title?: string
+  artist?: string
+  album?: string
+  lyric?: string
+  coverUrl?: string
+}) => {
+  if (!songToEdit.value) return
+  
+  if (data.title) editTagsForm.value.title = data.title
+  if (data.artist) editTagsForm.value.artist = data.artist
+  if (data.album) editTagsForm.value.album = data.album
+  if (data.lyric) {
+    try {
+      const lyricData = JSON.parse(data.lyric)
+      if (lyricData.lrcData && Array.isArray(lyricData.lrcData)) {
+        const lrcLines = lyricData.lrcData.map((line: any) => {
+          const time = formatTimeForLrc(line.startTime)
+          const text = line.words?.map((w: any) => w.word).join('') || ''
+          return `[${time}]${text}`
+        }).join('\n')
+        editTagsForm.value.lyric = lrcLines
+      } else {
+        editTagsForm.value.lyric = data.lyric
+      }
+    } catch {
+      editTagsForm.value.lyric = data.lyric
+    }
+  }
+  if (data.coverUrl) {
+    editTagsForm.value.cover = data.coverUrl
+  }
+  
+  showOnlineMatchModal.value = false
 }
 
 // 自动匹配标签
