@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose};
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, ItemKey};
 use rodio::Source;
 use tauri::{State, Emitter};
 
@@ -489,6 +489,47 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         }
     } else {
         println!("【后端歌词扫描】无法获取父目录");
+    }
+
+    // 如果没有找到外部歌词文件，尝试从音频文件读取内嵌歌词
+    if lyric.is_empty() {
+        println!("【后端歌词扫描】未找到外部歌词文件，尝试读取内嵌歌词");
+        match lofty::read_from_path(&path) {
+            Ok(tagged_file) => {
+                // 尝试从 primary_tag 读取歌词
+                if let Some(tag) = tagged_file.primary_tag() {
+                    // 使用 ItemKey::Lyrics 获取歌词
+                    let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                    for lyric_text in lyrics {
+                        if !lyric_text.is_empty() {
+                            lyric = lyric_text.to_string();
+                            println!("【后端歌词扫描】成功读取内嵌歌词 (Lyrics)，长度：{}", lyric.len());
+                            break;
+                        }
+                    }
+                }
+                
+                // 如果 primary_tag 没有歌词，尝试所有标签
+                if lyric.is_empty() {
+                    for tag in tagged_file.tags() {
+                        let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                        for lyric_text in lyrics {
+                            if !lyric_text.is_empty() {
+                                lyric = lyric_text.to_string();
+                                println!("【后端歌词扫描】从标签读取内嵌歌词，长度：{}", lyric.len());
+                                break;
+                            }
+                        }
+                        if !lyric.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("【后端歌词扫描】读取音频文件元数据失败：{}", e);
+            }
+        }
     }
 
     // 尝试查找本地封面图片
