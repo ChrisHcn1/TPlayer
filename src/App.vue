@@ -2263,12 +2263,13 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             // 播放暂停或停止，重置前端计算的播放位置
             frontendPosition = currentPosition.value
           }
-        }, 300) // 每300毫秒更新一次，符合用户要求
+        }, 300) // 每 300 毫秒更新一次，符合用户要求
         
-        // 解析歌词
-        if (song.lyric) {
-          logInfo('解析歌词，长度:', song.lyric.length)
-          lyrics.value = parseLyrics(song.lyric)
+        // 解析歌词（使用最新的歌曲数据）
+        const songForLyric = songs.value.find(s => s.id === song.id) || song
+        if (songForLyric.lyric) {
+          logInfo('解析歌词，长度:', songForLyric.lyric.length)
+          lyrics.value = parseLyrics(songForLyric.lyric)
           logInfo('歌词解析完成，行数:', lyrics.value.length)
           coverLyricLineRefs.value = []
         } else {
@@ -2639,10 +2640,11 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         currentSong.value = song
       }
       
-      // 解析歌词
-      if (song.lyric) {
-        logInfo('解析歌词，长度:', song.lyric.length)
-        lyrics.value = parseLyrics(song.lyric)
+      // 解析歌词（使用最新的歌曲数据）
+      const songForLyric = songs.value.find(s => s.id === song.id) || song
+      if (songForLyric.lyric) {
+        logInfo('解析歌词，长度:', songForLyric.lyric.length)
+        lyrics.value = parseLyrics(songForLyric.lyric)
         logInfo('歌词解析完成，行数:', lyrics.value.length)
         // 清空歌词行 refs，等待 DOM 渲染后重新填充
         coverLyricLineRefs.value = []
