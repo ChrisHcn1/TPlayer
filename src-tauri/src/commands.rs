@@ -496,14 +496,18 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         println!("【后端歌词扫描】未找到外部歌词文件，尝试读取内嵌歌词");
         match lofty::read_from_path(&path) {
             Ok(tagged_file) => {
+                println!("【后端歌词扫描】成功读取音频文件元数据");
                 // 尝试从 primary_tag 读取歌词
                 if let Some(tag) = tagged_file.primary_tag() {
+                    println!("【后端歌词扫描】primary_tag 存在");
                     // 使用 ItemKey::Lyrics 获取歌词
                     let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                    println!("【后端歌词扫描】get_strings 返回的歌词数量：{}", lyrics.len());
                     for lyric_text in lyrics {
                         if !lyric_text.is_empty() {
                             lyric = lyric_text.to_string();
                             println!("【后端歌词扫描】成功读取内嵌歌词 (Lyrics)，长度：{}", lyric.len());
+                            println!("【后端歌词扫描】歌词预览：{}", lyric.chars().take(100).collect::<String>());
                             break;
                         }
                     }
@@ -511,8 +515,10 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 
                 // 如果 primary_tag 没有歌词，尝试所有标签
                 if lyric.is_empty() {
+                    println!("【后端歌词扫描】primary_tag 没有歌词，尝试所有标签");
                     for tag in tagged_file.tags() {
                         let lyrics = tag.get_strings(&ItemKey::Lyrics);
+                        println!("【后端歌词扫描】标签中 get_strings 返回的歌词数量：{}", lyrics.len());
                         for lyric_text in lyrics {
                             if !lyric_text.is_empty() {
                                 lyric = lyric_text.to_string();
@@ -530,6 +536,13 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
                 println!("【后端歌词扫描】读取音频文件元数据失败：{}", e);
             }
         }
+    }
+    
+    // 最终确认歌词数据
+    if !lyric.is_empty() {
+        println!("【后端歌词扫描】最终歌词数据：长度={}, 预览={}", lyric.len(), lyric.chars().take(50).collect::<String>());
+    } else {
+        println!("【后端歌词扫描】最终结果：未找到歌词");
     }
 
     // 尝试查找本地封面图片

@@ -2266,14 +2266,20 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }, 300) // 每 300 毫秒更新一次，符合用户要求
         
         // 解析歌词（使用最新的歌曲数据）
-        const songForLyric = songs.value.find(s => s.id === song.id) || song
-        if (songForLyric.lyric) {
+        logInfo('[歌词调试] 开始解析歌词，song.id:', song.id)
+        logInfo('[歌词调试] 传入的 song.lyric 长度:', song.lyric ? song.lyric.length : 0)
+        const songForLyric = songs.value.find(s => s.id === song.id)
+        logInfo('[歌词调试] 从 songs.value 找到的歌曲:', songForLyric ? songForLyric.title : '未找到')
+        logInfo('[歌词调试] songForLyric.lyric 长度:', songForLyric && songForLyric.lyric ? songForLyric.lyric.length : 0)
+        if (songForLyric && songForLyric.lyric) {
           logInfo('解析歌词，长度:', songForLyric.lyric.length)
+          logInfo('[歌词调试] 歌词预览:', songForLyric.lyric.substring(0, 100))
           lyrics.value = parseLyrics(songForLyric.lyric)
           logInfo('歌词解析完成，行数:', lyrics.value.length)
           coverLyricLineRefs.value = []
         } else {
-          logInfo('歌曲无歌词')
+          logInfo('歌曲无歌词，songForLyric 存在:', !!songForLyric)
+          logInfo('[歌词调试] songs.value 中所有歌曲的 ID:', songs.value.map(s => s.id).join(', '))
           lyrics.value = []
           coverLyricLineRefs.value = []
         }
