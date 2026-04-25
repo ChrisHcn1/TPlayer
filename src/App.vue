@@ -1924,11 +1924,17 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       
       try {
         logInfo('【FFplay】开始调用 play_with_ffplay')
+        console.log('【FFplay】开始调用 play_with_ffplay - 同步日志')
         // 使用FFplay播放
         const start_position = positionForCue
+        console.log('【FFplay】start_position 设置为:', start_position)
+        logInfo('【FFplay】start_position 设置为:', start_position)
         let result
+        console.log('【FFplay】开始执行 invoke 调用')
+        logInfo('【FFplay】开始执行 invoke 调用')
         try {
           logInfo('【FFplay】准备调用 invoke，path:', playPath, 'start_time:', start_position)
+          console.log('【FFplay】准备调用 invoke，path:', playPath, 'start_time:', start_position)
           // 解析歌曲时长（如果有的话）
           let durationSeconds = 300; // 默认值
           if (currentSong.value && currentSong.value.duration) {
@@ -1946,16 +1952,18 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             start_time: start_position,
             duration: durationSeconds
           })
+          console.log('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
           logInfo('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
           logInfo('result类型:', typeof result)
           logInfo('result.duration:', result.duration)
         } catch (invokeError) {
           logError('FFplay播放失败:', invokeError)
-          // 如果是ffplay未找到，给出更明确的提示
           const errorMsg = String(invokeError)
           if (errorMsg.includes('未找到') || errorMsg.includes('not found') || errorMsg.includes('FFplay')) {
             logError('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
           }
+          console.error('【FFplay】catch 块捕获到错误，准备返回')
+          logError('【FFplay】catch 块捕获到错误，准备返回')
           return
         }
         
