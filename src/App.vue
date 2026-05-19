@@ -59,6 +59,10 @@
               <span class="nav-text">{{ t('playlist.cueAlbums') }}</span>
               <span class="nav-badge">{{ cueAlbums.length }}</span>
             </li>
+            <li class="nav-item" @click="showAudioConverter = true" title="音频转换">
+              <span class="nav-icon">🔄</span>
+              <span class="nav-text">{{ t('converter.title', '音频转换') }}</span>
+            </li>
           </ul>
         </nav>
         <div class="sidebar-footer">
@@ -111,7 +115,34 @@
             <button class="search-btn" @click="handleSearch">🔍</button>
           </div>
         </div>
-        
+
+        <!-- 选择工具栏（有选择时显示） -->
+        <div class="selection-toolbar" v-if="selectedSongIds.size > 0">
+          <div class="selection-toolbar-left">
+            <span class="selection-count">
+              {{ selectedSongIds.size }} {{ t('selection.selected') }}
+            </span>
+          </div>
+          <div class="selection-toolbar-right">
+            <button class="selection-action-btn" @click="addSelectedToPlaylist" :title="t('selection.addToPlaylist')">
+              <span class="btn-icon">+</span>
+              <span class="btn-text">{{ t('selection.addToPlaylist') }}</span>
+            </button>
+            <button class="selection-action-btn" @click="playSelectedSongs" :title="t('selection.playAll')">
+              <span class="btn-icon">▶</span>
+              <span class="btn-text">{{ t('selection.playAll') }}</span>
+            </button>
+            <button class="selection-action-btn danger" @click="deleteSelectedSongs" :title="t('selection.delete')">
+              <span class="btn-icon">🗑</span>
+              <span class="btn-text">{{ t('selection.delete') }}</span>
+            </button>
+            <button class="selection-action-btn" @click="clearSelection" :title="t('selection.clear')">
+              <span class="btn-icon">✕</span>
+              <span class="btn-text">{{ t('selection.clear') }}</span>
+            </button>
+          </div>
+        </div>
+
         <!-- 歌曲列表 -->
         <div class="song-list-container" ref="songListContainer">
           <!-- 悬浮控制按钮 -->
@@ -178,10 +209,18 @@
                     v-for="(item, index) in filteredSongs"
                     :key="item.id"
                     class="song-row"
-                    :class="{ 'active': item.id === currentSong?.id }"
-                    @click="playSong(item)"
+                    :class="{ 'active': item.id === currentSong?.id, 'selected': isSongSelected(item) }"
+                    @click="handleSongRowClick(item, $event)"
                     @contextmenu.prevent="openSongMenu(item, $event)"
                   >
+                    <span class="col-checkbox" v-if="isSelectionMode || selectedSongIds.size > 0">
+                      <input
+                        type="checkbox"
+                        :checked="isSongSelected(item)"
+                        @click.stop
+                        @change="toggleSongSelection(item)"
+                      />
+                    </span>
                     <span class="col-index">{{ index + 1 }}</span>
                     <span class="col-title">
                       <div class="song-title" :title="getDisplayTitle(item)">
@@ -565,11 +604,16 @@
           <button class="close-btn" @click="closeEditTagsModal">×</button>
         </div>
         <div class="modal-body">
-          <!-- 在线匹配 -->
-          <div class="match-section">
-            <span>{{ t('modal.dontWantToFill') }}</span>
-            <button class="match-btn" @click="openOnlineMatch">
-              {{ t('modal.onlineMatchTags') }}
+          <!-- 快速操作栏 -->
+          <div class="quick-actions">
+            <button class="quick-btn" @click="readLocalMetadata">
+              📖 {{ t('modal.readLocalMetadata') }}
+            </button>
+            <button class="quick-btn" @click="autoMatchTags">
+              🏷️ {{ t('modal.matchFromFilename') }}
+            </button>
+            <button class="quick-btn" @click="openOnlineMatch">
+              🌐 {{ t('modal.onlineMatchTags') }}
             </button>
           </div>
           
@@ -581,21 +625,21 @@
                 :class="{ active: activeTab === 'info' }"
                 @click="activeTab = 'info'"
               >
-                {{ t('modal.basicInfo') }}
+                📝 {{ t('modal.basicInfo') }}
               </button>
               <button 
                 class="tab-button" 
                 :class="{ active: activeTab === 'lyric' }"
                 @click="activeTab = 'lyric'"
               >
-                {{ t('modal.lyrics') }}
+                🎵 {{ t('modal.lyrics') }}
               </button>
               <button 
                 class="tab-button" 
                 :class="{ active: activeTab === 'cover' }"
                 @click="activeTab = 'cover'"
               >
-                {{ t('modal.cover') }}
+                🖼️ {{ t('modal.cover') }}
               </button>
             </div>
             
@@ -607,41 +651,37 @@
                   <input type="text" v-model="editTagsForm.fileName" disabled>
                 </div>
               </div>
-              <div class="form-row">
+              <div class="form-row two-col">
                 <div class="form-group">
                   <label>{{ t('modal.title') }}</label>
                   <input type="text" v-model="editTagsForm.title" :placeholder="t('modal.enterTitle')">
                 </div>
-              </div>
-              <div class="form-row">
                 <div class="form-group">
                   <label>{{ t('modal.artist') }}</label>
                   <input type="text" v-model="editTagsForm.artist" :placeholder="t('modal.enterArtist')">
                 </div>
               </div>
-              <div class="form-row">
+              <div class="form-row two-col">
                 <div class="form-group">
                   <label>{{ t('modal.album') }}</label>
                   <input type="text" v-model="editTagsForm.album" :placeholder="t('modal.enterAlbum')">
                 </div>
-              </div>
-              <div class="form-row">
                 <div class="form-group">
                   <label>{{ t('modal.albumArtist') }}</label>
                   <input type="text" v-model="editTagsForm.albumArtist" :placeholder="t('modal.enterAlbumArtist')">
                 </div>
               </div>
-              <div class="form-row">
+              <div class="form-row two-col">
                 <div class="form-group">
                   <label>{{ t('modal.genre') }}</label>
                   <input type="text" v-model="editTagsForm.genre" :placeholder="t('modal.enterGenre')">
                 </div>
-              </div>
-              <div class="form-row three-col">
                 <div class="form-group">
                   <label>{{ t('modal.year') }}</label>
                   <input type="text" v-model="editTagsForm.year" :placeholder="t('modal.enterYear')">
                 </div>
+              </div>
+              <div class="form-row three-col">
                 <div class="form-group">
                   <label>{{ t('modal.trackNumber') }}</label>
                   <input type="text" v-model="editTagsForm.trackNumber" :placeholder="t('modal.enterTrackNumber')">
@@ -650,8 +690,6 @@
                   <label>{{ t('modal.discNumber') }}</label>
                   <input type="text" v-model="editTagsForm.discNumber" :placeholder="t('modal.enterDiscNumber')">
                 </div>
-              </div>
-              <div class="form-row">
                 <div class="form-group">
                   <label>{{ t('modal.alia') }}</label>
                   <input type="text" v-model="editTagsForm.alia" :placeholder="t('modal.enterAlia')">
@@ -660,20 +698,12 @@
               
               <!-- CUE信息区域 -->
               <div v-if="songToEdit && songToEdit.isCueTrack" class="cue-info-section">
-                <h4>{{ t('modal.cueInfo') }}</h4>
-                <div class="form-row">
-                  <div class="form-group">
-                    <label>{{ t('modal.trackNumber') }}</label>
-                    <input type="text" v-model="editTagsForm.trackNumber" :placeholder="t('modal.enterTrackNumber')">
-                  </div>
-                </div>
-                <div class="form-row">
+                <h4>📀 {{ t('modal.cueInfo') }}</h4>
+                <div class="form-row two-col">
                   <div class="form-group">
                     <label>{{ t('modal.startTime') }}</label>
                     <input type="number" v-model="songToEdit.startTime" :placeholder="t('modal.enterStartTime')">
                   </div>
-                </div>
-                <div class="form-row">
                   <div class="form-group">
                     <label>{{ t('modal.endTime') }}</label>
                     <input type="number" v-model="songToEdit.endTime" :placeholder="t('modal.enterEndTime')">
@@ -683,6 +713,7 @@
                   <pre>{{ (songToEdit as any).cueInfo }}</pre>
                 </div>
               </div>
+              
               <div class="form-row">
                 <div class="form-group">
                   <label>{{ t('modal.path') }}</label>
@@ -692,12 +723,6 @@
                   </div>
                 </div>
               </div>
-              <div class="lyric-actions">
-                <button class="action-btn" @click="readLocalMetadata">{{ t('modal.readLocalMetadata') }}</button>
-                <button class="action-btn" @click="autoMatchTags">{{ t('modal.matchFromFilename') }}</button>
-                <button class="action-btn" @click="openOnlineMatch">{{ t('modal.onlineMatchTags') }}</button>
-                <button class="action-btn" @click="fetchCover">{{ t('modal.getCover') }}</button>
-              </div>
             </div>
             
             <!-- 歌词标签页 -->
@@ -706,12 +731,14 @@
                 <label>{{ t('modal.lyrics') }}</label>
                 <textarea 
                   v-model="editTagsForm.lyric" 
-                  placeholder="[00:00.00] Lyrics content" 
-                  rows="10"
+                  placeholder="[00:00.00] 歌词内容" 
+                  rows="12"
                 ></textarea>
               </div>
               <div class="lyric-actions">
-                <button class="action-btn" @click="fetchLyric">{{ t('modal.getLyrics') }}</button>
+                <button class="action-btn primary" @click="fetchLyric">
+                  🔍 {{ t('modal.getLyrics') }}
+                </button>
               </div>
             </div>
             
@@ -720,11 +747,18 @@
               <div class="cover-section">
                 <div class="cover-preview" @click="changeCover">
                   <img v-if="editTagsForm.cover" :src="editTagsForm.cover" alt="封面">
-                  <div v-else class="cover-placeholder">{{ t('modal.clickToChangeCover') }}</div>
+                  <div v-else class="cover-placeholder">
+                    <div class="placeholder-icon">📷</div>
+                    {{ t('modal.clickToChangeCover') }}
+                  </div>
                 </div>
                 <div class="cover-actions">
-                  <button class="action-btn" @click="changeCover">{{ t('modal.selectCover') }}</button>
-                  <button class="action-btn" @click="fetchCover">{{ t('modal.getCover') }}</button>
+                  <button class="action-btn" @click="changeCover">
+                    📁 {{ t('modal.selectCover') }}
+                  </button>
+                  <button class="action-btn" @click="fetchCover">
+                    🔍 {{ t('modal.getCover') }}
+                  </button>
                 </div>
               </div>
             </div>
@@ -832,6 +866,13 @@
       @close="showOnlineMatchModal = false"
       @apply="handleOnlineMatchApply"
     />
+    
+    <!-- 音频转换器 -->
+    <AudioConverter
+      v-if="showAudioConverter"
+      :visible="showAudioConverter"
+      @close="showAudioConverter = false"
+    />
   </div>
 </template>
 
@@ -841,12 +882,13 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { localStorageService, type Playlist } from './stores/local'
-import { matchSong, songLyric, searchSong, fetchLyricById } from './api/music'
 import { musicDataService } from './services/musicDataService'
 import { parseSmartLrc } from './services/lyricParser'
+import { multiSourceLyricService } from './services/multiSourceLyricService'
 import * as mm from 'music-metadata'
 import Settings from './components/Settings.vue'
 import OnlineMatchModal from './components/OnlineMatchModal.vue'
+import AudioConverter from './components/AudioConverter.vue'
 import { i18nService, t } from './services/i18n'
 import {
   cueAlbums,
@@ -865,15 +907,15 @@ const ENABLE_LOGS = true
 // 调试日志级别：0=无日志，1=仅错误，2=基本信息，3=详细信息
 const LOG_LEVEL = 2
 
-// 日志函数
-function logInfo(...args: any[]) {
+// 日志函数 - 使用const声明避免作用域问题
+const logInfo = (...args: any[]) => {
   // 输出所有日志
   if (ENABLE_LOGS) {
     console.log(...args)
   }
 }
 
-function logError(...args: any[]) {
+const logError = (...args: any[]) => {
   // 输出错误日志
   if (ENABLE_LOGS) {
     console.error(...args)
@@ -881,7 +923,7 @@ function logError(...args: any[]) {
 }
 
 // 详细日志函数（仅在LOG_LEVEL=3时输出）
-function logDebug(...args: any[]) {
+const logDebug = (...args: any[]) => {
   // 禁用详细日志
   if (ENABLE_LOGS && LOG_LEVEL >= 3) {
     console.log(...args)
@@ -912,12 +954,29 @@ interface Song {
   needs_transcode: boolean
   // 浏览器环境下的原始文件对象（仅浏览器环境使用）
   file?: File
+  // 音频元数据
+  format?: string
+  sample_rate?: number
+  channels?: number
+  bit_rate?: number
+  bit_depth?: number
 }
 
 // 歌词行类型
 interface LyricLine {
   time: number // 时间戳（秒）
   text: string // 歌词内容
+}
+
+// FFplay 调用结果类型
+interface FFplayResult {
+  duration?: number
+  format?: string
+  sample_rate?: number
+  channels?: number
+  bit_rate?: number
+  bit_depth?: number
+  [key: string]: any
 }
 
 // 状态管理
@@ -931,14 +990,20 @@ const showEditTagsModal = ref(false)
 const showSettingsModal = ref(false)
 const showCoverModal = ref(false)
 const showOnlineMatchModal = ref(false)
+const showAudioConverter = ref(false)
 const activeTab = ref('info')
-const isLoading = ref(true) // 加载状态
+const isLoading = ref(true)
+
+// 选择相关状态
+const selectedSongIds = ref<Set<string>>(new Set())
+const isSelectionMode = ref(false)
 
 // 歌词相关状态
 const lyrics = ref<LyricLine[]>([])
 const currentLyricIndex = ref(-1)
 const showLyrics = ref(true)
 const lyricsPosition = ref<'top' | 'bottom'>('bottom')
+const yrcData = ref<any[]>([])
 
 // 主题相关状态
 const theme = ref<'dark' | 'light'>('dark')
@@ -1010,14 +1075,32 @@ let ffplayStatusInterval: number | null = null
 const browserFileMap = new Map<string, File>()
 
 // 启用日志输出以便调试
-function enableLogs(): void {
-  (window as any).logInfo = logInfo
-  ;(window as any).logError = logError
-  ;(window as any).browserFileMap = browserFileMap
+const enableLogs = (logInfoFn: (...args: any[]) => void, logErrorFn: (...args: any[]) => void, logDebugFn: (...args: any[]) => void, browserFileMapRef: Map<string, File>): void => {
+  // 只在浏览器环境下设置全局变量（且window必须是可写的普通对象）
+  try {
+    if (typeof window !== 'undefined' && window !== null && typeof window === 'object') {
+      const win = window as any
+      // 测试window是否可写
+      try {
+        win.testProp = 'test'
+        delete win.testProp
+        // 如果上面没出错，说明window可以设置属性
+        win.logInfo = logInfoFn
+        win.logError = logErrorFn
+        win.logDebug = logDebugFn
+        win.browserFileMap = browserFileMapRef
+      } catch (e) {
+        // window可能是只读的proxy，跳过设置
+        console.warn('window对象不可写，跳过全局变量设置')
+      }
+    }
+  } catch (e) {
+    console.warn('设置全局日志变量失败:', e)
+  }
 }
 
 // 调用以启用全局日志
-enableLogs()
+enableLogs(logInfo, logError, logDebug, browserFileMap)
 
 // updateProgress调用计数
 let updateProgressCallCount = 0
@@ -1067,7 +1150,7 @@ const equalizerBands = ref<number[]>([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 // 计算属性
 const currentFilterText = computed(() => {
   // 依赖语言和翻译状态，确保语言切换时重新计算
-  const currentLang = i18nService.getCurrentLanguage()
+  i18nService.getCurrentLanguage()
   const filters = {
     all: t('playlist.allSongs'),
     favorites: t('playlist.favorites'),
@@ -1178,8 +1261,6 @@ const titleElement = ref<HTMLElement | null>(null)
 const artistElement = ref<HTMLElement | null>(null)
 const coverLyricsContainer = ref<HTMLElement | null>(null)
 const coverLyricLineRefs = ref<(any | null)[]>([])
-const mainLyricsContainer = ref<HTMLElement | null>(null)
-const mainLyricLineRefs = ref<(any | null)[]>([])
 const coverModalContent = ref<HTMLElement | null>(null)
 const songListContainer = ref<HTMLElement | null>(null)
 
@@ -1562,14 +1643,80 @@ const scanMusic = async () => {
   }
 }
 
-// 记录上次后端状态更新的时间
-let lastBackendUpdateTime = Date.now()
 // 记录前端计算的播放位置
 let frontendPosition = 0
 
 // 播放状态管理
 let playSongLock: Promise<void> | null = null
 let currentPlayId = 0 // 用于跟踪当前播放请求的唯一ID
+
+// 歌曲行点击处理
+const handleSongRowClick = (song: Song, event: MouseEvent) => {
+  if (event.ctrlKey || event.metaKey) {
+    // Ctrl/Cmd + 点击：选择歌曲
+    toggleSongSelection(song)
+  } else if (isSelectionMode.value || selectedSongIds.value.size > 0) {
+    // 选择模式下：切换选择状态
+    toggleSongSelection(song)
+  } else {
+    // 默认：播放歌曲
+    playSong(song)
+  }
+}
+
+const toggleSongSelection = (song: Song) => {
+  const newSet = new Set(selectedSongIds.value)
+  if (newSet.has(song.id)) {
+    newSet.delete(song.id)
+  } else {
+    newSet.add(song.id)
+  }
+  selectedSongIds.value = newSet
+}
+
+const isSongSelected = (song: Song) => {
+  return selectedSongIds.value.has(song.id)
+}
+
+const clearSelection = () => {
+  selectedSongIds.value.clear()
+  selectedSongIds.value = new Set()
+  isSelectionMode.value = false
+}
+
+const addSelectedToPlaylist = () => {
+  const selectedSongs = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
+  selectedSongs.forEach((song: Song) => {
+    addSongToPlaylist(song)
+  })
+  logInfo('[批量操作] 已添加', selectedSongs.length, '首歌曲到播放队列')
+  clearSelection()
+}
+
+const playSelectedSongs = () => {
+  const selectedSongsList = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
+  if (selectedSongsList.length > 0) {
+    playSong(selectedSongsList[0])
+  }
+}
+
+const deleteSelectedSongs = async () => {
+  const selectedSongs = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
+  if (selectedSongs.length === 0) return
+
+  const confirmed = confirm(`确定要删除选中的 ${selectedSongs.length} 首歌曲吗？此操作不可撤销。`)
+  if (!confirmed) return
+
+  for (const song of selectedSongs) {
+    try {
+      await deleteSong(song)
+    } catch (e) {
+      logError('删除歌曲失败:', song.title, e)
+    }
+  }
+  logInfo('[批量操作] 已删除', selectedSongs.length, '首歌曲')
+  clearSelection()
+}
 
 const playSong = async (song: Song, position: number = 0, cueStartTime?: number, cueEndTime?: number, autoPlay: boolean = true) => {
   // 生成本次播放请求的唯一ID
@@ -1951,55 +2098,74 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             path: playPath,
             start_time: start_position,
             duration: durationSeconds
-          })
+          }) as FFplayResult | string
           console.log('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
-          logInfo('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
-          logInfo('result类型:', typeof result)
-          logInfo('result.duration:', result.duration)
+          // 确保 logInfo 是函数后再调用
+          if (typeof logInfo === 'function') {
+            logInfo('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
+            logInfo('result类型:', typeof result)
+            if (typeof result === 'object' && result !== null) {
+              logInfo('result.duration:', (result as FFplayResult).duration)
+            }
+          } else {
+            console.error('【FFplay】logInfo is not a function:', typeof logInfo)
+          }
         } catch (invokeError) {
-          logError('FFplay播放失败:', invokeError)
+          console.error('FFplay播放失败:', invokeError)
+          if (typeof logError === 'function') {
+            logError('FFplay播放失败:', invokeError)
+          }
           const errorMsg = String(invokeError)
           if (errorMsg.includes('未找到') || errorMsg.includes('not found') || errorMsg.includes('FFplay')) {
-            logError('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
+            console.error('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
+            if (typeof logError === 'function') {
+              logError('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
+            }
           }
           console.error('【FFplay】catch 块捕获到错误，准备返回')
-          logError('【FFplay】catch 块捕获到错误，准备返回')
+          if (typeof logError === 'function') {
+            logError('【FFplay】catch 块捕获到错误，准备返回')
+          }
           return
         }
         
         // 检查是否返回错误（ffplay未找到）
         if (result && typeof result === 'string' && result.includes('未找到')) {
-          logError('FFplay未找到，无法播放此格式:', result)
+          console.error('FFplay未找到，无法播放此格式:', result)
+          if (typeof logError === 'function') {
+            logError('FFplay未找到，无法播放此格式:', result)
+          }
           return
         }
         
         // 获取音频时长和详细信息
         try {
-          if (result && result.duration) {
-            ffplayDuration.value = result.duration
+          const ffResult = result as FFplayResult
+          if (ffResult && ffResult.duration !== undefined) {
+            ffplayDuration.value = ffResult.duration
             ffplayPosition.value = start_position
             
             // 更新歌曲时长
-            const totalSeconds = Math.round(result.duration)
+            const totalSeconds = Math.round(ffResult.duration)
             const minutes = Math.floor(totalSeconds / 60)
             const seconds = totalSeconds % 60
             song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
             
             // 更新音频文件详细信息
-            if (result.format) {
-              song.format = result.format
+            if (ffResult.format) {
+              song.format = ffResult.format
             }
-            if (result.sample_rate) {
-              song.sample_rate = result.sample_rate
+            if (ffResult.sample_rate) {
+              song.sample_rate = ffResult.sample_rate
             }
-            if (result.channels) {
-              song.channels = result.channels
+            if (ffResult.channels) {
+              song.channels = ffResult.channels
             }
-            if (result.bit_rate) {
-              song.bit_rate = result.bit_rate
+            if (ffResult.bit_rate) {
+              song.bit_rate = ffResult.bit_rate
             }
-            if (result.bit_depth) {
-              song.bit_depth = result.bit_depth
+            if (ffResult.bit_depth) {
+              song.bit_depth = ffResult.bit_depth
             }
             
             // 计算进度百分比
@@ -2008,18 +2174,18 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }
             
             console.log('【FFplay】音频文件信息:', {
-              format: result.format,
-              sample_rate: result.sample_rate,
-              channels: result.channels,
-              bit_rate: result.bit_rate,
-              bit_depth: result.bit_depth
+              format: ffResult.format,
+              sample_rate: ffResult.sample_rate,
+              channels: ffResult.channels,
+              bit_rate: ffResult.bit_rate,
+              bit_depth: ffResult.bit_depth
             })
             logInfo('音频文件信息:', {
-              format: result.format,
-              sample_rate: result.sample_rate,
-              channels: result.channels,
-              bit_rate: result.bit_rate,
-              bit_depth: result.bit_depth
+              format: ffResult.format,
+              sample_rate: ffResult.sample_rate,
+              channels: ffResult.channels,
+              bit_rate: ffResult.bit_rate,
+              bit_depth: ffResult.bit_depth
             })
           }
         } catch (error) {
@@ -2044,41 +2210,48 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }
         
         // 重置进度变量，避免累计上一首歌曲的进度
-        logInfo('【FFplay】重置进度变量，start_position:', start_position)
+        if (typeof logInfo === 'function') {
+          logInfo('【FFplay】重置进度变量，start_position:', start_position)
+        }
         currentPosition.value = start_position
         progress.value = 0
         frontendPosition = start_position
-        lastBackendUpdateTime = Date.now()
         
         // 确保isFFplayPlaying.value为true
         isFFplayPlaying.value = true
         console.log('【FFplay】设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
-        logInfo('设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+        if (typeof logInfo === 'function') {
+          logInfo('设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
+        }
         
         // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
         (async () => {
           try {
             console.log('【FFplay】立即执行FFplay状态更新')
-            logInfo('立即执行FFplay状态更新')
+            if (typeof logInfo === 'function') {
+              logInfo('立即执行FFplay状态更新')
+            }
             const status = await invoke('get_ffplay_status') as any
             console.log('【FFplay】立即获取FFplay状态成功:', JSON.stringify(status))
-            logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+            if (typeof logInfo === 'function') {
+              logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+            }
 
             if (status) {
-              // 更新上次后端状态更新的时间
-              lastBackendUpdateTime = Date.now()
               console.log('【FFplay】立即处理FFplay状态:', {
                 duration: status.duration,
                 position: status.position,
                 volume: status.volume,
                 is_playing: status.is_playing
               })
-              logInfo('立即处理FFplay状态:', {
-                duration: status.duration,
-                position: status.position,
-                volume: status.volume,
-                is_playing: status.is_playing
-              })
+              if (typeof logInfo === 'function') {
+                logInfo('立即处理FFplay状态:', {
+                  duration: status.duration,
+                  position: status.position,
+                  volume: status.volume,
+                  is_playing: status.is_playing
+                })
+              }
               
               ffplayDuration.value = status.duration || ffplayDuration.value
               ffplayPosition.value = status.position || ffplayPosition.value
@@ -2120,7 +2293,9 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           // 检查是否应该继续运行定时器
           if (!isFFplayPlaying.value) {
             console.log('【FFplay】isFFplayPlaying为false，停止监控定时器')
-            logInfo('isFFplayPlaying为false，停止监控定时器')
+            if (typeof logInfo === 'function') {
+              logInfo('isFFplayPlaying为false，停止监控定时器')
+            }
             if (ffplayStatusInterval) {
               clearInterval(ffplayStatusInterval)
               ffplayStatusInterval = null
@@ -2129,31 +2304,37 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           }
           
           console.log('【FFplay】FFplay状态监控定时器触发')
-          logInfo('FFplay状态监控定时器触发')
+          if (typeof logInfo === 'function') {
+            logInfo('FFplay状态监控定时器触发')
+          }
           // 使用IIFE包装async函数
           (async () => {
             try {
               console.log('【FFplay】准备调用get_ffplay_status')
-              logInfo('准备调用get_ffplay_status')
+              if (typeof logInfo === 'function') {
+                logInfo('准备调用get_ffplay_status')
+              }
               const status = await invoke('get_ffplay_status') as any
               console.log('【FFplay】获取FFplay状态成功:', JSON.stringify(status))
-              logInfo('获取FFplay状态成功:', JSON.stringify(status))
+              if (typeof logInfo === 'function') {
+                logInfo('获取FFplay状态成功:', JSON.stringify(status))
+              }
 
               if (status) {
-                // 更新上次后端状态更新的时间
-                lastBackendUpdateTime = Date.now()
                 console.log('【FFplay】处理FFplay状态:', {
                   duration: status.duration,
                   position: status.position,
                   volume: status.volume,
                   is_playing: status.is_playing
                 })
-                logInfo('处理FFplay状态:', {
-                  duration: status.duration,
-                  position: status.position,
-                  volume: status.volume,
-                  is_playing: status.is_playing
-                })
+                if (typeof logInfo === 'function') {
+                  logInfo('处理FFplay状态:', {
+                    duration: status.duration,
+                    position: status.position,
+                    volume: status.volume,
+                    is_playing: status.is_playing
+                  })
+                }
                 
                 ffplayDuration.value = status.duration || ffplayDuration.value
                 ffplayPosition.value = status.position || ffplayPosition.value
@@ -2162,12 +2343,16 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                 // 更新播放状态
                 isPlaying.value = status.is_playing || false
                 console.log('【FFplay】isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                if (typeof logInfo === 'function') {
+                  logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                }
 
                 // 只有当status.position有效时才更新currentPosition
                 if (status.position !== undefined && status.position !== null) {
                   console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  if (typeof logInfo === 'function') {
+                    logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  }
                   currentPosition.value = status.position
                   // 更新前端计算的播放位置
                   frontendPosition = status.position
@@ -2266,12 +2451,16 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
               progress.value = Math.min((frontendPosition / ffplayDuration.value) * 100, 100)
               console.log('【FFplay】前端进度更新(备份): currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
               logInfo('前端进度更新(备份): currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+              // 同步歌词显示
+              syncLyrics()
             } else {
               // 曲目播放结束
               currentPosition.value = ffplayDuration.value
               progress.value = 100
               console.log('【FFplay】前端进度更新(备份): 曲目播放结束, currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
               logInfo('前端进度更新(备份): 曲目播放结束, currentPosition=', frontendPosition, '秒, progress=', progress.value, '%')
+              // 同步歌词显示（显示最后一句）
+              syncLyrics()
             }
           } else {
             // 播放暂停或停止，重置前端计算的播放位置
@@ -2289,18 +2478,14 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         logInfo('[歌词加载] songForLyric.path:', songForLyric?.path)
         logInfo('[歌词加载] song.lyric:', song?.lyric ? '有值(' + song.lyric.length + ')' : '为空')
         
-        // 优先级 1: 在线匹配缓存歌词
-        try {
-          const cachedLyric = await localStorageService.getCachedLyric(song.id)
-          if (cachedLyric && cachedLyric.trim()) {
-            lyricContent = cachedLyric
-            lyricSource = '在线匹配缓存'
-            logInfo('[歌词加载] 优先级 1: 使用在线匹配缓存歌词，长度:', lyricContent.length)
-          } else {
-            logInfo('[歌词加载] 优先级 1: 无在线匹配缓存歌词')
-          }
-        } catch (e) {
-          logInfo('[歌词加载] 优先级 1: 读取缓存歌词失败:', e)
+        // 优先级 1: 音频文件内嵌歌词（来自后端扫描）
+        const embeddedLyric = songForLyric?.lyric || song.lyric || ''
+        if (embeddedLyric && embeddedLyric.trim()) {
+          lyricContent = embeddedLyric
+          lyricSource = '内嵌歌词'
+          logInfo('[歌词加载] 优先级 1: 使用内嵌歌词，长度:', lyricContent.length)
+        } else {
+          logInfo('[歌词加载] 优先级 1: 无内嵌歌词')
         }
         
         // 优先级 2: 同名 .lrc 文件（必须非空）
@@ -2324,20 +2509,55 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           logInfo('[歌词加载] 优先级 2: 跳过，songForLyric 或 path 不存在')
         }
         
-        // 优先级 3: 音频文件内嵌歌词（来自后端扫描）
+        // 优先级 3: 在线匹配缓存歌词
         if (!lyricContent) {
-          const embeddedLyric = songForLyric?.lyric || song.lyric || ''
-          if (embeddedLyric && embeddedLyric.trim()) {
-            lyricContent = embeddedLyric
-            lyricSource = '内嵌歌词'
-            logInfo('[歌词加载] 优先级 3: 使用内嵌歌词，长度:', lyricContent.length)
-          } else {
-            logInfo('[歌词加载] 优先级 3: 无内嵌歌词')
+          try {
+            const cachedLyric = await localStorageService.getCachedLyric(song.id)
+            if (cachedLyric && cachedLyric.trim()) {
+              lyricContent = cachedLyric
+              lyricSource = '在线匹配缓存'
+              logInfo('[歌词加载] 优先级 3: 使用在线匹配缓存歌词，长度:', lyricContent.length)
+            } else {
+              logInfo('[歌词加载] 优先级 3: 无在线匹配缓存歌词')
+            }
+          } catch (e) {
+            logInfo('[歌词加载] 优先级 3: 读取缓存歌词失败:', e)
           }
         }
         
-        // 解析歌词
-        if (lyricContent) {
+        // 如果本地都没有歌词，使用多源在线歌词服务查询
+        if (!lyricContent) {
+          logInfo('[歌词加载] 本地无歌词，开始多源在线查询')
+          try {
+            const result = await multiSourceLyricService.getLyric({
+              id: song.id,
+              title: song.title,
+              artist: song.artist,
+              album: song.album,
+              filePath: song.path
+            }, 'auto', false)
+            
+            if (result.success && result.bestScore && result.bestScore.lyricLines) {
+              // 直接使用解析后的歌词行
+              lyrics.value = result.bestScore.lyricLines
+              if (result.bestScore.yrcData) {
+                yrcData.value = result.bestScore.yrcData
+              }
+              lyricSource = result.bestSource ? String(result.bestSource) : '在线源'
+              logInfo('[歌词加载] 使用多源在线歌词，来源:', lyricSource, '行数:', lyrics.value.length)
+              coverLyricLineRefs.value = []
+            } else {
+              logInfo('[歌词加载] 多源在线查询无结果')
+              lyrics.value = []
+              coverLyricLineRefs.value = []
+            }
+          } catch (e) {
+            logError('[歌词加载] 多源在线查询失败:', e)
+            lyrics.value = []
+            coverLyricLineRefs.value = []
+          }
+        } else if (lyricContent) {
+          // 解析本地歌词
           logInfo('[歌词加载] 最终使用来源:', lyricSource, '长度:', lyricContent.length)
           logInfo('[歌词加载] 歌词预览:', lyricContent.substring(0, 100))
           lyrics.value = parseLyrics(lyricContent)
@@ -2717,18 +2937,14 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       let lyricSource = ''
       const songForLyric = songs.value.find(s => s.id === song.id) || song
       
-      // 优先级 1: 在线匹配缓存歌词
-      try {
-        const cachedLyric = await localStorageService.getCachedLyric(song.id)
-        if (cachedLyric && cachedLyric.trim()) {
-          lyricContent = cachedLyric
-          lyricSource = '在线匹配缓存'
-          logInfo('[歌词加载] 优先级 1: 使用在线匹配缓存歌词，长度:', lyricContent.length)
-        } else {
-          logInfo('[歌词加载] 优先级 1: 无在线匹配缓存歌词')
-        }
-      } catch (e) {
-        logInfo('[歌词加载] 优先级 1: 读取缓存歌词失败:', e)
+      // 优先级 1: 音频文件内嵌歌词（来自后端扫描）
+      const embeddedLyric = songForLyric.lyric || song.lyric || ''
+      if (embeddedLyric && embeddedLyric.trim()) {
+        lyricContent = embeddedLyric
+        lyricSource = '内嵌歌词'
+        logInfo('[歌词加载] 优先级 1: 使用内嵌歌词，长度:', lyricContent.length)
+      } else {
+        logInfo('[歌词加载] 优先级 1: 无内嵌歌词')
       }
       
       // 优先级 2: 同名 .lrc 文件（必须非空）
@@ -2750,25 +2966,59 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }
       }
       
-      // 优先级 3: 音频文件内嵌歌词（来自后端扫描）
+      // 优先级 3: 在线匹配缓存歌词
       if (!lyricContent) {
-        const embeddedLyric = songForLyric.lyric || song.lyric || ''
-        if (embeddedLyric && embeddedLyric.trim()) {
-          lyricContent = embeddedLyric
-          lyricSource = '内嵌歌词'
-          logInfo('[歌词加载] 优先级 3: 使用内嵌歌词，长度:', lyricContent.length)
-        } else {
-          logInfo('[歌词加载] 优先级 3: 无内嵌歌词')
+        try {
+          const cachedLyric = await localStorageService.getCachedLyric(song.id)
+          if (cachedLyric && cachedLyric.trim()) {
+            lyricContent = cachedLyric
+            lyricSource = '在线匹配缓存'
+            logInfo('[歌词加载] 优先级 3: 使用在线匹配缓存歌词，长度:', lyricContent.length)
+          } else {
+            logInfo('[歌词加载] 优先级 3: 无在线匹配缓存歌词')
+          }
+        } catch (e) {
+          logInfo('[歌词加载] 优先级 3: 读取缓存歌词失败:', e)
         }
       }
       
-      // 解析歌词
-      if (lyricContent) {
+      // 如果本地都没有歌词，使用多源在线歌词服务查询
+      if (!lyricContent) {
+        logInfo('[歌词加载] 本地无歌词，开始多源在线查询')
+        try {
+          const result = await multiSourceLyricService.getLyric({
+            id: song.id,
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            filePath: song.path
+          }, 'auto', false)
+          
+          if (result.success && result.bestScore && result.bestScore.lyricLines) {
+            // 直接使用解析后的歌词行
+            lyrics.value = result.bestScore.lyricLines
+            if (result.bestScore.yrcData) {
+              yrcData.value = result.bestScore.yrcData
+            }
+            lyricSource = result.bestSource ? String(result.bestSource) : '在线源'
+            logInfo('[歌词加载] 使用多源在线歌词，来源:', lyricSource, '行数:', lyrics.value.length)
+            coverLyricLineRefs.value = []
+          } else {
+            logInfo('[歌词加载] 多源在线查询无结果')
+            lyrics.value = []
+            coverLyricLineRefs.value = []
+          }
+        } catch (e) {
+          logError('[歌词加载] 多源在线查询失败:', e)
+          lyrics.value = []
+          coverLyricLineRefs.value = []
+        }
+      } else if (lyricContent) {
+        // 解析本地歌词
         logInfo('[歌词加载] 最终使用来源:', lyricSource, '长度:', lyricContent.length)
         logInfo('[歌词加载] 歌词预览:', lyricContent.substring(0, 100))
         lyrics.value = parseLyrics(lyricContent)
         logInfo('歌词解析完成，行数:', lyrics.value.length)
-        // 清空歌词行 refs，等待 DOM 渲染后重新填充
         coverLyricLineRefs.value = []
       } else {
         logInfo('[歌词加载] 最终结果: 无歌词')
@@ -3731,7 +3981,8 @@ const seek = async () => {
 
   // 检查是否需要使用FFplay播放（基于文件格式）
   const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma', '.m4a', '.aac']
-  const shouldUseFFplay = currentSong.value && unsupportedFormats.some(ext => currentSong.value.path.toLowerCase().endsWith(ext))
+  const currentSongPath = currentSong.value?.path ?? ''
+  const shouldUseFFplay = currentSong.value && currentSongPath && unsupportedFormats.some(ext => currentSongPath.toLowerCase().endsWith(ext))
   console.log('【SEEK】shouldUseFFplay:', shouldUseFFplay)
 
   // 如果应该使用FFplay播放，使用FFplay的seek功能
@@ -3788,16 +4039,22 @@ const seek = async () => {
           
           // 确保isFFplayPlaying.value为true
           isFFplayPlaying.value = true
-          logInfo('【SEEK】FFplay seek完成: currentPosition=', actualPosition, 's, progress=', progress.value, '%')
+          if (typeof logInfo === 'function') {
+            logInfo('【SEEK】FFplay seek完成: currentPosition=', actualPosition, 's, progress=', progress.value, '%')
+          }
           
           // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
           (async () => {
             try {
               console.log('【SEEK】立即执行FFplay状态更新')
-              logInfo('立即执行FFplay状态更新')
+              if (typeof logInfo === 'function') {
+                logInfo('立即执行FFplay状态更新')
+              }
               const status = await invoke('get_ffplay_status') as any
               console.log('【SEEK】立即获取FFplay状态成功:', JSON.stringify(status))
-              logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+              if (typeof logInfo === 'function') {
+                logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
+              }
 
               if (status) {
                 console.log('【SEEK】立即处理FFplay状态:', {
@@ -3806,12 +4063,14 @@ const seek = async () => {
                   volume: status.volume,
                   is_playing: status.is_playing
                 })
-                logInfo('立即处理FFplay状态:', {
-                  duration: status.duration,
-                  position: status.position,
-                  volume: status.volume,
-                  is_playing: status.is_playing
-                })
+                if (typeof logInfo === 'function') {
+                  logInfo('立即处理FFplay状态:', {
+                    duration: status.duration,
+                    position: status.position,
+                    volume: status.volume,
+                    is_playing: status.is_playing
+                  })
+                }
                 
                 ffplayDuration.value = status.duration || ffplayDuration.value
                 ffplayPosition.value = status.position || ffplayPosition.value
@@ -3820,26 +4079,36 @@ const seek = async () => {
                 // 更新播放状态
                 isPlaying.value = status.is_playing || false
                 console.log('【SEEK】isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                if (typeof logInfo === 'function') {
+                  logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
+                }
 
                 // 只有当status.position有效时才更新currentPosition
                 if (status.position !== undefined && status.position !== null) {
                   console.log('【SEEK】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  if (typeof logInfo === 'function') {
+                    logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
+                  }
                   currentPosition.value = status.position
                   frontendPosition = status.position // 更新前端计算的播放位置
                   console.log('【SEEK】立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
-                  logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                  if (typeof logInfo === 'function') {
+                    logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                  }
                 }
                 
                 // 计算进度百分比
                 if (ffplayDuration.value > 0) {
                   const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
                   console.log('【SEEK】立即更新进度百分比前:', progress.value, '更新后:', newProgress)
-                  logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  if (typeof logInfo === 'function') {
+                    logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
+                  }
                   progress.value = newProgress
                   console.log('【SEEK】立即更新进度百分比:', progress.value, '%')
-                  logInfo('立即更新进度百分比:', progress.value, '%')
+                  if (typeof logInfo === 'function') {
+                    logInfo('立即更新进度百分比:', progress.value, '%')
+                  }
                 }
               }
             } catch (error) {
@@ -3851,11 +4120,15 @@ const seek = async () => {
           // 确保FFplay状态监控定时器正在运行
           if (!ffplayStatusInterval) {
             console.log('【SEEK】FFplay状态监控定时器未运行，启动一个新的')
-            logInfo('FFplay状态监控定时器未运行，启动一个新的')
+            if (typeof logInfo === 'function') {
+              logInfo('FFplay状态监控定时器未运行，启动一个新的')
+            }
             // 启动FFplay状态监控定时器
             ffplayStatusInterval = window.setInterval(() => {
               console.log('【FFplay】状态监控定时器触发')
-              logInfo('FFplay状态监控定时器触发')
+              if (typeof logInfo === 'function') {
+                logInfo('FFplay状态监控定时器触发')
+              }
               // 使用IIFE包装async函数
               (async () => {
                 try {
@@ -4104,9 +4377,6 @@ const seek = async () => {
     // 设置音频元素的当前位置
     console.log('【SEEK】准备设置 audioElementRef.currentTime =', actualPosition, 's')
     logInfo('【SEEK】设置 audioElement.currentTime =', actualPosition, 's')
-
-    // 保存当前播放状态
-    const wasPaused = audioElementRef.paused
 
     // 直接设置currentTime，不暂停（因为暂停会导致HTTP Range请求问题）
     console.log('【SEEK】直接设置 currentTime（不暂停）')
@@ -4382,27 +4652,6 @@ const scrollToCurrentLyric = () => {
   }
 }
 
-// 滚动到当前歌词（主界面）
-const scrollToMainCurrentLyric = () => {
-  const index = currentLyricIndex.value
-  if (index >= 0 && mainLyricsContainer.value) {
-    const lineElement = mainLyricLineRefs.value[index]
-    if (lineElement && mainLyricsContainer.value) {
-      const container = mainLyricsContainer.value
-      const lineTop = lineElement.offsetTop
-      const lineHeight = lineElement.offsetHeight
-      const containerHeight = container.clientHeight
-      const scrollTop = lineTop - containerHeight / 2 + lineHeight / 2
-      
-      container.scrollTo({
-        top: Math.max(0, scrollTop),
-        behavior: 'smooth'
-      })
-      logInfo('主界面歌词滚动: 滚动到歌词行', index)
-    }
-  }
-}
-
 // 关闭封面模态框
 const closeCoverModal = () => {
   showCoverModal.value = false
@@ -4546,53 +4795,68 @@ const fetchLyric = async () => {
     
     const title = editTagsForm.value.title || songToEdit.value.title
     const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`.trim()
+    const album = editTagsForm.value.album || songToEdit.value.album
     
-    if (!keyword) {
-      logInfo('【在线歌词】关键词为空')
+    if (!title || !artist) {
+      logInfo('【在线歌词】歌曲标题或艺术家为空')
       alert('请先填写歌曲标题和艺术家信息')
       return
     }
     
-    logInfo('【在线歌词】搜索关键词:', keyword)
+    logInfo('【在线歌词】搜索:', { title, artist, album })
     
-    // 使用新的音乐数据服务获取歌词
+    // 使用多源歌词服务获取歌词
     let result
     try {
-      result = await musicDataService.getSongInfoWithLyric(keyword)
+      result = await multiSourceLyricService.getLyric({
+        id: songToEdit.value.id,
+        title,
+        artist,
+        album,
+        filePath: songToEdit.value.path
+      }, 'manual', true)
     } catch (apiError) {
       logError('【在线歌词】API调用失败:', apiError)
       alert('网络请求失败，请检查网络连接')
       return
     }
     
-    logInfo('【在线歌词】API返回结果:', result)
+    logInfo('【在线歌词】多源服务返回结果:', result)
     
-    if (!result || !result.song) {
-      logInfo('【在线歌词】未找到匹配的歌曲')
-      alert('未找到匹配的歌曲，请修改歌曲信息后重试')
+    if (!result.success || !result.bestScore) {
+      logInfo('【在线歌词】未找到歌词')
+      alert('未找到歌词，请尝试修改搜索信息后重试')
       return
     }
     
-    const lyricData = result.lyricData
-    if (!lyricData || (!lyricData.lrcData.length && !lyricData.yrcData.length)) {
-      logInfo('【在线歌词】未找到歌词数据')
-      alert('找到歌曲但未找到歌词，请尝试手动搜索')
-      return
+    // 将歌词转换为LRC格式
+    let lrcContent = ''
+    if (result.bestScore.lyricLines && result.bestScore.lyricLines.length > 0) {
+      lrcContent = result.bestScore.lyricLines.map(line => {
+        // 适配不同的歌词行格式
+        const time = line.time !== undefined ? line.time : (line.startTime !== undefined ? line.startTime : 0)
+        let text = ''
+        if (line.text) {
+          text = line.text
+        } else if (line.words && Array.isArray(line.words)) {
+          text = line.words.map((w: any) => w.word).join('')
+        }
+        return `[${formatTime(time)}]${text}`
+      }).join('\n')
+    } else if (result.bestScore.lyricText) {
+      // 如果有原始的lyricText，直接使用
+      lrcContent = result.bestScore.lyricText
     }
     
-    const lyricLines = lyricData.lrcData.length > 0 ? lyricData.lrcData : lyricData.yrcData
-    
-    // 转换为LRC格式
-    const lrcContent = lyricLines.map(line => {
-      const text = line.words.map(w => w.word).join('')
-      return `[${formatTime(line.startTime)}]${text}`
-    }).join('\n')
+    if (!lrcContent) {
+      logInfo('【在线歌词】歌词内容为空')
+      alert('找到歌词但内容为空，请尝试其他来源')
+      return
+    }
     
     editTagsForm.value.lyric = lrcContent
     
-    logInfo('【在线歌词】找到歌曲:', result.song.title, '歌词行数:', lyricLines.length, 
-             '是否有TTML:', result.hasTTML, '是否有QRC:', result.hasQRC)
+    logInfo('【在线歌词】获取成功，来源:', result.bestSource, '歌词行数:', result.bestScore.lyricLines?.length || 0)
     
     alert('获取歌词成功')
   } catch (error) {
@@ -4905,49 +5169,6 @@ const changeCover = async () => {
   } catch (error) {
     logError('选择封面失败:', error)
     alert('选择封面失败，请重试')
-  }
-}
-
-// 在线匹配标签
-const onlineMatch = async () => {
-  try {
-    if (!songToEdit.value) return
-    
-    // 显示加载提示
-    alert('正在在线匹配标签，请稍候...')
-    
-    // 准备匹配参数
-    const title = editTagsForm.value.title || songToEdit.value.title
-    const artist = editTagsForm.value.artist || songToEdit.value.artist
-    
-    // 调用搜索API
-    const response = await matchSong(title, artist, '', 0, '')
-    const song = response.data.result?.songs?.[0]
-    
-    if (!song) {
-      alert('无法匹配到歌曲信息，请修改后重试')
-      return
-    }
-    
-    // 更新标签信息
-    editTagsForm.value.title = song.name
-    editTagsForm.value.artist = song.artists?.map((ar: any) => ar.name).join(' / ') || ''
-    editTagsForm.value.album = song.album?.name || ''
-    
-    // 获取歌词
-    try {
-      const lyricResponse = await songLyric(song.id)
-      if (lyricResponse.data.lrc?.lyric) {
-        editTagsForm.value.lyric = lyricResponse.data.lrc.lyric
-      }
-    } catch (lyricError) {
-      logError('获取歌词失败:', lyricError)
-    }
-    
-    alert('在线匹配标签成功')
-  } catch (error) {
-    logError('在线匹配标签失败:', error)
-    alert('在线匹配标签失败，请检查网络连接后重试')
   }
 }
 
@@ -5317,7 +5538,7 @@ const updateProgress = () => {
 let isPlaybackFinished = false
 
 // 播放完成检测定时器ID
-let playbackTimerId: number | null = null
+let playbackTimerId: ReturnType<typeof setTimeout> | null = null
 
 const handlePlaybackFinished = async (autoPlay: boolean = true) => {
   // 防止重复触发
@@ -5469,7 +5690,7 @@ onMounted(() => {
     lyricsPosition.value = (savedSettings as any).lyricsPosition || 'bottom'
     enableTranscode.value = savedSettings.enableTranscode ?? true
     forceTranscode.value = savedSettings.forceTranscode ?? false
-    
+
     // 初始化语言服务
     logInfo('【初始化】开始初始化语言服务')
     await i18nService.initialize(language.value)
@@ -5686,14 +5907,6 @@ watch(language, async (newLanguage) => {
     }
   }
 })
-
-// 格式化时长
-const formatDuration = (seconds: number): string => {
-  if (isNaN(seconds)) return '0:00'
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = Math.floor(seconds % 60)
-  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`
-}
 
 // 浏览音乐目录（仅浏览器）
 const browseMusicDirectory = () => {
@@ -6217,6 +6430,159 @@ body, html {
 }
 
 /* 过滤控制区 */
+/* 选择工具栏样式 */
+.selection-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+}
+
+.selection-toolbar.selection-mode-active {
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
+  border-color: rgba(76, 175, 80, 0.2);
+}
+
+.selection-toolbar.has-selection {
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.25) 0%, rgba(76, 175, 80, 0.1) 100%);
+  border-color: rgba(76, 175, 80, 0.4);
+  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.15);
+}
+
+.selection-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.select-all-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.select-all-checkbox input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  accent-color: #4CAF50;
+  border-radius: 4px;
+}
+
+.checkbox-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #ffffff);
+}
+
+.selection-count {
+  font-size: 13px;
+  color: #4CAF50;
+  font-weight: 600;
+  padding: 4px 12px;
+  background: rgba(76, 175, 80, 0.2);
+  border-radius: 20px;
+}
+
+.selection-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-action-btn,
+.selection-mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary, #ffffff);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.selection-action-btn:hover,
+.selection-mode-btn:hover {
+  background: rgba(76, 175, 80, 0.2);
+  border-color: rgba(76, 175, 80, 0.4);
+  transform: translateY(-1px);
+}
+
+.selection-action-btn.danger:hover {
+  background: rgba(244, 67, 54, 0.2);
+  border-color: rgba(244, 67, 54, 0.4);
+}
+
+.selection-action-btn .btn-icon,
+.selection-mode-btn .btn-icon {
+  font-size: 14px;
+}
+
+.selection-action-btn .btn-text,
+.selection-mode-btn .btn-text {
+  white-space: nowrap;
+}
+
+/* 歌曲行选中样式 */
+.song-row.selected {
+  background: rgba(76, 175, 80, 0.15) !important;
+}
+
+/* 复选框列样式 */
+.col-checkbox {
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.col-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #4CAF50;
+  border-radius: 4px;
+}
+
+/* 浅色主题适配 */
+.tplayer-container.light .selection-toolbar {
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(76, 175, 80, 0.03) 100%);
+  border-color: rgba(76, 175, 80, 0.2);
+}
+
+.tplayer-container.light .selection-toolbar.has-selection {
+  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
+}
+
+.tplayer-container.light .selection-action-btn,
+.tplayer-container.light .selection-mode-btn {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+.tplayer-container.light .selection-action-btn:hover,
+.tplayer-container.light .selection-mode-btn:hover {
+  background: rgba(76, 175, 80, 0.15);
+}
+
+.tplayer-container.light .song-row.selected {
+  background: rgba(76, 175, 80, 0.1) !important;
+}
+
 .filter-controls {
   margin-bottom: 20px;
 }

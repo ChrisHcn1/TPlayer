@@ -151,3 +151,25 @@ $null
 test/
 tests/
 __tests__/
+
+# Workbuddy memory and logs
+.workbuddy/
+
+# Temporary scripts and logs
+fix-log.js
+temp_log_fix.js
+fix_seek.py
+
+# Temporary screenshots
+*.png
+!public/*.png
+!public/htc/*.png
+!src-tauri/icons/*.png
+
+# Documentation files (except README.md)
+APP_DESCRIPTIONS.md
+MSIX_PACKAGING_GUIDE.md
+PRIVACY_POLICY.md
+STORE_PUBLISHING_GUIDE.md
+BUTTON_STYLE_GUIDE.md
+SEEK_DEBUG.md

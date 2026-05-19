@@ -1708,3 +1708,117 @@ pub async fn open_readme() -> Result<(), String> {
     Ok(())
 }
 
+// 设置自定义FFmpeg路径
+#[tauri::command]
+pub fn set_ffmpeg_path(path: Option<String>) -> Result<(), String> {
+    ffmpeg_transcoder::set_custom_ffmpeg_path(path.as_deref());
+    if let Some(p) = path {
+        println!("[FFmpeg] 用户自定义路径已设置为: {}", p);
+    } else {
+        println!("[FFmpeg] 用户自定义路径已清除");
+    }
+    Ok(())
+}
+
+// 清理播放器资源（在程序退出时调用）
+pub fn cleanup_player_resources() {
+    println!("[播放器] 清理播放器资源");
+    
+    // 停止进度更新线程
+    stop_progress_updater();
+    
+    // 停止FFplay播放
+    let _ = ffmpeg_transcoder::stop_ffplay();
+    
+    // 清理全局播放器状态
+    unsafe {
+        let _lock = PLAYER_MUTEX.lock().unwrap();
+        if GLOBAL_PLAYER.is_some() {
+            println!("[播放器] 清理全局播放器");
+            GLOBAL_PLAYER = None;
+        }
+    }
+    
+    println!("[播放器] 播放器资源清理完成");
+}
+
+// 音频格式转换相关命令
+
+// 转换音频文件
+#[tauri::command]
+pub async fn convert_audio(
+    input_path: String,
+    output_folder: String,
+    output_format: String,
+    codec: String,
+    bitrate: Option<String>,
+    compression: Option<String>,
+) -> Result<String, String> {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    
+    // 获取FFmpeg路径
+    let ffmpeg_path = ffmpeg_transcoder::TranscodeCache::get_ffmpeg_path()
+        .ok_or_else(|| "未找到FFmpeg".to_string())?;
+    
+    // 构建输出路径
+    let input_path_obj = Path::new(&input_path);
+    let file_stem = input_path_obj.file_stem()
+        .ok_or_else(|| "无法获取文件名".to_string())?
+        .to_string_lossy();
+    
+    let output_path = Path::new(&output_folder)
+        .join(format!("{}.{}", file_stem, output_format))
+        .to_string_lossy()
+        .to_string();
+    
+    // 构建FFmpeg命令参数
+    let mut args: Vec<String> = vec![
+        "-i".to_string(),
+        input_path.clone(),
+        "-c:a".to_string(),
+        codec,
+        "-y".to_string(), // 覆盖已存在的文件
+        "-loglevel".to_string(),
+        "quiet".to_string(),
+    ];
+    
+    // 添加比特率参数
+    if let Some(br) = bitrate {
+        args.push("-b:a".to_string());
+        args.push(br);
+    }
+    
+    // 添加压缩级别参数（针对FLAC等格式）
+    if let Some(comp) = compression {
+        args.push("-compression_level".to_string());
+        args.push(comp);
+    }
+    
+    // 添加输出路径
+    args.push(output_path.clone());
+    
+    // 执行FFmpeg命令
+    let mut cmd = Command::new(&ffmpeg_path);
+    cmd.args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    
+    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    let result = cmd.output()
+        .map_err(|e| format!("执行FFmpeg命令失败: {}", e))?;
+    
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("转换失败: {}", stderr));
+    }
+    
+    Ok(output_path)
+}
+

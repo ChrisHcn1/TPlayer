@@ -32,7 +32,9 @@
     "dark": "Dark",
     "light": "Light",
     "about": "About",
-    "viewAbout": "View About"
+    "viewAbout": "View About",
+    "enableNewSelectionUI": "Enable New Selection UI",
+    "enableNewSelectionUIDesc": "Modern multi-select interface with batch operations"
   },
   "playlist": {
     "title": "Playlist",
@@ -133,5 +135,14 @@
     "selectCover": "Select Cover",
     "getCover": "Get Cover",
     "clickToChangeCover": "Click to Change Cover"
+  },
+  "selection": {
+    "selectAll": "Select All",
+    "selected": "selected",
+    "addToPlaylist": "Add to Queue",
+    "playAll": "Play Selected",
+    "delete": "Delete",
+    "clear": "Clear Selection",
+    "enterMode": "Enter Selection Mode"
   }
 }

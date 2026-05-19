@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, Duration};
 use std::fs;
 use std::env;
+use once_cell::sync::Lazy;
 
 // 日志开关：设置为 false 可禁用所有日志输出
 #[allow(dead_code)]
@@ -26,6 +27,29 @@ macro_rules! log_error {
             eprintln!($($arg)*);
         }
     };
+}
+
+// FFmpeg路径缓存
+static FFMPEG_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static FFPROBE_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static FFPLAY_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// 用户自定义FFmpeg路径
+static CUSTOM_FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// 设置用户自定义FFmpeg路径
+pub fn set_custom_ffmpeg_path(path: Option<&str>) {
+    let mut cache = CUSTOM_FFMPEG_PATH.lock().unwrap();
+    *cache = path.map(|p| p.to_string());
+    // 清除缓存，下次调用时重新搜索
+    *FFMPEG_PATH_CACHE.lock().unwrap() = None;
+    *FFPROBE_PATH_CACHE.lock().unwrap() = None;
+    *FFPLAY_PATH_CACHE.lock().unwrap() = None;
+}
+
+// 获取用户自定义FFmpeg路径
+fn get_custom_ffmpeg_path() -> Option<String> {
+    CUSTOM_FFMPEG_PATH.lock().unwrap().clone()
 }
 
 // rodio原生支持的音频格式（无需转码）
@@ -125,7 +149,37 @@ impl TranscodeCache {
     
     // 获取 FFmpeg 路径（公共方法，用于检查FFmpeg是否可用）
     pub fn get_ffmpeg_path() -> Option<String> {
-        // 0. 首先检查应用内置的ffmpeg
+        // 首先检查缓存
+        let mut cache = FFMPEG_PATH_CACHE.lock().unwrap();
+        if let Some(path) = &*cache {
+            return Some(path.clone());
+        }
+
+        // 搜索FFmpeg路径
+        let result = Self::search_ffmpeg_path();
+        
+        // 缓存结果
+        if let Some(path) = &result {
+            *cache = Some(path.clone());
+        }
+        
+        result
+    }
+    
+    // 实际搜索FFmpeg路径的内部方法
+    fn search_ffmpeg_path() -> Option<String> {
+        // 0. 首先检查用户自定义路径
+        if let Some(custom_path) = get_custom_ffmpeg_path() {
+            let ffmpeg_path = PathBuf::from(&custom_path);
+            if ffmpeg_path.exists() {
+                println!("[FFmpeg] 使用用户自定义路径: {:?}", ffmpeg_path);
+                return Some(ffmpeg_path.to_string_lossy().to_string());
+            }
+            // 如果自定义路径不存在，继续尝试其他方式
+            println!("[FFmpeg] 用户自定义路径不存在: {:?}", ffmpeg_path);
+        }
+        
+        // 1. 首先检查应用内置的ffmpeg
         // 开发环境：直接检查src-tauri/bin/ffmpeg.exe
         let current_dir = std::env::current_dir().ok()?;
         let dev_ffmpeg = current_dir.join("src-tauri").join("bin").join("ffmpeg.exe");
@@ -144,14 +198,14 @@ impl TranscodeCache {
             }
         }
         
-        // 1. 检查环境变量
+        // 2. 检查环境变量
         if let Ok(ffmpeg_path) = env::var("FFMPEG_PATH") {
             if Path::new(&ffmpeg_path).exists() {
                 return Some(ffmpeg_path);
             }
         }
         
-        // 2. 检查 PATH 中的 ffmpeg
+        // 3. 检查 PATH 中的 ffmpeg
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-version")
         .stdout(Stdio::null())
@@ -168,7 +222,7 @@ impl TranscodeCache {
         return Some("ffmpeg".to_string());
     }
         
-        // 3. 检查常见安装路径
+        // 4. 检查常见安装路径
         let common_paths = [
             r"C:\ffmpeg\bin\ffmpeg.exe",
             r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
@@ -185,7 +239,38 @@ impl TranscodeCache {
     }
     
     pub fn get_ffprobe_path() -> Option<String> {
-        // 0. 首先检查应用内置的ffprobe
+        // 首先检查缓存
+        let mut cache = FFPROBE_PATH_CACHE.lock().unwrap();
+        if let Some(path) = &*cache {
+            return Some(path.clone());
+        }
+
+        // 搜索ffprobe路径
+        let result = Self::search_ffprobe_path();
+        
+        // 缓存结果
+        if let Some(path) = &result {
+            *cache = Some(path.clone());
+        }
+        
+        result
+    }
+    
+    // 实际搜索ffprobe路径的内部方法
+    fn search_ffprobe_path() -> Option<String> {
+        // 0. 首先检查用户自定义路径目录
+        if let Some(custom_path) = get_custom_ffmpeg_path() {
+            let custom_path_buf = PathBuf::from(&custom_path);
+            if let Some(custom_dir) = custom_path_buf.parent() {
+                let ffprobe_path = custom_dir.join("ffprobe.exe");
+                if ffprobe_path.exists() {
+                    println!("[FFmpeg] 使用用户自定义路径的ffprobe: {:?}", ffprobe_path);
+                    return Some(ffprobe_path.to_string_lossy().to_string());
+                }
+            }
+        }
+        
+        // 1. 首先检查应用内置的ffprobe
         // 开发环境：直接检查src-tauri/bin/ffprobe.exe
         let current_dir = std::env::current_dir().ok()?;
         let dev_ffprobe = current_dir.join("src-tauri").join("bin").join("ffprobe.exe");
@@ -246,7 +331,38 @@ impl TranscodeCache {
     
     // 获取 FFplay 路径（公共方法，用于检查FFplay是否可用）
     pub fn get_ffplay_path() -> Option<String> {
-        // 0. 首先检查应用内置的ffplay
+        // 首先检查缓存
+        let mut cache = FFPLAY_PATH_CACHE.lock().unwrap();
+        if let Some(path) = &*cache {
+            return Some(path.clone());
+        }
+
+        // 搜索ffplay路径
+        let result = Self::search_ffplay_path();
+        
+        // 缓存结果
+        if let Some(path) = &result {
+            *cache = Some(path.clone());
+        }
+        
+        result
+    }
+    
+    // 实际搜索ffplay路径的内部方法
+    fn search_ffplay_path() -> Option<String> {
+        // 0. 首先检查用户自定义路径目录
+        if let Some(custom_path) = get_custom_ffmpeg_path() {
+            let custom_path_buf = PathBuf::from(&custom_path);
+            if let Some(custom_dir) = custom_path_buf.parent() {
+                let ffplay_path = custom_dir.join("ffplay.exe");
+                if ffplay_path.exists() {
+                    println!("[FFmpeg] 使用用户自定义路径的ffplay: {:?}", ffplay_path);
+                    return Some(ffplay_path.to_string_lossy().to_string());
+                }
+            }
+        }
+        
+        // 1. 首先检查应用内置的ffplay
         // 开发环境：使用CARGO_MANIFEST_DIR检查src-tauri/bin/ffplay.exe
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dev_ffplay = manifest_dir.join("bin").join("ffplay.exe");
@@ -269,14 +385,14 @@ impl TranscodeCache {
             }
         }
         
-        // 1. 检查环境变量
+        // 2. 检查环境变量
         if let Ok(ffplay_path) = env::var("FFPLAY_PATH") {
             if Path::new(&ffplay_path).exists() {
                 return Some(ffplay_path);
             }
         }
         
-        // 2. 检查 PATH 中的 ffplay
+        // 3. 检查 PATH 中的 ffplay
         let mut cmd = Command::new("ffplay");
         cmd.arg("-version")
             .stdout(Stdio::null())
@@ -293,7 +409,7 @@ impl TranscodeCache {
             return Some("ffplay".to_string());
         }
         
-        // 3. 检查常见安装路径
+        // 4. 检查常见安装路径
         let common_paths = [
             r"C:\ffmpeg\bin\ffplay.exe",
             r"C:\Program Files\ffmpeg\bin\ffplay.exe",
@@ -811,8 +927,6 @@ impl TranscodeCache {
 }
 
 // 全局转码缓存实例
-use once_cell::sync::Lazy;
-
 static TRANSCODE_CACHE: Lazy<Arc<Mutex<Option<TranscodeCache>>>> = 
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
@@ -955,6 +1069,14 @@ static PAUSED_POSITION: Mutex<Option<f64>> = Mutex::new(None);
 // 监控线程句柄
 static MONITOR_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
+// FFplay 播放开始的 Instant（用于精确计算播放位置）
+// 使用 Mutex<Option<std::time::Instant>> 存储
+static FFPLAY_START_INSTANT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+// FFplay 播放开始时的起始偏移（seek 后的起始秒数）
+static FFPLAY_START_OFFSET: Mutex<f64> = Mutex::new(0.0);
+// 监控线程退出标志：每次 start_ffplay_monitor 时自增，旧线程发现版本号不一致则退出
+static MONITOR_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 // 清理FFplay资源（在程序退出时调用）
 pub fn cleanup_ffplay() {
     println!("[FFplay] 清理FFplay资源");
@@ -1047,6 +1169,10 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
         .map_err(|e| format!("启动FFplay失败: {}", e))?;
 
     println!("[FFplay] 进程已启动，PID: {}", child.id());
+    
+    // 增加进程计数
+    let old_count = FFPLAY_PROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
+    println!("[FFplay] 进程计数增加: {} -> {}", old_count, old_count + 1);
 
     // 保存进程句柄
     {
@@ -1058,11 +1184,23 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
     let audio_info = get_audio_info(&path);
     let mut final_duration = 300.0; // 先设置默认值
     
+    // 记录起始偏移量（用于后续精确计算位置）
+    let start_offset = start_time.unwrap_or(0.0);
+    {
+        let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+        *offset = start_offset;
+    }
+    // 记录起始时刻
+    {
+        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+        *instant = Some(std::time::Instant::now());
+    }
+
     // 更新播放状态
     {
         let mut status = FFPLAY_STATUS.lock().unwrap();
         status.is_playing = true;
-        status.position = start_time.unwrap_or(0.0);
+        status.position = start_offset;
 
     // 尝试获取音频时长，优先使用ffprobe获取的时长
         if let Some(info) = &audio_info {
@@ -1138,12 +1276,19 @@ pub fn stop_ffplay() -> Result<String, String> {
         }
     }
     
+    // 停止时钟，避免进度继续累加
+    {
+        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+        *instant = None;
+    }
+
     // 更新播放状态
     {
         let mut status = FFPLAY_STATUS.lock().unwrap();
         status.is_playing = false;
-        // 重置position，避免下一首歌曲继承上一首的进度
+        // 重置position为0，避免新曲目继承上一首的播放进度
         status.position = 0.0;
+        println!("[FFplay] 停止播放，重置position为0");
     }
     
     Ok("FFplay已停止".to_string())
@@ -1175,6 +1320,17 @@ pub fn pause_ffplay() -> Result<String, String> {
             // 保存当前播放位置
             let paused_position = status.position;
             drop(status);
+            
+            // 清除起始时刻，停止时钟推进；将当前位置存入 FFPLAY_START_OFFSET
+            // 以便恢复时从暂停处继续计时
+            {
+                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+                *instant = None;
+            }
+            {
+                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+                *offset = paused_position;
+            }
             
             // 保存到全局变量
             let mut paused_pos = PAUSED_POSITION.lock().unwrap();
@@ -1216,6 +1372,12 @@ pub fn resume_ffplay() -> Result<String, String> {
                 *paused_pos
             };
             
+            // 重置起始时刻为当前时刻，使监控线程从暂停位置继续计时
+            {
+                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+                *instant = Some(std::time::Instant::now());
+            }
+            
             // 更新播放状态
             let mut status = FFPLAY_STATUS.lock().unwrap();
             status.is_playing = true;
@@ -1223,6 +1385,10 @@ pub fn resume_ffplay() -> Result<String, String> {
             // 从保存的位置恢复
             if let Some(pos) = paused_position {
                 status.position = pos;
+                // 确保 FFPLAY_START_OFFSET 也反映暂停位置
+                drop(status);
+                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+                *offset = pos;
             }
             
             println!("[FFplay] 恢复播放");
@@ -1245,17 +1411,17 @@ pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Valu
         let status = FFPLAY_STATUS.lock().unwrap();
         status.is_playing
     };
+    println!("[FFplay] seek前播放状态: {}", was_playing);
     
-    // 停止当前播放
-    stop_ffplay()?;
-    
-    // 从指定位置重新开始播放
+    // 直接调用 play_with_ffplay，它会自动处理停止当前播放
+    // 不需要先调用 stop_ffplay()，因为 play_with_ffplay() 已经会调用
     let result = play_with_ffplay(path, Some(position), None).await;
     
-    // 如果之前在播放，确保恢复播放状态
+    // 如果之前在播放，确保恢复播放状态（play_with_ffplay已经设置为true）
     if was_playing {
         let mut status = FFPLAY_STATUS.lock().unwrap();
         status.is_playing = true;
+        println!("[FFplay] 恢复播放状态为true");
     }
     
     println!("[FFplay] seek完成: {:?}", result);
@@ -1274,20 +1440,26 @@ pub fn set_ffplay_volume(volume: f32) -> Result<String, String> {
 
 // 启动FFplay状态监控线程
 fn start_ffplay_monitor() {
-    // 停止之前的监控线程
-    let mut old_thread = MONITOR_THREAD.lock().unwrap();
-    if let Some(handle) = old_thread.take() {
-        drop(old_thread);
-        // 等待旧线程结束
-        let _ = handle.join();
-        println!("[FFplay] 已停止旧的监控线程");
+    // 自增 generation，旧线程检测到版本号变化后会自行退出，无需 join 阻塞
+    let my_gen = MONITOR_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+    // 丢弃旧的线程句柄（不等待它结束，让它自行退出）
+    {
+        let mut old_thread = MONITOR_THREAD.lock().unwrap();
+        let _ = old_thread.take(); // 旧 JoinHandle 被 drop，但线程仍在后台，会在下次循环自行退出
     }
     
-    let thread = std::thread::spawn(|| {
-        println!("[FFplay] 状态监控线程已启动");
+    let thread = std::thread::spawn(move || {
+        println!("[FFplay] 状态监控线程已启动 (gen={})", my_gen);
         
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(500)); // 每500毫秒更新一次，提高响应速度
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // 检测是否被新一代监控线程取代，如果是则退出
+            if MONITOR_GENERATION.load(Ordering::SeqCst) != my_gen {
+                println!("[FFplay] 监控线程已被新实例取代，退出 (gen={})", my_gen);
+                break;
+            }
             
             // 检查是否有FFplay进程在运行
             let mut process = FFPLAY_PROCESS.lock().unwrap();
@@ -1298,30 +1470,44 @@ fn start_ffplay_monitor() {
                         // 进程已结束，更新状态
                         println!("[FFplay] 进程已结束，退出状态: {:?}", exit_status);
                         drop(process);
-                        let _ = stop_ffplay();
+                        // 更新播放状态，标记为播放完成并将position设置为duration
+                        let mut status = FFPLAY_STATUS.lock().unwrap();
+                        status.is_playing = false;
+                        // 将position设置为duration，确保前端能检测到播放完成
+                        status.position = status.duration;
+                        println!("[FFplay] 播放完成，位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
+                        // 清除时钟
+                        drop(status);
+                        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+                        *instant = None;
                         break;
                     }
                     Ok(None) => {
-                        // 进程仍在运行，更新播放位置
+                        // 进程仍在运行，基于真实时钟更新播放位置
                         drop(process);
                         
+                        // 读取起始时刻和起始偏移
+                        let (start_instant, start_offset) = {
+                            let instant = FFPLAY_START_INSTANT.lock().unwrap();
+                            let offset = FFPLAY_START_OFFSET.lock().unwrap();
+                            (*instant, *offset)
+                        };
+                        
                         let mut status = FFPLAY_STATUS.lock().unwrap();
-                        // 检查是否正在播放且进程在运行
-                        if status.is_playing && status.position < status.duration {
-                            // 只有当位置小于时长时才增加
-                            if status.position < status.duration - 0.5 {
-                                status.position += 0.5; // 每500毫秒增加0.5秒
-                            } else {
-                                // 已经接近结尾，将位置设置为时长，标记为播放完成
-                                status.position = status.duration;
-                                status.is_playing = false;
-                                println!("[FFplay] 播放状态: 播放完成, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
+                        if status.is_playing {
+                            // 使用真实经过时间计算当前位置
+                            if let Some(inst) = start_instant {
+                                let elapsed = inst.elapsed().as_secs_f64();
+                                let computed_position = start_offset + elapsed;
+                                // 限制不超过总时长
+                                if status.duration > 0.0 {
+                                    status.position = computed_position.min(status.duration);
+                                } else {
+                                    status.position = computed_position;
+                                }
                             }
-                            println!("[FFplay] 播放状态: 正在播放, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
-                        } else if !status.is_playing {
-                            // 暂停状态，不更新位置
-                            println!("[FFplay] 播放状态: 已暂停, 位置: {:.2}秒, 总时长: {:.2}秒", status.position, status.duration);
                         }
+                        // 暂停/播放状态下均不打印日志（避免每100ms刷屏）
                     }
                     Err(e) => {
                         // 检查失败，继续监控
@@ -1330,12 +1516,12 @@ fn start_ffplay_monitor() {
                 }
             } else {
                 // 没有FFplay进程，退出监控
-                println!("[FFplay] 没有FFplay进程，退出监控");
+                println!("[FFplay] 没有FFplay进程，退出监控 (gen={})", my_gen);
                 break;
             }
         }
         
-        println!("[FFplay] 状态监控线程已退出");
+        println!("[FFplay] 状态监控线程已退出 (gen={})", my_gen);
     });
     
     // 保存线程句柄
@@ -1350,6 +1536,15 @@ pub fn get_ffplay_status() -> Result<FFplayStatus, String> {
     println!("[get_ffplay_status] 返回状态: is_playing={}, position={:.2}, duration={:.2}",
         status.is_playing, status.position, status.duration);
     Ok(status.clone())
+}
+
+// 获取FFplay路径（用于检查FFplay是否可用）
+#[tauri::command]
+pub fn get_ffplay_path() -> Result<String, String> {
+    match TranscodeCache::get_ffplay_path() {
+        Some(path) => Ok(path),
+        None => Err("FFplay不可用".to_string()),
+    }
 }
 
 // 音频文件信息结构体

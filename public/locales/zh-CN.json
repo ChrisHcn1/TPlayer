@@ -32,7 +32,9 @@
     "dark": "深色",
     "light": "浅色",
     "about": "关于",
-    "viewAbout": "查看关于"
+    "viewAbout": "查看关于",
+    "enableNewSelectionUI": "启用新选择UI",
+    "enableNewSelectionUIDesc": "现代化多选界面，支持批量操作"
   },
   "playlist": {
     "title": "播放列表",
@@ -146,5 +148,35 @@
     "getCoverFailed": "获取封面失败",
     "selectCover": "选择封面",
     "clickToChangeCover": "点击更换封面"
+  },
+  "selection": {
+    "selectAll": "全选",
+    "selected": "已选择",
+    "addToPlaylist": "添加到队列",
+    "playAll": "播放选中",
+    "delete": "删除",
+    "clear": "取消选择",
+    "enterMode": "进入选择模式"
+  },
+  "converter": {
+    "title": "音频转换",
+    "sourceFiles": "源文件",
+    "dropFiles": "拖拽音频文件到此处",
+    "clickToSelect": "或点击选择文件",
+    "outputFormat": "输出格式",
+    "quality": "质量",
+    "low": "低",
+    "lowDesc": "文件小，质量一般",
+    "medium": "中",
+    "mediumDesc": "平衡质量和大小",
+    "high": "高",
+    "highDesc": "最高质量，文件较大",
+    "outputFolder": "输出目录",
+    "browse": "浏览",
+    "progress": "转换进度",
+    "start": "开始转换",
+    "converting": "转换中...",
+    "successCount": "成功转换 {count} 个文件",
+    "errorCount": "转换失败 {count} 个文件"
   }
 }

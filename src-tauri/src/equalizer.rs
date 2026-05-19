@@ -218,7 +218,7 @@ impl<S: Source<Item = f32>> EqualizedSource<S> {
     }
 
     // 处理单个样本
-    fn process_sample(&mut self, sample: f32, _channel: usize) -> f32 {
+    fn process_sample(&mut self, sample: f32, channel: usize) -> f32 {
         // 检查均衡器是否启用
         if !self.equalizer.enabled {
             return sample;
@@ -230,13 +230,12 @@ impl<S: Source<Item = f32>> EqualizedSource<S> {
             return sample;
         }
         
-        // 实现均衡器处理逻辑
-        // 这里使用简单的增益调整，实际应用中可能需要更复杂的滤波器
+        // 应用所有频段的biquad滤波器
         let mut processed_sample = sample;
+        for band in 0..10 {
+            processed_sample = self.apply_biquad(processed_sample, band, channel);
+        }
         
-        // 应用均衡器增益（这里只是一个简单的示例，实际实现需要根据频段计算）
-        // 由于我们没有完整的均衡器实现，这里暂时返回原始样本
-        // 后续可以添加更复杂的均衡器处理逻辑
         processed_sample
     }
 }

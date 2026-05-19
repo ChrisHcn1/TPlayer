@@ -83,6 +83,7 @@ fn main() {
             commands::close_window,
             commands::toggle_window_visibility,
             commands::open_readme,
+            commands::convert_audio,
             commands_cue::scan_cue_files,
             commands_cue::parse_cue_file_command,
             ffmpeg_transcoder::check_needs_transcode,
@@ -95,6 +96,7 @@ fn main() {
             ffmpeg_transcoder::seek_ffplay,
             ffmpeg_transcoder::set_ffplay_volume,
             ffmpeg_transcoder::get_ffplay_status,
+            ffmpeg_transcoder::get_ffplay_path,
             http_server::get_file_http_url,
             commands_cache::save_to_cache,
             commands_cache::get_cached_file,
@@ -108,10 +110,13 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle();
             
-            // 监听应用退出事件，清理FFplay资源
-            let app_handle_for_cleanup = app_handle.clone();
+            // 监听应用退出事件，清理资源
+            let _app_handle_for_cleanup = app_handle.clone();
             app.listen("tauri://close-requested", move |_| {
-                println!("[应用] 收到退出请求，清理FFplay资源");
+                println!("[应用] 收到退出请求，清理资源");
+                // 清理播放器资源（包括进度更新线程）
+                commands::cleanup_player_resources();
+                // 清理FFplay资源
                 ffmpeg_transcoder::cleanup_ffplay();
             });
             

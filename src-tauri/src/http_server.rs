@@ -4,6 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
 use urlencoding;
 
@@ -27,11 +28,34 @@ macro_rules! log_error {
     };
 }
 
+// 全局Token存储，用于鉴权
+static SERVER_TOKEN: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
+// 生成随机Token
+fn generate_token() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}", timestamp)
+}
+
+// 设置服务器Token
+pub fn set_server_token(token: &str) {
+    *SERVER_TOKEN.lock().unwrap() = token.to_string();
+}
+
+// 获取服务器Token
+pub fn get_server_token() -> String {
+    SERVER_TOKEN.lock().unwrap().clone()
+}
+
 // HTTP服务器
 #[derive(Clone)]
 pub struct HttpServer {
     listener: Arc<Option<TcpListener>>,
     port: u16,
+    token: String,
 }
 
 impl HttpServer {
@@ -40,16 +64,22 @@ impl HttpServer {
         // 尝试在 8000-9000 端口范围内找到一个可用端口
         let port = (8000..=9000)
             .find(|&p| TcpListener::bind("127.0.0.1:".to_string() + &p.to_string()).is_ok())
-            .ok_or_else(|| "无法找到可用端口".to_string())?;
+            .ok_or_else(|| "无法找到可用端口，端口范围 8000-9000 全部被占用".to_string())?;
 
         let listener = TcpListener::bind("127.0.0.1:".to_string() + &port.to_string())
             .map_err(|e| format!("绑定端口失败: {}", e))?;
 
+        // 生成随机Token
+        let token = generate_token();
+        set_server_token(&token);
+        
         log_info!("HTTP服务器启动在端口: {}", port);
+        log_info!("HTTP服务器Token: {}", token);
 
         let server = Self {
             listener: Arc::new(Some(listener)),
             port,
+            token,
         };
 
         // 启动服务器线程
@@ -64,11 +94,14 @@ impl HttpServer {
     // 运行HTTP服务器
     fn run(&self) {
         if let Some(listener) = &*self.listener {
+            log_info!("HTTP服务器开始监听端口: {}", self.port);
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        thread::spawn(|| {
-                            Self::handle_connection(stream);
+                        log_info!("收到新连接");
+                        let token_clone = self.token.clone();
+                        thread::spawn(move || {
+                            Self::handle_connection(stream, &token_clone);
                         });
                     }
                     Err(e) => {
@@ -79,18 +112,38 @@ impl HttpServer {
         }
     }
 
+    // 验证请求中的Token
+    fn validate_token(request: &str, valid_token: &str) -> bool {
+        // 从URL参数中提取token
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+
+        // 检查URL中是否包含有效的token参数
+        let token_param = format!("token={}", valid_token);
+        path.contains(&token_param)
+    }
+
     // 处理HTTP连接
-    fn handle_connection(mut stream: TcpStream) {
+    fn handle_connection(mut stream: TcpStream, token: &str) {
         let mut buffer = [0; 1024];
-        let _ = stream.read(&mut buffer);
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                log_error!("读取请求失败: {}", e);
+                return;
+            }
+        };
         
         // 检查请求是否为空
-        if buffer.iter().all(|&b| b == 0) {
+        if bytes_read == 0 || buffer.iter().all(|&b| b == 0) {
             log_error!("收到空请求");
             return;
         }
 
-        let request = String::from_utf8_lossy(&buffer[..]);
+        let request = String::from_utf8_lossy(&buffer[..bytes_read]);
         log_info!("收到请求: {}", request.lines().next().unwrap_or(""));
 
         // 解析请求路径
@@ -100,10 +153,23 @@ impl HttpServer {
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
 
-        // 处理文件请求
+        // 处理文件请求（需要Token鉴权）
         if path.starts_with("/file/") {
-            // 提取文件路径（移除/file/前缀）
-            let encoded_path = &path[6..];
+            // 验证Token
+            if !Self::validate_token(&request, token) {
+                log_error!("请求未携带有效Token，拒绝访问");
+                Self::send_error(&mut stream, 403, "Forbidden", "Invalid or missing token");
+                return;
+            }
+
+            // 提取文件路径（移除/file/前缀和token参数）
+            let mut encoded_path = &path[6..];
+            
+            // 移除可能存在的token参数
+            if let Some(token_pos) = encoded_path.find("?token=") {
+                encoded_path = &encoded_path[..token_pos];
+            }
+
             // 解码URL编码的路径
             let decoded = match urlencoding::decode(encoded_path) {
                 Ok(p) => p,
@@ -121,7 +187,14 @@ impl HttpServer {
             match File::open(file_path) {
                 Ok(mut file) => {
                     // 获取文件大小
-                    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    let file_size = match file.metadata() {
+                        Ok(m) => m.len(),
+                        Err(e) => {
+                            log_error!("获取文件元数据失败: {}", e);
+                            Self::send_error(&mut stream, 500, "Internal Server Error", "Failed to get file metadata");
+                            return;
+                        }
+                    };
                     
                     // 解析 Range 请求头
                     let range_header = request
@@ -138,9 +211,9 @@ impl HttpServer {
                         if parts.len() >= 2 {
                             let start = parts[0].parse::<u64>().unwrap_or(0).min(file_size);
                             let end = if parts[1].is_empty() {
-                                file_size - 1
+                                file_size.saturating_sub(1)
                             } else {
-                                parts[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1)
+                                parts[1].parse::<u64>().unwrap_or(file_size.saturating_sub(1)).min(file_size.saturating_sub(1))
                             };
                             
                             // 检查边界条件
@@ -157,21 +230,7 @@ impl HttpServer {
                     };
 
                     // 确定MIME类型
-                    let mime_type = if file_path.ends_with(".mp3") {
-                        "audio/mpeg"
-                    } else if file_path.ends_with(".flac") {
-                        "audio/flac"
-                    } else if file_path.ends_with(".wav") {
-                        "audio/wav"
-                    } else if file_path.ends_with(".ogg") {
-                        "audio/ogg"
-                    } else if file_path.ends_with(".aac") {
-                        "audio/aac"
-                    } else if file_path.ends_with(".m4a") {
-                        "audio/mp4"
-                    } else {
-                        "application/octet-stream"
-                    };
+                    let mime_type = Self::get_mime_type(file_path);
 
                     // 发送HTTP响应头
                     let response = if status_code == 206 {
@@ -188,6 +247,7 @@ impl HttpServer {
                              Content-Range: {}\r\n\
                              Accept-Ranges: bytes\r\n\
                              Connection: close\r\n\
+                             Access-Control-Allow-Origin: *\r\n\
                              \r\n",
                             mime_type,
                             content_length,
@@ -201,12 +261,17 @@ impl HttpServer {
                              Content-Length: {}\r\n\
                              Accept-Ranges: bytes\r\n\
                              Connection: close\r\n\
+                             Access-Control-Allow-Origin: *\r\n\
                              \r\n",
                             mime_type,
                             file_size
                         )
                     };
-                    let _ = stream.write(response.as_bytes());
+                    
+                    if let Err(e) = stream.write(response.as_bytes()) {
+                        log_error!("发送响应头失败: {}", e);
+                        return;
+                    }
 
                     // 如果是 Range 请求,先定位到起始位置
                     if start_byte > 0 {
@@ -253,6 +318,8 @@ impl HttpServer {
                             }
                         }
                     }
+                    
+                    log_info!("文件发送完成: {}", file_path);
                 }
                 Err(e) => {
                     log_error!("打开文件失败: {} - 路径: {}", e, file_path);
@@ -266,9 +333,46 @@ impl HttpServer {
                 .to_string() + "Content-Type: text/plain\r\n"
                 + "Content-Length: 9\r\n"
                 + "Connection: close\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
                 + "\r\n"
                 + "Not Found";
             let _ = stream.write(response.as_bytes());
+        }
+    }
+
+    // 获取MIME类型
+    fn get_mime_type(file_path: &str) -> &'static str {
+        if file_path.ends_with(".mp3") {
+            "audio/mpeg"
+        } else if file_path.ends_with(".flac") {
+            "audio/flac"
+        } else if file_path.ends_with(".wav") {
+            "audio/wav"
+        } else if file_path.ends_with(".ogg") {
+            "audio/ogg"
+        } else if file_path.ends_with(".aac") {
+            "audio/aac"
+        } else if file_path.ends_with(".m4a") {
+            "audio/mp4"
+        } else if file_path.ends_with(".alac") {
+            "audio/x-alac"
+        } else if file_path.ends_with(".webm") {
+            "audio/webm"
+        } else if file_path.ends_with(".opus") {
+            "audio/opus"
+        } else if file_path.ends_with(".mid") || file_path.ends_with(".midi") {
+            "audio/midi"
+        } else if file_path.ends_with(".ac3") {
+            "audio/ac3"
+        } else if file_path.ends_with(".dts") {
+            "audio/vnd.dts"
+        } else if file_path.ends_with(".wma") {
+            "audio/x-ms-wma"
+        } else if file_path.ends_with(".ape") {
+            "audio/ape"
+        } else {
+            // 默认音频类型
+            "audio/mpeg"
         }
     }
 
@@ -292,6 +396,7 @@ impl HttpServer {
              Content-Type: text/plain\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n\
+             Access-Control-Allow-Origin: *\r\n\
              \r\n\
              {}",
             code,
@@ -326,7 +431,9 @@ pub fn get_http_server() -> Option<Arc<HttpServer>> {
 pub fn get_file_url(file_path: &str) -> Option<String> {
     let server = get_http_server()?;
     let encoded_path = urlencoding::encode(file_path);
-    Some(format!("{}/file/{}", server.get_url(), encoded_path))
+    // 获取服务器Token并添加到URL参数中
+    let token = get_server_token();
+    Some(format!("{}/file/{}?token={}", server.get_url(), encoded_path, token))
 }
 
 // 获取文件的HTTP URL（Tauri命令）

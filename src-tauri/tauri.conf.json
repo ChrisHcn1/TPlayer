@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "TPlayer",
   "version": "1.0.2",
-  "identifier": "com.tplayer.app",
+  "identifier": "TPlayer.TPlayer",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -18,7 +18,7 @@
         "minWidth": 960,
         "minHeight": 600,
         "resizable": true,
-        "devtools": true,
+        "devtools": false,
         "decorations": false,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay",
@@ -26,33 +26,32 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.music-api.vercel.app https://*.netease.com https://*.qq.com;",
       "capabilities": [
         {
           "identifier": "default",
-          "description": "Default capabilities",
+          "description": "Default capabilities for TPlayer",
           "windows": ["main"],
           "permissions": [
             "dialog:allow-open",
             "dialog:default",
             {
               "identifier": "fs:allow-read-text-file",
-              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+              "allow": [{"path": "**/*"}]
             },
             {
               "identifier": "fs:allow-read-file",
-              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+              "allow": [{"path": "**/*"}]
             },
             {
               "identifier": "fs:allow-read-dir",
-              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+              "allow": [{"path": "**/*"}]
             },
             {
               "identifier": "fs:allow-exists",
-              "allow": [{"path": "$APPLOCALDATA/*"}, {"path": "$APPLOCALDATA/**/*"}, {"path": "$DESKTOP/*"}, {"path": "$DESKTOP/**/*"}, {"path": "$DOCUMENT/*"}, {"path": "$DOCUMENT/**/*"}, {"path": "$DOWNLOAD/*"}, {"path": "$DOWNLOAD/**/*"}, {"path": "$HOME/*"}, {"path": "$HOME/**/*"}, {"path": "$RESOURCE/*"}, {"path": "$RESOURCE/**/*"}, {"path": "**"}]
+              "allow": [{"path": "**/*"}]
             },
             "fs:default",
-            "core:webview:allow-internal-toggle-devtools",
             "core:webview:default",
             "core:app:default",
             "core:window:allow-show",
@@ -77,14 +76,20 @@
     "icon": [
       "icons/icon.svg",
       "icons/32x32.png",
+      "icons/48x48.png",
+      "icons/64x64.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
+      "icons/256x256.png",
+      "icons/512x512.png",
       "icons/icon.ico"
     ],
     "resources": [
       "bin/*"
     ],
-
+    "copyright": "2024 TPlayer Team. All rights reserved.",
+    "publisher": "CN=7A4B9F2D-1E8A-4C3D-8E9B-5F6A7D8C9E0F",
+    "shortDescription": "A modern music player with DSD support and advanced lyric features.",
+    "longDescription": "TPlayer is a powerful music player designed for audiophiles. Features include:\n\n- High-quality audio playback with DSD support via FFplay\n- Real-time lyrics display with multi-source lyric search\n- Support for multiple audio formats (MP3, FLAC, WAV, AAC, OGG, M4A, WMA, DSD)\n- Beautiful and intuitive user interface with dark/light themes\n- Playlist management and favorites\n- Crossfade and gapless playback\n- Online lyric matching from multiple sources\n- Multi-language support (Chinese, English and more)\n\nExperience the ultimate music listening experience with TPlayer.",
 
     "windows": {
       "webviewInstallMode": {
@@ -98,10 +103,10 @@
     },
     "fileAssociations": [
       {
-        "ext": ["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma"],
+        "ext": ["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "dsf", "dff"],
         "name": "Audio File",
         "description": "Audio file",
-        "role": "Editor"
+        "role": "Viewer"
       }
     ]
   }

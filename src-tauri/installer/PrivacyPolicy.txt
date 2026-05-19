@@ -1,0 +1,48 @@
+TPlayer Privacy Policy
+======================
+
+Effective Date: May 12, 2026
+
+1. Introduction
+---------------
+TPlayer ("we", "us", or "our") is committed to protecting your privacy. This Privacy Policy explains how we collect, use, and protect your personal information when you use our music player application ("App").
+
+2. Information We Collect
+-------------------------
+TPlayer is designed to respect your privacy. We do not collect, store, or transmit any personal information about you.
+
+2.1 Local Data
+- The App stores your music library metadata locally on your device
+- Playlist information, favorites, and settings are stored locally
+- Lyrics data is cached locally for offline use
+
+2.2 No Data Transmission
+- We do not send your personal data to any external servers
+- We do not track your usage or behavior
+- We do not collect device information or identifiers
+
+3. Third-Party Services
+-----------------------
+The App may access third-party services for lyric retrieval:
+- ChartLyrics (via proxy)
+- NetEase Music API
+- QQ Music API
+
+These services may collect anonymous usage data as per their own privacy policies.
+
+4. Your Rights
+--------------
+You have full control over your data:
+- All data is stored locally on your device
+- You can delete all App data at any time by uninstalling the application
+- You can clear cache and settings within the App
+
+5. Changes to This Policy
+-------------------------
+We may update this Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy in the App.
+
+6. Contact Us
+-------------
+If you have any questions about this Privacy Policy, please contact us at: support@tplayer.app
+
+TPlayer Team
