@@ -81,13 +81,17 @@
       "icons/128x128.png",
       "icons/256x256.png",
       "icons/512x512.png",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/Square44x44Logo.png",
+      "icons/Square150x150Logo.png",
+      "icons/Square310x310Logo.png",
+      "icons/StoreLogo.png"
     ],
     "resources": [
       "bin/*"
     ],
     "copyright": "2024 TPlayer Team. All rights reserved.",
-    "publisher": "CN=7A4B9F2D-1E8A-4C3D-8E9B-5F6A7D8C9E0F",
+    "publisher": "CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0",
     "shortDescription": "A modern music player with DSD support and advanced lyric features.",
     "longDescription": "TPlayer is a powerful music player designed for audiophiles. Features include:\n\n- High-quality audio playback with DSD support via FFplay\n- Real-time lyrics display with multi-source lyric search\n- Support for multiple audio formats (MP3, FLAC, WAV, AAC, OGG, M4A, WMA, DSD)\n- Beautiful and intuitive user interface with dark/light themes\n- Playlist management and favorites\n- Crossfade and gapless playback\n- Online lyric matching from multiple sources\n- Multi-language support (Chinese, English and more)\n\nExperience the ultimate music listening experience with TPlayer.",
 

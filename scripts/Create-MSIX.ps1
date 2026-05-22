@@ -104,7 +104,7 @@ try {
   IgnorableNamespaces="uap uap2 rescap">
 
   <Identity
-    Name="D57E920A.TPlayer"
+    Name="9MVC0GGNJHCK"
     Publisher="$publisher"
     Version="$Version" />
 
@@ -179,6 +179,10 @@ try {
     
     $assetsDir = Join-Path -Path $tempDir -ChildPath "Assets"
     New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
+    
+    # 同时复制到 icons 目录（用于向后兼容）
+    $iconsDir = Join-Path -Path $tempDir -ChildPath "icons"
+    New-Item -ItemType Directory -Path $iconsDir -Force | Out-Null
 
     $iconFiles = @(
         @{ Source = "src-tauri/icons/Square44x44Logo.png"; Dest = "Square44x44Logo.png" },
@@ -191,8 +195,12 @@ try {
 
     foreach ($icon in $iconFiles) {
         if (Test-Path -Path $icon.Source) {
+            # 复制到 Assets 目录
             Copy-Item -Path $icon.Source -Destination (Join-Path -Path $assetsDir -ChildPath $icon.Dest) -Force
-            Write-Success "Copied icon: $($icon.Dest)"
+            Write-Success "Copied icon to Assets: $($icon.Dest)"
+            
+            # 同时复制到 icons 目录（用于兼容性）
+            Copy-Item -Path $icon.Source -Destination (Join-Path -Path $iconsDir -ChildPath $icon.Dest) -Force
         } else {
             Write-Warning "Icon file not found: $($icon.Source)"
         }

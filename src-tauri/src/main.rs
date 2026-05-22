@@ -10,6 +10,7 @@ mod cue_parser;
 mod equalizer;
 mod ffmpeg_transcoder;
 mod http_server;
+mod audio_converter;
 use commands::PlayerState;
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
@@ -83,7 +84,8 @@ fn main() {
             commands::close_window,
             commands::toggle_window_visibility,
             commands::open_readme,
-            commands::convert_audio,
+            commands::check_audio_environment,
+            audio_converter::convert_audio,
             commands_cue::scan_cue_files,
             commands_cue::parse_cue_file_command,
             ffmpeg_transcoder::check_needs_transcode,
@@ -97,6 +99,7 @@ fn main() {
             ffmpeg_transcoder::set_ffplay_volume,
             ffmpeg_transcoder::get_ffplay_status,
             ffmpeg_transcoder::get_ffplay_path,
+            ffmpeg_transcoder::get_custom_ffmpeg_path_command,
             http_server::get_file_http_url,
             commands_cache::save_to_cache,
             commands_cache::get_cached_file,

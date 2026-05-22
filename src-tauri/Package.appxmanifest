@@ -8,14 +8,14 @@
   IgnorableNamespaces="uap uap2 uap3 rescap">
 
   <Identity
-    Name="D57E920A.TPlayer"
+    Name="9MVC0GGNJHCK"
     Publisher="CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0"
     Version="1.0.2.0" />
 
   <Properties>
     <DisplayName>TPlayer</DisplayName>
     <PublisherDisplayName>&#26684;&#21147;&#26862;</PublisherDisplayName>
-    <Logo>icons\StoreLogo.png</Logo>
+    <Logo>Assets\StoreLogo.png</Logo>
     <Description>A modern music player with DSD support and advanced lyric features.</Description>
   </Properties>
 
@@ -34,11 +34,11 @@
       <uap:VisualElements
         DisplayName="TPlayer"
         Description="A modern music player with DSD support and advanced lyric features."
-        Square150x150Logo="icons\Square150x150Logo.png"
-        Square44x44Logo="icons\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
         BackgroundColor="#1a1a2e">
-        <uap:DefaultTile Wide310x150Logo="icons\Square310x310Logo.png" Square310x310Logo="icons\Square310x310Logo.png" />
-        <uap:SplashScreen Image="icons\Square310x310Logo.png" BackgroundColor="#1a1a2e" />
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1a1a2e" />
       </uap:VisualElements>
       <Extensions>
         <uap:Extension Category="windows.fileTypeAssociation">

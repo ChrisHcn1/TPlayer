@@ -15,7 +15,7 @@ use rodio::Source;
 use tauri::{State, Emitter};
 
 use crate::ffmpeg_transcoder;
-use crate::equalizer::{Equalizer, EqualizerPreset};
+use crate::equalizer::Equalizer;
 
 // 全局播放器(使用unsafe static,但通过PLAYER_MUTEX确保线程安全)
 #[allow(static_mut_refs)]
@@ -661,25 +661,98 @@ fn format_duration(seconds: f64) -> String {
     format!("{}:{:02}", mins, secs)
 }
 
-// 初始化音频流（不获取锁，由调用者确保线程安全）
+/// 检查音频播放环境是否正常
+#[tauri::command]
+pub fn check_audio_environment() -> serde_json::Value {
+    // 尝试初始化音频流来验证设备可用性
+    let mut init_result = "未知".to_string();
+    let mut init_error = None;
+    
+    // 获取锁以确保线程安全
+    let _lock = PLAYER_MUTEX.lock().unwrap();
+    
+    unsafe {
+        // 保存当前状态
+        let saved_player = GLOBAL_PLAYER.take();
+        
+        // 尝试初始化
+        match rodio::OutputStream::try_default() {
+            Ok((stream, handle)) => {
+                init_result = "成功".to_string();
+                println!("[音频检测] 音频设备初始化成功");
+                
+                // 保存成功的状态
+                GLOBAL_PLAYER = Some(GlobalPlayer {
+                    sink: None,
+                    stream_handle: Some(handle),
+                    _stream: Some(stream),
+                });
+            }
+            Err(e) => {
+                init_result = "失败".to_string();
+                init_error = Some(e.to_string());
+                eprintln!("[音频检测] 音频设备初始化失败: {}", e);
+                
+                // 恢复之前的状态
+                GLOBAL_PLAYER = saved_player;
+            }
+        }
+    }
+    
+    serde_json::json!({
+        "initialization_result": init_result,
+        "initialization_error": init_error,
+        "environment": "Microsoft Store"
+    })
+}
+
+// 初始化音频流（必须在持有PLAYER_MUTEX锁的情况下调用）
 fn initialize_audio_stream() -> Result<rodio::OutputStreamHandle, String> {
     unsafe {
-        if GLOBAL_PLAYER.is_none() {
-            let (stream, handle) = rodio::OutputStream::try_default()
-                .map_err(|e| format!("无法获取音频设备: {}", e))?;
+        // 如果GLOBAL_PLAYER存在但stream_handle为空，需要重新初始化
+        let needs_reinit = GLOBAL_PLAYER.as_ref()
+            .map(|p| p.stream_handle.is_none())
+            .unwrap_or(true);
+        
+        if GLOBAL_PLAYER.is_none() || needs_reinit {
+            println!("[音频初始化] 初始化/重新初始化音频流...");
             
-            GLOBAL_PLAYER = Some(GlobalPlayer {
-                sink: None,
-                stream_handle: Some(handle),
-                _stream: Some(stream),
-            });
+            // 尝试获取默认音频设备
+            let result = rodio::OutputStream::try_default();
+            
+            match result {
+                Ok((stream, handle)) => {
+                    println!("[音频初始化] 音频设备获取成功");
+                    
+                    GLOBAL_PLAYER = Some(GlobalPlayer {
+                        sink: None,
+                        stream_handle: Some(handle),
+                        _stream: Some(stream),
+                    });
+                }
+                Err(e) => {
+                    let error_msg = format!("无法获取音频设备: {}", e);
+                    eprintln!("[音频初始化] {}", error_msg);
+                    
+                    // 清理状态以便下次重试
+                    GLOBAL_PLAYER = None;
+                    
+                    return Err(error_msg);
+                }
+            }
         }
         
         if let Some(player) = &GLOBAL_PLAYER {
             player.stream_handle.clone()
-                .ok_or_else(|| "音频流未初始化".to_string())
+                .ok_or_else(|| {
+                    let msg = "音频流未初始化".to_string();
+                    eprintln!("[音频初始化] {}", msg);
+                    msg
+                })
         } else {
-            Err("全局播放器未初始化".to_string())
+            let msg = "全局播放器未初始化".to_string();
+            eprintln!("[音频初始化] {}", msg);
+            Err(msg)
         }
     }
 }
@@ -890,24 +963,68 @@ pub async fn play_song(
         }
     };
     
-    // 初始化音频流
+    // 初始化音频流（带重试机制）
     println!("[播放] 初始化音频流...");
-    let handle = initialize_audio_stream()?;
-    println!("[播放] 音频流初始化成功");
+    let handle = match initialize_audio_stream() {
+        Ok(h) => {
+            println!("[播放] 音频流初始化成功");
+            h
+        }
+        Err(e) => {
+            // 第一次初始化失败，尝试清理状态后重试
+            eprintln!("[播放] 音频流初始化失败: {}, 尝试重试...", e);
+            
+            // 清理状态
+            unsafe {
+                GLOBAL_PLAYER = None;
+            }
+            
+            // 重试初始化
+            match initialize_audio_stream() {
+                Ok(h) => {
+                    println!("[播放] 音频流初始化重试成功");
+                    h
+                }
+                Err(retry_e) => {
+                    eprintln!("[播放] 音频流初始化重试也失败: {}", retry_e);
+                    return Err(format!("无法初始化音频设备: {}", retry_e));
+                }
+            }
+        }
+    };
     
     // 打开文件并解码
     println!("[播放] 打开文件: {}", play_path);
     let file = std::fs::File::open(&play_path)
         .map_err(|e| {
-            println!("[播放] 打开文件失败: {}", e);
-            format!("打开文件失败: {}", e)
+            let error_msg = format!("打开文件失败: {}", e);
+            eprintln!("[播放] {}", error_msg);
+            error_msg
         })?;
     
     println!("[播放] 文件打开成功，开始解码...");
     let mut source = rodio::Decoder::new(file)
         .map_err(|e| {
-            println!("[播放] 解码失败: {}", e);
-            format!("解码失败: {}", e)
+            let error_msg = format!("解码失败: {}", e);
+            eprintln!("[播放] {}", error_msg);
+            
+            // 尝试检查文件是否存在
+            if !std::path::Path::new(&play_path).exists() {
+                return format!("文件不存在: {}", play_path);
+            }
+            
+            // 尝试检查文件权限
+            match std::fs::metadata(&play_path) {
+                Ok(meta) => {
+                    println!("[播放] 文件元数据: size={} bytes, permissions={:?}", 
+                             meta.len(), meta.permissions());
+                }
+                Err(meta_e) => {
+                    eprintln!("[播放] 获取文件元数据失败: {}", meta_e);
+                }
+            }
+            
+            error_msg
         })?;
     
     println!("[播放] 解码成功");
@@ -1203,207 +1320,6 @@ fn start_progress_updater(
 
     let mut thread_handle = PROGRESS_THREAD_HANDLE.lock().unwrap();
     *thread_handle = Some(handle);
-}
-
-// 暂停播放
-#[tauri::command]
-pub async fn pause_song(
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    println!("暂停播放");
-    let _lock = PLAYER_MUTEX.lock().unwrap();
-
-    unsafe {
-        if let Some(player) = &GLOBAL_PLAYER {
-            if let Some(sink) = &player.sink {
-                sink.pause();
-            }
-        }
-    }
-
-    let mut player_state = state.lock().unwrap();
-    player_state.is_playing = false;
-    println!("暂停完成,当前进度: {:.1}秒", player_state.position);
-    Ok(())
-}
-
-// 恢复播放
-#[tauri::command]
-pub async fn resume_song(
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    println!("恢复播放");
-    let _lock = PLAYER_MUTEX.lock().unwrap();
-
-    unsafe {
-        if let Some(player) = &GLOBAL_PLAYER {
-            if let Some(sink) = &player.sink {
-                sink.play();
-            }
-        }
-    }
-
-    let mut player_state = state.lock().unwrap();
-    player_state.is_playing = true;
-    println!("恢复完成,当前进度: {:.1}秒", player_state.position);
-    Ok(())
-}
-
-// 停止播放
-#[tauri::command]
-pub async fn stop_song(
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    let _lock = PLAYER_MUTEX.lock().unwrap();
-
-    unsafe {
-        if let Some(player) = &GLOBAL_PLAYER {
-            if let Some(sink) = &player.sink {
-                sink.stop();
-            }
-        }
-    }
-
-    // 停止FFplay播放
-    let _ = ffmpeg_transcoder::stop_ffplay();
-
-    // 停止进度更新线程
-    stop_progress_updater();
-
-    let mut player_state = state.lock().unwrap();
-    player_state.is_playing = false;
-    player_state.position = 0.0;
-    Ok(())
-}
-
-// 设置音量
-#[tauri::command]
-pub async fn set_volume(
-    volume: f32,
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    let _lock = PLAYER_MUTEX.lock().unwrap();
-    
-    let normalized_volume = volume / 100.0;
-    
-    unsafe {
-        if let Some(player) = &GLOBAL_PLAYER {
-            if let Some(sink) = &player.sink {
-                sink.set_volume(normalized_volume);
-            }
-        }
-    }
-    
-    let mut player_state = state.lock().unwrap();
-    player_state.volume = normalized_volume;
-    Ok(())
-}
-
-// 跳转播放位置
-#[tauri::command]
-pub async fn seek_song(
-    position: f64,
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    // Rodio不支持精确seek,只能重新加载文件并跳过前面的部分
-    let mut player_state = state.lock().unwrap();
-    
-    // 这里简化处理,只更新位置记录
-    // 实际的seek需要更复杂的实现
-    player_state.position = position;
-    
-    Err("Rodio暂不支持精确seek功能".to_string())
-}
-
-// 设置均衡器
-#[tauri::command]
-pub async fn set_equalizer(
-    bands: Vec<f32>,
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    let mut player_state = state.lock().unwrap();
-    
-    let mut band_array = [0.0f32; 10];
-    for (i, &band) in bands.iter().enumerate() {
-        if i < 10 {
-            band_array[i] = band.clamp(-12.0, 12.0);
-            player_state.equalizer_bands[i] = band_array[i];
-        }
-    }
-    
-    player_state.equalizer.set_bands(band_array);
-    
-    // 注意: rodio本身不支持实时均衡器应用
-    // 实际的均衡器需要在使用DSP库如biquad的情况下实现
-    // 这里只是存储均衡器设置
-    
-    Ok(())
-}
-
-// 应用均衡器预设
-#[tauri::command]
-pub async fn apply_equalizer_preset(
-    preset_name: String,
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<(), String> {
-    let preset = match preset_name.as_str() {
-        "flat" => EqualizerPreset::Flat,
-        "rock" => EqualizerPreset::Rock,
-        "pop" => EqualizerPreset::Pop,
-        "jazz" => EqualizerPreset::Jazz,
-        "classical" => EqualizerPreset::Classical,
-        "electronic" => EqualizerPreset::Electronic,
-        _ => return Err("未知的均衡器预设".to_string()),
-    };
-    
-    let bands = preset.get_bands();
-    
-    let mut player_state = state.lock().unwrap();
-    player_state.equalizer_bands = bands;
-    player_state.equalizer.set_bands(bands);
-    
-    Ok(())
-}
-
-// 获取当前播放进度
-#[tauri::command]
-pub async fn get_position(
-    state: State<'_, Arc<Mutex<PlayerState>>>
-) -> Result<f64, String> {
-    let player_state = state.lock().unwrap();
-    let absolute_position = player_state.position;
-    
-    // 如果是CUE track，返回相对于开始时间的位置
-    let relative_position = if let Some(start_time) = player_state.cue_start_time {
-        let rel_pos = absolute_position - start_time;
-        // 确保不会返回负数
-        if rel_pos < 0.0 { 0.0 } else { rel_pos }
-    } else {
-        absolute_position
-    };
-    
-    println!("get_position 被调用, 绝对位置: {:.1}秒, 相对位置: {:.1}秒, 更新次数: {}", 
-             absolute_position, relative_position, player_state.position_update_count);
-    Ok(relative_position)
-}
-
-// 停止播放(清理资源)
-#[tauri::command]
-pub async fn cleanup_player() -> Result<(), String> {
-    let _lock = PLAYER_MUTEX.lock().unwrap();
-
-    // 停止进度更新线程
-    stop_progress_updater();
-
-    unsafe {
-        if let Some(mut player) = GLOBAL_PLAYER.take() {
-            if let Some(sink) = player.sink.take() {
-                sink.stop();
-            }
-        }
-    }
-
-    Ok(())
 }
 
 // 获取音频信息（包含时长、采样率、编码器等）
@@ -1708,18 +1624,6 @@ pub async fn open_readme() -> Result<(), String> {
     Ok(())
 }
 
-// 设置自定义FFmpeg路径
-#[tauri::command]
-pub fn set_ffmpeg_path(path: Option<String>) -> Result<(), String> {
-    ffmpeg_transcoder::set_custom_ffmpeg_path(path.as_deref());
-    if let Some(p) = path {
-        println!("[FFmpeg] 用户自定义路径已设置为: {}", p);
-    } else {
-        println!("[FFmpeg] 用户自定义路径已清除");
-    }
-    Ok(())
-}
-
 // 清理播放器资源（在程序退出时调用）
 pub fn cleanup_player_resources() {
     println!("[播放器] 清理播放器资源");
@@ -1740,85 +1644,5 @@ pub fn cleanup_player_resources() {
     }
     
     println!("[播放器] 播放器资源清理完成");
-}
-
-// 音频格式转换相关命令
-
-// 转换音频文件
-#[tauri::command]
-pub async fn convert_audio(
-    input_path: String,
-    output_folder: String,
-    output_format: String,
-    codec: String,
-    bitrate: Option<String>,
-    compression: Option<String>,
-) -> Result<String, String> {
-    use std::path::Path;
-    use std::process::{Command, Stdio};
-    
-    // 获取FFmpeg路径
-    let ffmpeg_path = ffmpeg_transcoder::TranscodeCache::get_ffmpeg_path()
-        .ok_or_else(|| "未找到FFmpeg".to_string())?;
-    
-    // 构建输出路径
-    let input_path_obj = Path::new(&input_path);
-    let file_stem = input_path_obj.file_stem()
-        .ok_or_else(|| "无法获取文件名".to_string())?
-        .to_string_lossy();
-    
-    let output_path = Path::new(&output_folder)
-        .join(format!("{}.{}", file_stem, output_format))
-        .to_string_lossy()
-        .to_string();
-    
-    // 构建FFmpeg命令参数
-    let mut args: Vec<String> = vec![
-        "-i".to_string(),
-        input_path.clone(),
-        "-c:a".to_string(),
-        codec,
-        "-y".to_string(), // 覆盖已存在的文件
-        "-loglevel".to_string(),
-        "quiet".to_string(),
-    ];
-    
-    // 添加比特率参数
-    if let Some(br) = bitrate {
-        args.push("-b:a".to_string());
-        args.push(br);
-    }
-    
-    // 添加压缩级别参数（针对FLAC等格式）
-    if let Some(comp) = compression {
-        args.push("-compression_level".to_string());
-        args.push(comp);
-    }
-    
-    // 添加输出路径
-    args.push(output_path.clone());
-    
-    // 执行FFmpeg命令
-    let mut cmd = Command::new(&ffmpeg_path);
-    cmd.args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    
-    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    
-    let result = cmd.output()
-        .map_err(|e| format!("执行FFmpeg命令失败: {}", e))?;
-    
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(format!("转换失败: {}", stderr));
-    }
-    
-    Ok(output_path)
 }
 

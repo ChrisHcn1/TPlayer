@@ -34,22 +34,53 @@ static FFMPEG_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(
 static FFPROBE_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 static FFPLAY_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
-// 用户自定义FFmpeg路径
+// 用户自定义FFmpeg路径存储
 static CUSTOM_FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
-// 设置用户自定义FFmpeg路径
-pub fn set_custom_ffmpeg_path(path: Option<&str>) {
-    let mut cache = CUSTOM_FFMPEG_PATH.lock().unwrap();
-    *cache = path.map(|p| p.to_string());
-    // 清除缓存，下次调用时重新搜索
+/// 设置用户自定义FFmpeg路径
+/// 
+/// # Arguments
+/// * `path` - FFmpeg可执行文件的完整路径，如果为None则清除自定义路径
+/// 
+/// # Returns
+/// * `Ok(())` - 设置成功
+/// * `Err(String)` - 设置失败，返回错误信息
+pub fn set_custom_ffmpeg_path(path: Option<String>) -> Result<(), String> {
+    let mut custom_path = CUSTOM_FFMPEG_PATH.lock().unwrap();
+    
+    if let Some(ref p) = path {
+        // 验证路径是否有效
+        let path_buf = PathBuf::from(p);
+        if !path_buf.exists() {
+            return Err(format!("指定的FFmpeg路径不存在: {}", p));
+        }
+        if !path_buf.is_file() {
+            return Err(format!("指定的路径不是文件: {}", p));
+        }
+        println!("[FFmpeg] 设置自定义路径: {}", p);
+    } else {
+        println!("[FFmpeg] 清除自定义路径");
+    }
+    
+    *custom_path = path;
+    
+    // 清除缓存，强制下次重新搜索
     *FFMPEG_PATH_CACHE.lock().unwrap() = None;
     *FFPROBE_PATH_CACHE.lock().unwrap() = None;
     *FFPLAY_PATH_CACHE.lock().unwrap() = None;
+    
+    Ok(())
 }
 
-// 获取用户自定义FFmpeg路径
+/// 获取用户自定义FFmpeg路径
 fn get_custom_ffmpeg_path() -> Option<String> {
     CUSTOM_FFMPEG_PATH.lock().unwrap().clone()
+}
+
+/// 获取当前自定义FFmpeg路径（用于前端查询）
+#[tauri::command]
+pub fn get_custom_ffmpeg_path_command() -> Option<String> {
+    get_custom_ffmpeg_path()
 }
 
 // rodio原生支持的音频格式（无需转码）
@@ -895,34 +926,6 @@ impl TranscodeCache {
             
             std::thread::sleep(Duration::from_millis(100));
         }
-    }
-    
-    // 清理过期缓存
-    pub fn cleanup_cache(&self, max_age_hours: u64) -> Result<usize, String> {
-        let mut cache = self.cache.lock().unwrap();
-        let now = SystemTime::now();
-        let mut removed_count = 0;
-        
-        let keys_to_remove: Vec<String> = cache
-            .iter()
-            .filter_map(|(key, item)| {
-                if let Ok(age) = now.duration_since(item.created_at) {
-                    if age > Duration::from_secs(max_age_hours * 3600) {
-                        // 删除文件
-                        let _ = fs::remove_file(&item.transcoded_path);
-                        return Some(key.clone());
-                    }
-                }
-                None
-            })
-            .collect();
-        
-        for key in keys_to_remove {
-            cache.remove(&key);
-            removed_count += 1;
-        }
-        
-        Ok(removed_count)
     }
 }
 
