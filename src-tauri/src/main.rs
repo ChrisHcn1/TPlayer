@@ -11,6 +11,7 @@ mod equalizer;
 mod ffmpeg_transcoder;
 mod http_server;
 mod audio_converter;
+mod updater;
 use commands::PlayerState;
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
@@ -104,7 +105,13 @@ fn main() {
             commands_cache::save_to_cache,
             commands_cache::get_cached_file,
             commands_cache::get_cache_dir,
-            commands_cache::clear_cache
+            commands_cache::clear_cache,
+            updater::check_update_manual,
+            updater::check_update_auto,
+            updater::download_update_command,
+            updater::verify_update_command,
+            updater::install_update_command,
+            updater::get_current_version
         ])
         // 注册插件
         .plugin(tauri_plugin_dialog::init())

@@ -147,6 +147,57 @@
       </div>
     </div>
     
+    <div class="settings-section">
+      <h3>{{ t('settings.update') }}</h3>
+      
+      <!-- 自动检查更新 -->
+      <div class="setting-item">
+        <label class="setting-label">
+          <input type="checkbox" :checked="localAutoUpdate" @change="handleAutoUpdateChange($event)">
+          {{ t('settings.autoUpdate') }}
+        </label>
+      </div>
+      
+      <!-- 更新检查间隔 -->
+      <div class="setting-item" v-if="localAutoUpdate">
+        <label class="setting-label">{{ t('settings.updateInterval') }}</label>
+        <div class="setting-control">
+          <select :value="localUpdateInterval" @change="handleUpdateIntervalChange($event)">
+            <option value="6">{{ t('settings.every6Hours') }}</option>
+            <option value="12">{{ t('settings.every12Hours') }}</option>
+            <option value="24">{{ t('settings.everyDay') }}</option>
+            <option value="72">{{ t('settings.every3Days') }}</option>
+          </select>
+        </div>
+      </div>
+      
+      <!-- 后台更新 -->
+      <div class="setting-item" v-if="localAutoUpdate">
+        <label class="setting-label">
+          <input type="checkbox" :checked="localBackgroundUpdate" @change="handleBackgroundUpdateChange($event)">
+          {{ t('settings.backgroundUpdate') }}
+        </label>
+        <div class="setting-control">
+          <span>{{ t('settings.backgroundUpdateHint') }}</span>
+        </div>
+      </div>
+      
+      <!-- 手动检查更新 -->
+      <div class="setting-item">
+        <label class="setting-label">{{ t('settings.checkUpdate') }}</label>
+        <div class="setting-control">
+          <button 
+            class="btn btn-secondary" 
+            @click="checkUpdate"
+            :disabled="isCheckingUpdate"
+          >
+            <span v-if="!isCheckingUpdate">{{ t('settings.checkNow') }}</span>
+            <span v-else>{{ t('settings.checking') }}...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    
     <div class="settings-actions">
       <button class="btn btn-secondary" @click="cancel">{{ t('common.cancel') }}</button>
       <button class="btn btn-primary" @click="saveSettings">{{ t('common.save') }}</button>
@@ -211,6 +262,18 @@ const props = defineProps({
   isBrowser: {
     type: Boolean,
     default: false
+  },
+  autoUpdate: {
+    type: Boolean,
+    default: true
+  },
+  updateInterval: {
+    type: Number,
+    default: 24
+  },
+  backgroundUpdate: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -228,6 +291,10 @@ const emit = defineEmits([
   'update:enableTranscode',
   'update:forceTranscode',
   'update:musicDirectory',
+  'update:autoUpdate',
+  'update:updateInterval',
+  'update:backgroundUpdate',
+  'checkUpdate',
   'browseMusicDirectory',
   'save',
   'cancel'
@@ -246,6 +313,10 @@ const localCurrentPreset = ref(props.currentPreset)
 const localEnableTranscode = ref(props.enableTranscode)
 const localForceTranscode = ref(props.forceTranscode)
 const localMusicDirectory = ref(props.musicDirectory)
+const localAutoUpdate = ref(props.autoUpdate)
+const localUpdateInterval = ref(props.updateInterval)
+const localBackgroundUpdate = ref(props.backgroundUpdate)
+const isCheckingUpdate = ref(false)
 
 // 事件处理函数
 const handleCrossfadeEnabledChange = (event: Event) => {
@@ -334,6 +405,33 @@ const handleMusicDirectoryChange = (event: Event) => {
 
 const browseMusicDirectory = () => {
   emit('browseMusicDirectory')
+}
+
+// 更新相关事件处理函数
+const handleAutoUpdateChange = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  if (target) {
+    emit('update:autoUpdate', target.checked)
+  }
+}
+
+const handleUpdateIntervalChange = (event: Event) => {
+  const target = event.target as HTMLSelectElement
+  if (target) {
+    emit('update:updateInterval', parseInt(target.value))
+  }
+}
+
+const handleBackgroundUpdateChange = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  if (target) {
+    emit('update:backgroundUpdate', target.checked)
+  }
+}
+
+const checkUpdate = async () => {
+  isCheckingUpdate.value = true
+  emit('checkUpdate')
 }
 
 // 保存设置

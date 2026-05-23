@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.music-api.vercel.app https://*.netease.com https://*.qq.com;",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.music-api.vercel.app https://*.netease.com https://*.qq.com https://api.github.com https://github.com https://objects.githubusercontent.com;"
       "capabilities": [
         {
           "identifier": "default",

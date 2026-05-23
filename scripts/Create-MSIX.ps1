@@ -104,7 +104,7 @@ try {
   IgnorableNamespaces="uap uap2 rescap">
 
   <Identity
-    Name="9MVC0GGNJHCK"
+    Name="D57E920A.TPlayer"
     Publisher="$publisher"
     Version="$Version" />
 
