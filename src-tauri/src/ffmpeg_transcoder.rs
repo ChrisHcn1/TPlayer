@@ -84,18 +84,28 @@ pub fn get_custom_ffmpeg_path_command() -> Option<String> {
 }
 
 // rodio原生支持的音频格式（无需转码）
+// 注意：某些格式可能有兼容性问题，在Microsoft Store版本中可能无法正常播放
 const NATIVE_SUPPORTED_EXTENSIONS: &[&str] = &[
-    "mp3",    // MPEG Audio Layer III
+    "mp3",    // MPEG Audio Layer III - 可能有编码器兼容性问题
     "flac",   // Free Lossless Audio Codec
-    "wav",    // Waveform Audio File Format
-    "aac",    // Advanced Audio Coding
+    "wav",    // Waveform Audio File Format - 16/24/32位已处理
+    "aac",    // Advanced Audio Coding - 可能有编码器兼容性问题
     "ogg",    // Ogg Vorbis
-    "m4a",    // MPEG-4 Audio
+    "m4a",    // MPEG-4 Audio - 可能有编码器兼容性问题
     "opus",   // Opus Audio Codec
 ];
 
 // 需要转码的音频格式（rodio不支持的格式）
 const TRANSCODE_EXTENSIONS: &[&str] = &["ape", "dsd", "dts", "dff", "dsf", "sacd", "wv"];
+
+// 在Microsoft Store版本中可能有兼容性问题的格式，即使rodio声称支持
+// 这些格式会被强制转码以确保兼容性
+const STORE_COMPAT_ISSUES_EXTENSIONS: &[&str] = &[
+    "mp3",    // 某些MP3编码器（如LAME）在rodio中可能解码异常
+    "aac",    // 非标准AAC配置可能被rodio拒绝
+    "m4a",    // 包含特定元数据的M4A可能有问题
+    "ogg",    // 某些Ogg封装可能被rodio误解
+];
 
 // 转码缓存项
 #[derive(Clone)]
@@ -171,6 +181,31 @@ fn check_wav_bit_depth(path: &str) -> Option<u16> {
     None
 }
 
+// 检查是否在Microsoft Store环境中运行
+fn is_microsoft_store_version() -> bool {
+    // 检查MSIX包信息
+    if let Ok(_) = std::env::var("MSIX_PACKAGEFamilyName") {
+        println!("[转码检查] 检测到MSIX包环境");
+        return true;
+    }
+    
+    // 检查应用是否安装在其他用户的AppData目录（Microsoft Store典型路径）
+    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+        let packages_path = std::path::Path::new(&localappdata).join("Packages");
+        if packages_path.exists() {
+            // 检查当前进程路径是否在Packages目录下
+            if let Ok(exe_path) = std::env::current_exe() {
+                if exe_path.to_string_lossy().contains("Packages") {
+                    println!("[转码检查] 检测到Microsoft Store安装路径");
+                    return true;
+                }
+            }
+        }
+    }
+    
+    false
+}
+
 // 检查文件是否需要转码
 pub fn needs_transcode(path: &str) -> bool {
     let path_lower = path.to_lowercase();
@@ -203,6 +238,18 @@ pub fn needs_transcode(path: &str) -> bool {
                 }
             }
         }
+        
+        // 检查Microsoft Store版本兼容性问题
+        // 在Microsoft Store版本中，某些声称"原生支持"的格式可能实际无法播放
+        if is_microsoft_store_version() {
+            if STORE_COMPAT_ISSUES_EXTENSIONS.iter().any(|ext| {
+                path_lower.ends_with(&format!(".{}", ext))
+            }) {
+                println!("[转码检查] Microsoft Store版本：强制转码可能有兼容性问题的格式 ({})", path_lower);
+                return true;
+            }
+        }
+        
         println!("[转码检查] 原生支持格式，无需转码");
         return false; // 原生支持，无需转码
     }
