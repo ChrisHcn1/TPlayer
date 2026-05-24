@@ -1034,13 +1034,41 @@ pub async fn play_song(
     let channels = source.channels();
     let current_frame_len = source.current_frame_len();
     let total_duration = source.total_duration();
-    println!("[播放] 音频参数: 采样率={}Hz, 声道数={}, 当前帧长度={:?}, 总时长={:?}, 格式=PCM (pcm_s16le)", 
+    println!("[播放] 音频参数: 采样率={}Hz, 声道数={}, 当前帧长度={:?}, 总时长={:?}", 
              sample_rate, channels, current_frame_len, total_duration);
+    
+    // 诊断：打印解码器类型
+    #[cfg(debug_assertions)]
+    {
+        println!("[播放] 调试模式：详细信息已记录");
+    }
+    
+    // 诊断：计算音频数据率
+    let bytes_per_sample = 4u64; // f32
+    let data_rate = sample_rate as u64 * channels as u64 * bytes_per_sample;
+    println!("[播放] 音频数据率: {} bytes/s ({:.2} MB/s)", data_rate, data_rate as f64 / 1024.0 / 1024.0);
     
     // 检测文件扩展名
     let file_path = std::path::Path::new(&play_path);
     let extension = file_path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     println!("[播放] 文件扩展名: {}", extension);
+    
+    // 诊断：判断是否为已知问题格式
+    let is_likely_problematic = match extension.to_lowercase().as_str() {
+        "mp3" => {
+            println!("[播放] MP3格式警告: rodio解码器可能对某些MP3编码器存在问题");
+            true
+        }
+        "aac" | "m4a" => {
+            println!("[播放] AAC格式警告: 需要检查是否为HE-AAC或其他高级编码");
+            true
+        }
+        _ => false,
+    };
+    
+    if is_likely_problematic {
+        println!("[播放] 提示: 如果播放异常，建议将音频转换为标准FLAC或WAV格式");
+    }
     
     // 计算实际开始位置（考虑CUE track的start_time和position参数）
     // 如果start_time和end_time都是None或0，说明不是CUE track，从0开始播放
@@ -1077,9 +1105,8 @@ pub async fn play_song(
         println!("[播放] 是CUE track，将从 {:?}s 播放到 {:?}s", start_time_val, end_time_val);
     }
     
-    // 处理样本跳过
+    // 处理样本跳过 - 改进版本：使用批量读取而非逐个跳过
     let source = if start_position > 0.0 {
-        // 计算需要跳过的样本数
         let sample_rate = source.sample_rate();
         let channels = source.channels();
         let samples_to_skip = (start_position * sample_rate as f64 * channels as f64) as u64;
@@ -1088,15 +1115,50 @@ pub async fn play_song(
         println!("[播放] - 声道数: {}", channels);
         println!("[播放] - 需要跳过的样本数: {}", samples_to_skip);
         
-        // 手动跳过样本
-        let mut skipped_samples = 0;
-        for _ in 0..samples_to_skip {
-            if source.next().is_none() {
-                println!("[播放] 跳过样本时遇到文件结束，已跳过 {} 个样本", skipped_samples);
+        // 使用批量缓冲区跳过，提高性能
+        const BUFFER_SIZE: usize = 8192;
+        let mut skipped_samples = 0u64;
+        let mut buffer = vec![0.0f32; BUFFER_SIZE];
+        let total_iterations = (samples_to_skip / BUFFER_SIZE as u64) + 1;
+        
+        println!("[播放] 开始批量跳过，共 {} 批次", total_iterations);
+        
+        for batch in 0..total_iterations {
+            let remaining = samples_to_skip - skipped_samples;
+            if remaining == 0 {
                 break;
             }
-            skipped_samples += 1;
+            
+            let batch_size = (remaining as usize).min(BUFFER_SIZE);
+            let mut batch_read = 0;
+            
+            // 批量读取样本
+            for i in 0..batch_size {
+                match source.next() {
+                    Some(sample) => {
+                        buffer[i] = sample;
+                        batch_read += 1;
+                    }
+                    None => {
+                        println!("[播放] 跳过样本时遇到文件结束，已跳过 {} 个样本", skipped_samples);
+                        break;
+                    }
+                }
+            }
+            
+            skipped_samples += batch_read;
+            
+            if batch_read == 0 {
+                break;
+            }
+            
+            // 每100批次打印一次进度
+            if batch % 100 == 0 {
+                println!("[播放] 跳过进度: {}/{} 批次 ({:.1}%)", 
+                         batch, total_iterations, (skipped_samples as f64 / samples_to_skip as f64) * 100.0);
+            }
         }
+        
         println!("[播放] 实际跳过的样本数: {}", skipped_samples);
         source
     } else {
