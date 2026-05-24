@@ -263,6 +263,8 @@ impl TranscodeCache {
     
     // 实际搜索FFmpeg路径的内部方法
     fn search_ffmpeg_path() -> Option<String> {
+        println!("[FFmpeg] 开始搜索FFmpeg路径...");
+        
         // 0. 首先检查用户自定义路径
         if let Some(custom_path) = get_custom_ffmpeg_path() {
             let ffmpeg_path = PathBuf::from(&custom_path);
@@ -275,61 +277,92 @@ impl TranscodeCache {
         }
         
         // 1. 首先检查应用内置的ffmpeg
-        // 开发环境：直接检查src-tauri/bin/ffmpeg.exe
+        // 生产环境：检查应用目录下的bin/ffmpeg.exe
+        // 这是最可靠的方式，适用于打包后的应用
+        if let Ok(resource_dir) = std::env::current_exe() {
+            let app_dir = resource_dir.parent();
+            println!("[FFmpeg] 应用目录: {:?}", app_dir);
+            
+            if let Some(app_dir) = app_dir {
+                // 尝试多种可能的路径
+                let possible_paths = [
+                    app_dir.join("bin").join("ffmpeg.exe"),
+                    app_dir.join("ffmpeg.exe"),
+                    app_dir.join("resources").join("bin").join("ffmpeg.exe"),
+                ];
+                
+                for builtin_ffmpeg in &possible_paths {
+                    println!("[FFmpeg] 检查路径: {:?}", builtin_ffmpeg);
+                    if builtin_ffmpeg.exists() {
+                        println!("[FFmpeg] 找到内置ffmpeg: {:?}", builtin_ffmpeg);
+                        return Some(builtin_ffmpeg.to_string_lossy().to_string());
+                    }
+                }
+            }
+        } else {
+            println!("[FFmpeg] 无法获取当前可执行文件路径");
+        }
+        
+        // 2. 开发环境：直接检查src-tauri/bin/ffmpeg.exe
         let current_dir = std::env::current_dir().ok()?;
         let dev_ffmpeg = current_dir.join("src-tauri").join("bin").join("ffmpeg.exe");
+        println!("[FFmpeg] 检查开发环境路径: {:?}", dev_ffmpeg);
         if dev_ffmpeg.exists() {
             println!("[FFmpeg] 使用开发环境的内置ffmpeg: {:?}", dev_ffmpeg);
             return Some(dev_ffmpeg.to_string_lossy().to_string());
         }
         
-        // 生产环境：检查应用目录下的bin/ffmpeg.exe
-        if let Ok(resource_dir) = std::env::current_exe() {
-            let app_dir = resource_dir.parent()?;
-            let builtin_ffmpeg = app_dir.join("bin").join("ffmpeg.exe");
-            if builtin_ffmpeg.exists() {
-                println!("[FFmpeg] 使用生产环境的内置ffmpeg: {:?}", builtin_ffmpeg);
-                return Some(builtin_ffmpeg.to_string_lossy().to_string());
-            }
-        }
-        
-        // 2. 检查环境变量
+        // 3. 检查环境变量
         if let Ok(ffmpeg_path) = env::var("FFMPEG_PATH") {
+            println!("[FFmpeg] 检查环境变量 FFMPEG_PATH: {}", ffmpeg_path);
             if Path::new(&ffmpeg_path).exists() {
                 return Some(ffmpeg_path);
             }
         }
         
-        // 3. 检查 PATH 中的 ffmpeg
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    
-    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    
-    if cmd.output().is_ok() {
-        return Some("ffmpeg".to_string());
-    }
+        // 4. 检查 PATH 中的 ffmpeg
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         
-        // 4. 检查常见安装路径
-        let common_paths = [
-            r"C:\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
-        ];
+        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
         
-        for path in &common_paths {
-            if Path::new(path).exists() {
-                return Some(path.to_string());
+        if cmd.output().is_ok() {
+            println!("[FFmpeg] 在PATH中找到ffmpeg");
+            return Some("ffmpeg".to_string());
+        }
+        
+        // 5. 检查常见安装路径
+        let mut common_paths: Vec<String> = Vec::new();
+        
+        // 添加固定路径
+        common_paths.push(r"C:\ffmpeg\bin\ffmpeg.exe".to_string());
+        common_paths.push(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe".to_string());
+        common_paths.push(r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe".to_string());
+        
+        // 添加环境变量路径
+        if let Ok(localappdata) = env::var("LOCALAPPDATA") {
+            common_paths.push(format!("{}\\Programs\\ffmpeg\\bin\\ffmpeg.exe", localappdata));
+        }
+        if let Ok(programfiles) = env::var("PROGRAMFILES") {
+            common_paths.push(format!("{}\\ffmpeg\\bin\\ffmpeg.exe", programfiles));
+        }
+        
+        for path in common_paths {
+            println!("[FFmpeg] 检查常见路径: {}", path);
+            if Path::new(&path).exists() {
+                println!("[FFmpeg] 找到常见路径的ffmpeg: {}", path);
+                return Some(path);
             }
         }
         
+        println!("[FFmpeg] 警告: 未找到FFmpeg，可能无法播放某些格式");
         None
     }
     

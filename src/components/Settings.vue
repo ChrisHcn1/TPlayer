@@ -206,7 +206,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { t } from '../services/i18n'
 
 // 定义props
@@ -444,13 +445,30 @@ const cancel = () => {
   emit('cancel')
 }
 
+// 获取版本号
+const appVersion = ref('获取中...')
+
+onMounted(async () => {
+  try {
+    if (props.isBrowser) {
+      appVersion.value = 'Web版本'
+    } else {
+      const version = await invoke<string>('get_current_version')
+      appVersion.value = `V${version}`
+    }
+  } catch (error) {
+    console.error('获取版本号失败:', error)
+    appVersion.value = '未知版本'
+  }
+})
+
 // 显示关于对话框
 const showAbout = () => {
   const aboutContent = `
     <div style="text-align: center; padding: 20px;">
       <img src="/logo.png" alt="TPlayer Logo" style="width: 80px; height: 80px; border-radius: 12px; margin-bottom: 15px;" />
       <h2 style="margin: 0 0 10px 0; color: #4CAF50;">TPlayer</h2>
-      <p style="margin: 5px 0; color: #b0b0b0; font-size: 14px;">版本: V1.0.2-20260329</p>
+      <p style="margin: 5px 0; color: #b0b0b0; font-size: 14px;">版本: ${appVersion.value}</p>
       <p style="margin: 5px 0; color: #b0b0b0; font-size: 14px;">一款现代化的桌面音乐播放器</p>
       <div style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px;">
         <p style="margin: 5px 0; color: #b0b0b0; font-size: 13px;">开发者: ChrisHcn1</p>
