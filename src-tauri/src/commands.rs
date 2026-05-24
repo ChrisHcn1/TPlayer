@@ -1070,6 +1070,9 @@ pub async fn play_song(
         println!("[播放] 提示: 如果播放异常，建议将音频转换为标准FLAC或WAV格式");
     }
     
+    // 先转换为f32样本，便于后续处理
+    let mut source = source.convert_samples::<f32>();
+    
     // 计算实际开始位置（考虑CUE track的start_time和position参数）
     // 如果start_time和end_time都是None或0，说明不是CUE track，从0开始播放
     let cue_start_val = start_time_val.unwrap_or(0.0);
@@ -1107,8 +1110,6 @@ pub async fn play_song(
     
     // 处理样本跳过 - 改进版本：使用批量读取而非逐个跳过
     let source = if start_position > 0.0 {
-        let sample_rate = source.sample_rate();
-        let channels = source.channels();
         let samples_to_skip = (start_position * sample_rate as f64 * channels as f64) as u64;
         println!("[播放] 跳过样本计算:");
         println!("[播放] - 采样率: {}Hz", sample_rate);
@@ -1166,7 +1167,7 @@ pub async fn play_song(
     };
     
     // 使用跳过样本后的source
-    let boxed_source: Box<dyn Source<Item = f32> + Send> = Box::new(source.convert_samples::<f32>());
+    let boxed_source: Box<dyn Source<Item = f32> + Send> = Box::new(source);
     
     unsafe {
         if let Some(player) = &mut GLOBAL_PLAYER {

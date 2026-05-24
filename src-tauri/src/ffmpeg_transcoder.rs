@@ -126,6 +126,51 @@ pub struct TranscodeCache {
     cache_dir: PathBuf,
 }
 
+// 检查WAV文件位深度
+fn check_wav_bit_depth(path: &str) -> Option<u16> {
+    use std::fs::File;
+    use std::io::Read;
+    
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header).ok()?;
+    
+    // 检查RIFF标识
+    if &header[0..4] != b"RIFF" {
+        return None;
+    }
+    
+    // 检查WAVE标识
+    if &header[8..12] != b"WAVE" {
+        return None;
+    }
+    
+    // 查找fmt chunk
+    let mut pos = 12;
+    while pos < header.len() - 8 {
+        let chunk_id = &header[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            header[pos + 4],
+            header[pos + 5],
+            header[pos + 6],
+            header[pos + 7],
+        ]);
+        
+        if chunk_id == b"fmt " {
+            // fmt chunk found, 读取位深度
+            let bits_per_sample = u16::from_le_bytes([
+                header[pos + 14],
+                header[pos + 15],
+            ]);
+            return Some(bits_per_sample);
+        }
+        
+        pos += 8 + chunk_size as usize;
+    }
+    
+    None
+}
+
 // 检查文件是否需要转码
 pub fn needs_transcode(path: &str) -> bool {
     let path_lower = path.to_lowercase();
@@ -134,10 +179,29 @@ pub fn needs_transcode(path: &str) -> bool {
     if NATIVE_SUPPORTED_EXTENSIONS.iter().any(|ext| {
         path_lower.ends_with(&format!(".{}", ext))
     }) {
-        // 特别处理WAV文件，确保不转码
+        // 特别处理WAV文件，检查位深度
         if path_lower.ends_with(".wav") {
-            println!("[转码检查] WAV文件，原生支持，无需转码");
-            return false;
+            // 检测WAV文件位深度
+            match check_wav_bit_depth(path) {
+                Some(24) => {
+                    println!("[转码检查] 24位WAV文件，rodio不支持，需要转码");
+                    return true;
+                }
+                Some(32) => {
+                    println!("[转码检查] 32位WAV文件，需要检查格式");
+                    // 32位可能是IEEE Float或PCM，需要进一步检查
+                    // 暂时标记为需要转码
+                    return true;
+                }
+                Some(bit_depth) => {
+                    println!("[转码检查] {}位WAV文件，原生支持，无需转码", bit_depth);
+                    return false;
+                }
+                None => {
+                    println!("[转码检查] WAV文件格式检测失败，默认不转码");
+                    return false;
+                }
+            }
         }
         println!("[转码检查] 原生支持格式，无需转码");
         return false; // 原生支持，无需转码

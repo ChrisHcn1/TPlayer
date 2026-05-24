@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -8,9 +8,10 @@ use std::time::{Duration, SystemTime};
 use once_cell::sync::Lazy;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use sha2::Digest;
+use tauri::{AppHandle, Emitter, Manager};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpdateInfo {
     pub version: String,
     pub release_notes: String,
@@ -146,12 +147,15 @@ pub async fn check_for_updates() -> Result<CheckResult, String> {
 }
 
 pub async fn download_update(
+    app_handle: &AppHandle,
     update_info: &UpdateInfo,
     progress_callback: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> Result<PathBuf, String> {
-    let app_dirs = tauri::api::path::app_data_dir(&Default::default())
-        .ok_or_else(|| "无法获取应用数据目录".to_string())?;
-    let download_dir = app_dirs.join("updates");
+    let app_data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
+    let download_dir = app_data_dir.join("updates");
     fs::create_dir_all(&download_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
 
     let file_name = PathBuf::from(update_info.download_url.clone())
@@ -189,18 +193,19 @@ pub async fn download_update(
             let _ = response
                 .headers_mut()
                 .insert("Range", format!("bytes={}-", existing_size).parse().unwrap());
-            existing_size
+            (f, existing_size)
         } else {
             fs::remove_file(&file_path).ok();
-            File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
-            0
+            let f = File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
+            (f, 0)
         }
     } else {
-        File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
+        let f = File::create(&file_path).map_err(|e| format!("创建文件失败: {}", e))?;
+        (f, 0)
     };
 
-    let mut bytes_downloaded = file.seek(SeekFrom::End(0)).map_err(|e| format!("定位文件失败: {}", e))?;
-    let mut buf_writer = BufWriter::new(&mut file);
+    let mut bytes_downloaded = file.0.seek(SeekFrom::End(0)).map_err(|e| format!("定位文件失败: {}", e))?;
+    let mut buf_writer = BufWriter::new(&mut file.0);
 
     while let Ok(Some(chunk)) = response.chunk().await {
         bytes_downloaded += chunk.len() as u64;
@@ -246,10 +251,16 @@ pub fn install_update(app_handle: &AppHandle, file_path: &Path) -> Result<(), St
     {
         use std::process::Command;
 
-        let exe_path = app_handle
+        let resource_path = app_handle
             .path()
-            .resolve_resource("bin\\updater.exe")
-            .ok_or_else(|| "无法找到更新器程序".to_string())?;
+            .resource_dir()
+            .map_err(|e| format!("无法获取资源目录: {}", e))?;
+        
+        let exe_path = resource_path.join("bin").join("updater.exe");
+        
+        if !exe_path.exists() {
+            return Err(format!("更新器程序不存在: {:?}", exe_path));
+        }
 
         let command = Command::new(&exe_path)
             .arg("/install")
@@ -257,7 +268,7 @@ pub fn install_update(app_handle: &AppHandle, file_path: &Path) -> Result<(), St
             .spawn()
             .map_err(|e| format!("启动更新器失败: {}", e))?;
 
-        log::info!("更新器已启动，进程ID: {}", command.id());
+        println!("[更新] 更新器已启动，进程ID: {}", command.id());
         Ok(())
     }
     #[cfg(not(windows))]
@@ -315,28 +326,12 @@ pub async fn check_update_auto() -> Result<CheckResult, String> {
 }
 
 #[tauri::command]
-pub async fn download_update_command(update_info: UpdateInfo) -> Result<PathBuf, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    let progress_tx = Arc::new(Mutex::new(tx));
-
-    let handle = tokio::spawn(async move {
-        let result = download_update(&update_info, move |downloaded, total| {
-            if let Ok(mut tx) = progress_tx.lock().unwrap().try_send((downloaded, total)) {
-                let _ = tx.send(());
-            }
-        }).await;
-
-        result
-    });
-
-    tauri::async_runtime::spawn(async move {
-        while let Ok((downloaded, total)) = rx.await {
-            let _ = tauri::emit_all("update-progress", (downloaded, total));
-        }
-    });
-
-    handle.await.unwrap()
+pub async fn download_update_command(app_handle: AppHandle, update_info: UpdateInfo) -> Result<PathBuf, String> {
+    let app_handle_clone = app_handle.clone();
+    
+    download_update(&app_handle, &update_info, move |downloaded, total| {
+        let _ = app_handle_clone.emit("update-progress", (downloaded, total));
+    }).await
 }
 
 #[tauri::command]
