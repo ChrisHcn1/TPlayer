@@ -183,26 +183,54 @@ fn check_wav_bit_depth(path: &str) -> Option<u16> {
 
 // 检查是否在Microsoft Store环境中运行
 fn is_microsoft_store_version() -> bool {
-    // 检查MSIX包信息
+    // 方法1：检查MSIX包信息环境变量
     if let Ok(_) = std::env::var("MSIX_PACKAGEFamilyName") {
-        println!("[转码检查] 检测到MSIX包环境");
+        println!("[转码检查] 检测到MSIX包环境 (MSIX_PACKAGEFamilyName)");
         return true;
     }
     
-    // 检查应用是否安装在其他用户的AppData目录（Microsoft Store典型路径）
+    // 方法2：检查AppExecutionAlias链接（Microsoft Store应用通过这种方式启动）
     if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
         let packages_path = std::path::Path::new(&localappdata).join("Packages");
         if packages_path.exists() {
             // 检查当前进程路径是否在Packages目录下
             if let Ok(exe_path) = std::env::current_exe() {
-                if exe_path.to_string_lossy().contains("Packages") {
-                    println!("[转码检查] 检测到Microsoft Store安装路径");
+                let exe_str = exe_path.to_string_lossy();
+                if exe_str.contains("Packages") {
+                    println!("[转码检查] 检测到Microsoft Store安装路径 (Packages目录)");
                     return true;
+                }
+            }
+        }
+        
+        // 方法3：检查是否通过 WindowsApps 别名启动
+        if let Ok(programfiles) = std::env::var("ProgramFiles") {
+            let windows_apps_path = std::path::Path::new(&programfiles).join("WindowsApps");
+            if windows_apps_path.exists() {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    let exe_str = exe_path.to_string_lossy();
+                    if exe_str.contains("WindowsApps") {
+                        println!("[转码检查] 检测到WindowsApps安装路径");
+                        return true;
+                    }
                 }
             }
         }
     }
     
+    // 方法4：检查是否存在UWP特有的文件系统路径限制
+    // Microsoft Store应用无法访问某些路径
+    if let Ok(_) = std::env::var("ProgramFiles(x86)") {
+        // 在64位Windows上，检查当前进程是否是32位进程运行在64位Windows上
+        // Microsoft Store应用通常是32位的
+        #[cfg(target_arch = "x86")]
+        {
+            println!("[转码检查] 运行在32位进程中，可能是Microsoft Store版本");
+            // 注意：这个检测不够可靠，仅作为辅助
+        }
+    }
+    
+    println!("[转码检查] 未检测到Microsoft Store环境，使用标准播放模式");
     false
 }
 

@@ -1203,7 +1203,20 @@ pub async fn play_song(
             println!("[播放] 添加音频源到播放器");
             new_sink.append(boxed_source);
             new_sink.play();
-            println!("[播放] 开始播放，sink状态: 空={}, 已结束={}", new_sink.empty(), new_sink.is_paused());
+            
+            // 诊断：检查播放状态
+            println!("[播放] 开始播放，sink状态: 空={}, 已暂停={}", 
+                     new_sink.empty(), new_sink.is_paused());
+            
+            // 等待一小段时间，检查是否真的在播放
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            println!("[播放] 等待后检查，sink状态: 空={}, 已暂停={}", 
+                     new_sink.empty(), new_sink.is_paused());
+            
+            // 如果sink显示为空，记录警告
+            if new_sink.empty() {
+                println!("[播放] 警告: sink显示为空，音频源可能无效或已耗尽");
+            }
             
             player.sink = Some(new_sink);
         }
