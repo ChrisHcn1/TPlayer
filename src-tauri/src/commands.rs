@@ -1003,14 +1003,18 @@ pub async fn play_song(
         })?;
     
     println!("[播放] 文件打开成功，开始解码...");
-    let mut source = rodio::Decoder::new(file)
-        .map_err(|e| {
+    let mut source = match rodio::Decoder::new(file) {
+        Ok(s) => {
+            println!("[播放] 解码成功");
+            s
+        }
+        Err(e) => {
             let error_msg = format!("解码失败: {}", e);
             eprintln!("[播放] {}", error_msg);
             
             // 尝试检查文件是否存在
             if !std::path::Path::new(&play_path).exists() {
-                return format!("文件不存在: {}", play_path);
+                return Err(format!("文件不存在: {}", play_path));
             }
             
             // 尝试检查文件权限
@@ -1024,10 +1028,15 @@ pub async fn play_song(
                 }
             }
             
-            error_msg
-        })?;
-    
-    println!("[播放] 解码成功");
+            // 解码失败，尝试使用ffplay回退播放
+            println!("[播放] 尝试使用ffplay回退播放...");
+            return ffmpeg_transcoder::play_with_ffplay(
+                play_path.clone(), 
+                position, 
+                None
+            ).await;
+        }
+    };
     
     // 打印音频参数
     let sample_rate = source.sample_rate();

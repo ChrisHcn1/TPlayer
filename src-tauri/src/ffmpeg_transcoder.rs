@@ -98,15 +98,6 @@ const NATIVE_SUPPORTED_EXTENSIONS: &[&str] = &[
 // 需要转码的音频格式（rodio不支持的格式）
 const TRANSCODE_EXTENSIONS: &[&str] = &["ape", "dsd", "dts", "dff", "dsf", "sacd", "wv"];
 
-// 在Microsoft Store版本中可能有兼容性问题的格式，即使rodio声称支持
-// 这些格式会被强制转码以确保兼容性
-const STORE_COMPAT_ISSUES_EXTENSIONS: &[&str] = &[
-    "mp3",    // 某些MP3编码器（如LAME）在rodio中可能解码异常
-    "aac",    // 非标准AAC配置可能被rodio拒绝
-    "m4a",    // 包含特定元数据的M4A可能有问题
-    "ogg",    // 某些Ogg封装可能被rodio误解
-];
-
 // 转码缓存项
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -181,59 +172,6 @@ fn check_wav_bit_depth(path: &str) -> Option<u16> {
     None
 }
 
-// 检查是否在Microsoft Store环境中运行
-fn is_microsoft_store_version() -> bool {
-    // 方法1：检查MSIX包信息环境变量
-    if let Ok(_) = std::env::var("MSIX_PACKAGEFamilyName") {
-        println!("[转码检查] 检测到MSIX包环境 (MSIX_PACKAGEFamilyName)");
-        return true;
-    }
-    
-    // 方法2：检查AppExecutionAlias链接（Microsoft Store应用通过这种方式启动）
-    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-        let packages_path = std::path::Path::new(&localappdata).join("Packages");
-        if packages_path.exists() {
-            // 检查当前进程路径是否在Packages目录下
-            if let Ok(exe_path) = std::env::current_exe() {
-                let exe_str = exe_path.to_string_lossy();
-                if exe_str.contains("Packages") {
-                    println!("[转码检查] 检测到Microsoft Store安装路径 (Packages目录)");
-                    return true;
-                }
-            }
-        }
-        
-        // 方法3：检查是否通过 WindowsApps 别名启动
-        if let Ok(programfiles) = std::env::var("ProgramFiles") {
-            let windows_apps_path = std::path::Path::new(&programfiles).join("WindowsApps");
-            if windows_apps_path.exists() {
-                if let Ok(exe_path) = std::env::current_exe() {
-                    let exe_str = exe_path.to_string_lossy();
-                    if exe_str.contains("WindowsApps") {
-                        println!("[转码检查] 检测到WindowsApps安装路径");
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    
-    // 方法4：检查是否存在UWP特有的文件系统路径限制
-    // Microsoft Store应用无法访问某些路径
-    if let Ok(_) = std::env::var("ProgramFiles(x86)") {
-        // 在64位Windows上，检查当前进程是否是32位进程运行在64位Windows上
-        // Microsoft Store应用通常是32位的
-        #[cfg(target_arch = "x86")]
-        {
-            println!("[转码检查] 运行在32位进程中，可能是Microsoft Store版本");
-            // 注意：这个检测不够可靠，仅作为辅助
-        }
-    }
-    
-    println!("[转码检查] 未检测到Microsoft Store环境，使用标准播放模式");
-    false
-}
-
 // 检查文件是否需要转码
 pub fn needs_transcode(path: &str) -> bool {
     let path_lower = path.to_lowercase();
@@ -267,17 +205,8 @@ pub fn needs_transcode(path: &str) -> bool {
             }
         }
         
-        // 检查Microsoft Store版本兼容性问题
-        // 在Microsoft Store版本中，某些声称"原生支持"的格式可能实际无法播放
-        if is_microsoft_store_version() {
-            if STORE_COMPAT_ISSUES_EXTENSIONS.iter().any(|ext| {
-                path_lower.ends_with(&format!(".{}", ext))
-            }) {
-                println!("[转码检查] Microsoft Store版本：强制转码可能有兼容性问题的格式 ({})", path_lower);
-                return true;
-            }
-        }
-        
+        // 启用symphonia-all后，所有常用格式都被支持，不需要强制转码
+        // 注意：24位和32位WAV仍然需要转码（rodio的symphonia不支持）
         println!("[转码检查] 原生支持格式，无需转码");
         return false; // 原生支持，无需转码
     }
