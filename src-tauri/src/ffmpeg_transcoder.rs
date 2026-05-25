@@ -206,7 +206,8 @@ pub fn needs_transcode(path: &str) -> bool {
         }
         
         // 启用symphonia-all后，所有常用格式都被支持，不需要强制转码
-        // 注意：24位和32位WAV仍然需要转码（rodio的symphonia不支持）
+        // 注意：24位和32位WAV仍然需要转码，因为rodio的symphonia可能不支持
+        
         println!("[转码检查] 原生支持格式，无需转码");
         return false; // 原生支持，无需转码
     }
