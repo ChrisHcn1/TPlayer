@@ -202,6 +202,13 @@
       <button class="btn btn-secondary" @click="cancel">{{ t('common.cancel') }}</button>
       <button class="btn btn-primary" @click="saveSettings">{{ t('common.save') }}</button>
     </div>
+    
+    <!-- 关于对话框 -->
+    <AboutDialog 
+      :visible="showAboutDialog" 
+      :is-browser="isBrowser"
+      @close="closeAboutDialog" 
+    />
   </div>
 </template>
 
@@ -209,8 +216,9 @@
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { t } from '../services/i18n'
+import AboutDialog from './AboutDialog.vue'
 
-// 定义props
+// 定义 props
 const props = defineProps({
   crossfadeEnabled: {
     type: Boolean,
@@ -277,6 +285,9 @@ const props = defineProps({
     default: false
   }
 })
+
+// 关于对话框状态
+const showAboutDialog = ref(false)
 
 // 定义emit
 const emit = defineEmits([
@@ -464,33 +475,12 @@ onMounted(async () => {
 
 // 显示关于对话框
 const showAbout = () => {
-  const aboutContent = `
-    <div style="text-align: center; padding: 20px;">
-      <img src="/logo.png" alt="TPlayer Logo" style="width: 80px; height: 80px; border-radius: 12px; margin-bottom: 15px;" />
-      <h2 style="margin: 0 0 10px 0; color: #4CAF50;">TPlayer</h2>
-      <p style="margin: 5px 0; color: #b0b0b0; font-size: 14px;">版本: ${appVersion.value}</p>
-      <p style="margin: 5px 0; color: #b0b0b0; font-size: 14px;">一款现代化的桌面音乐播放器</p>
-      <div style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px;">
-        <p style="margin: 5px 0; color: #b0b0b0; font-size: 13px;">开发者: ChrisHcn1</p>
-        <p style="margin: 5px 0; color: #b0b0b0; font-size: 13px;">
-          <a href="https://github.com/ChrisHcn1/TPlayer" target="_blank" style="color: #4CAF50; text-decoration: none;">GitHub仓库</a>
-        </p>
-        <p style="margin: 15px 0 5px 0; color: #b0b0b0; font-size: 13px;">功能特性:</p>
-        <ul style="text-align: left; margin: 10px 0; padding-left: 20px; color: #b0b0b0; font-size: 13px;">
-          <li>支持多种音频格式播放</li>
-          <li>音频转码功能</li>
-          <li>均衡器控制</li>
-          <li>歌词显示</li>
-          <li>主题切换</li>
-          <li>多语言支持</li>
-        </ul>
-      </div>
-      <p style="margin-top: 15px; color: #4CAF50; font-size: 14px;">感谢您使用 TPlayer！</p>
-    </div>
-  `
-  
-  // 使用alert显示关于信息（简单实现）
-  alert(aboutContent.replace(/<[^>]*>/g, '\n').replace(/\n+/g, '\n').trim())
+  showAboutDialog.value = true
+}
+
+// 关闭关于对话框
+const closeAboutDialog = () => {
+  showAboutDialog.value = false
 }
 </script>
 

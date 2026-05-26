@@ -6,6 +6,22 @@
     "cancel": "取消",
     "close": "关闭"
   },
+  "about": {
+    "version": "版本",
+    "description": "一款现代化的桌面音乐播放器",
+    "developer": "开发者",
+    "githubRepo": "GitHub 仓库",
+    "githubUrl": "https://github.com/ChrisHcn1/TPlayer",
+    "featuresTitle": "功能特性:",
+    "feature1": "支持多种音频格式播放",
+    "feature2": "音频转码功能",
+    "feature3": "均衡器控制",
+    "feature4": "歌词显示",
+    "feature5": "主题切换",
+    "feature6": "多语言支持",
+    "thanks": "感谢您使用 TPlayer!",
+    "unknownVersion": "未知版本"
+  },
   "player": {
     "play": "播放",
     "pause": "暂停",
@@ -33,8 +49,20 @@
     "light": "浅色",
     "about": "关于",
     "viewAbout": "查看关于",
-    "enableNewSelectionUI": "启用新选择UI",
-    "enableNewSelectionUIDesc": "现代化多选界面，支持批量操作"
+    "enableNewSelectionUI": "启用新选择 UI",
+    "enableNewSelectionUIDesc": "现代化多选界面，支持批量操作",
+    "update": "更新设置",
+    "autoUpdate": "自动检查更新",
+    "updateInterval": "更新检查间隔",
+    "every6Hours": "每 6 小时",
+    "every12Hours": "每 12 小时",
+    "everyDay": "每天",
+    "every3Days": "每 3 天",
+    "backgroundUpdate": "后台更新",
+    "backgroundUpdateHint": "下载后提示安装",
+    "checkUpdate": "检查更新",
+    "checkNow": "立即检查",
+    "checking": "正在检查"
   },
   "playlist": {
     "title": "播放列表",

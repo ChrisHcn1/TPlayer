@@ -6,6 +6,22 @@
     "cancel": "Cancel",
     "close": "Close"
   },
+  "about": {
+    "version": "Version",
+    "description": "A modern desktop music player",
+    "developer": "Developer",
+    "githubRepo": "GitHub Repository",
+    "githubUrl": "https://github.com/ChrisHcn1/TPlayer",
+    "featuresTitle": "Features:",
+    "feature1": "Support multiple audio formats",
+    "feature2": "Audio transcoding",
+    "feature3": "Equalizer control",
+    "feature4": "Lyrics display",
+    "feature5": "Theme switching",
+    "feature6": "Multi-language support",
+    "thanks": "Thank you for using TPlayer!",
+    "unknownVersion": "Unknown Version"
+  },
   "player": {
     "play": "Play",
     "pause": "Pause",
@@ -34,7 +50,19 @@
     "about": "About",
     "viewAbout": "View About",
     "enableNewSelectionUI": "Enable New Selection UI",
-    "enableNewSelectionUIDesc": "Modern multi-select interface with batch operations"
+    "enableNewSelectionUIDesc": "Modern multi-select interface with batch operations",
+    "update": "Update Settings",
+    "autoUpdate": "Auto Check for Updates",
+    "updateInterval": "Update Check Interval",
+    "every6Hours": "Every 6 hours",
+    "every12Hours": "Every 12 hours",
+    "everyDay": "Every day",
+    "every3Days": "Every 3 days",
+    "backgroundUpdate": "Background Update",
+    "backgroundUpdateHint": "Notify after download",
+    "checkUpdate": "Check for Updates",
+    "checkNow": "Check Now",
+    "checking": "Checking"
   },
   "playlist": {
     "title": "Playlist",
