@@ -163,10 +163,8 @@
         <label class="setting-label">{{ t('settings.updateInterval') }}</label>
         <div class="setting-control">
           <select :value="localUpdateInterval" @change="handleUpdateIntervalChange($event)">
-            <option value="6">{{ t('settings.every6Hours') }}</option>
-            <option value="12">{{ t('settings.every12Hours') }}</option>
             <option value="24">{{ t('settings.everyDay') }}</option>
-            <option value="72">{{ t('settings.every3Days') }}</option>
+            <option value="168">{{ t('settings.everyWeek') }}</option>
           </select>
         </div>
       </div>
