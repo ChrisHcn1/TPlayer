@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap3 rescap">
+  <Identity Name="TPlayer.TPlayer"
+            Publisher="CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0"
+            Version="1.0.4.0"
+            ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>TPlayer</DisplayName>
+    <PublisherDisplayName>TPlayer Team</PublisherDisplayName>
+    <Logo>icons\StoreLogo.png</Logo>
+    <Description>A modern music player with DSD support and advanced lyric features.</Description>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="zh-cn" />
+    <Resource uap:Scale="100" />
+    <Resource uap:Scale="125" />
+    <Resource uap:Scale="150" />
+    <Resource uap:Scale="200" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
+  <Applications>
+    <Application Id="App"
+                 Executable="app.exe"
+                 EntryPoint="$targetentrypoint$">
+      <uap:VisualElements
+        DisplayName="TPlayer"
+        Description="A modern music player with DSD support and advanced lyric features."
+        BackgroundColor="#1a1a2e"
+        Square150x150Logo="icons\Square150x150Logo.png"
+        Square44x44Logo="icons\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="icons\Square310x310Logo.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap3:Extension Category="windows.fileTypeAssociation">
+          <uap3:FileTypeAssociation Name="audiofiles">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.mp3</uap:FileType>
+              <uap:FileType>.flac</uap:FileType>
+              <uap:FileType>.wav</uap:FileType>
+              <uap:FileType>.aac</uap:FileType>
+              <uap:FileType>.ogg</uap:FileType>
+              <uap:FileType>.m4a</uap:FileType>
+              <uap:FileType>.wma</uap:FileType>
+              <uap:FileType>.dsf</uap:FileType>
+              <uap:FileType>.dff</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap3:FileTypeAssociation>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
