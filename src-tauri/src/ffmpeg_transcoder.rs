@@ -1585,7 +1585,7 @@ pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Valu
     }
     
     // 播放状态下，首先尝试使用stdin发送seek命令（不重启进程）
-    let stdin_result = try_seek_via_stdin(position);
+    let stdin_result = execute_stdin_seek(position);
     
     match stdin_result {
         Ok(msg) => {
@@ -1618,79 +1618,81 @@ pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Valu
     }
 }
 
-// 通过stdin发送seek命令
-fn try_seek_via_stdin(position: f64) -> Result<String, String> {
+// StdinSeek执行器：发送方向键命令
+fn execute_stdin_seek(target_pos: f64) -> Result<String, String> {
     let mut process = FFPLAY_PROCESS.lock().unwrap();
     
     if let Some(ref mut child) = *process {
         if let Some(ref mut stdin) = child.stdin.as_mut() {
             use std::io::Write;
             
-            // 获取当前位置
-            let current_pos = {
+            // 获取当前位置和播放状态
+            let (current_pos, is_playing) = {
                 let status = FFPLAY_STATUS.lock().unwrap();
-                status.position
+                (status.position, status.is_playing)
             };
             
-            // 计算需要移动的距离
-            let diff = position - current_pos;
-            println!("[FFplay] 当前位置: {:.2}秒, 目标位置: {:.2}秒, 差值: {:.2}秒", 
-                current_pos, position, diff);
-            
-            // 如果差值很小，不需要seek
-            if diff.abs() < 0.5 {
-                println!("[FFplay] 差值小于0.5秒，无需seek");
-                return Ok(format!("位置已在目标附近: {:.2}秒", current_pos));
+            // 确保在播放状态
+            if !is_playing {
+                return Err("暂停状态下不建议使用stdin seek".to_string());
             }
             
-            // 发送seek命令
-            // ffplay的交互式控制: 左键=后退10秒，右键=前进10秒
-            // 对于大跨度seek，我们发送多个方向键命令
-            let times = (diff.abs() / 10.0).ceil() as i32;
+            // 计算需要移动的距离和方向键次数
+            let diff = target_pos - current_pos;
+            let abs_diff = if diff > 0.0 { diff } else { -diff };
+            
+            // 确认距离在合理范围（5-10秒）
+            if abs_diff < 5.0 {
+                return Ok("差值太小，无需seek".to_string());
+            }
+            if abs_diff >= 10.0 {
+                return Err("距离过大，建议使用进程重启方式".to_string());
+            }
+            
+            // 计算方向键次数（每次10秒）
+            let times = (abs_diff / 10.0).ceil() as i32;
             let direction_byte = if diff > 0.0 { b'C' } else { b'D' };
             
-            println!("[FFplay] 将发送 {} 次方向键命令 ({})", times, if diff > 0.0 { "前进" } else { "后退" });
+            println!("[FFplay] StdinSeek: 当前={:.2}秒, 目标={:.2}秒, 差值={:.2}秒, 次数={}", 
+                current_pos, target_pos, diff, times);
             
+            // 发送方向键命令
             for i in 0..times {
-                // 发送方向键命令: ESC [ C (右箭头) 或 ESC [ D (左箭头)
                 let cmd = [b'\x1b', b'[', direction_byte];
                 if let Err(e) = stdin.write_all(&cmd) {
-                    return Err(format!("发送方向键失败 (第{}次): {}", i + 1, e));
+                    return Err(format!("发送第{}次方向键失败: {}", i + 1, e));
                 }
-                
-                // 每次发送后稍微等待，避免命令堆积
+                // 每次发送后等待50毫秒
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             
-            if let Err(e) = stdin.flush() {
-                return Err(format!("刷新stdin失败: {}", e));
-            }
-            
-            println!("[FFplay] 方向键seek命令发送完成");
-            
-            // 更新状态位置（实际位置会由输出解析线程修正）
-            let mut status = FFPLAY_STATUS.lock().unwrap();
-            // 估算新位置（会被输出解析线程修正）
-            let estimated_pos = current_pos + (times as f64 * if diff > 0.0 { 10.0 } else { -10.0 });
-            status.position = estimated_pos;
+            // 估算新位置
+            let estimated_pos = current_pos + (times as f64 * 10.0 * if diff > 0.0 { 1.0 } else { -1.0 });
             
             // 关键修复：更新起始偏移量，使输出解析线程能正确计算绝对位置
-            // 方向键seek后，ffplay的内部时间基准不变，但我们需要调整偏移量
-            let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
-            *offset = estimated_pos;
-            println!("[FFplay] 方向键seek后更新偏移量: {:.2}秒", *offset);
+            {
+                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+                *offset = estimated_pos;
+                println!("[FFplay] StdinSeek后更新偏移量: {:.2}秒", *offset);
+            }
+            
+            // 更新状态位置
+            {
+                let mut status = FFPLAY_STATUS.lock().unwrap();
+                status.position = estimated_pos;
+            }
             
             // 重置起始时刻，以便监控线程正确计算
-            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-            *instant = Some(std::time::Instant::now());
+            {
+                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+                *instant = Some(std::time::Instant::now());
+            }
             
-            Ok(format!("Seek命令已发送，估算位置: {:.2}秒", estimated_pos))
-        } else {
-            Err("无法获取ffplay进程的stdin".to_string())
+            return Ok(format!("StdinSeek成功，估算位置: {:.2}秒", estimated_pos));
         }
-    } else {
-        Err("ffplay进程未运行".to_string())
     }
+    
+    Err("FFplay进程不存在或stdin不可用".to_string())
 }
 
 // 设置音量
