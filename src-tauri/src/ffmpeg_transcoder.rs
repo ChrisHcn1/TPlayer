@@ -1544,6 +1544,45 @@ pub fn resume_ffplay() -> Result<String, String> {
     Err("FFplay未在播放".to_string())
 }
 
+// ProcessRestartSeek执行器：重启进程实现精确定位
+async fn execute_process_restart_seek(path: String, target_pos: f64) -> Result<serde_json::Value, String> {
+    println!("[FFplay] ProcessRestartSeek: 路径={}, 目标位置={:.2}秒", path, target_pos);
+    
+    // 保存当前播放状态
+    let was_playing = {
+        let status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing
+    };
+    
+    println!("[FFplay] 之前播放状态: {}", was_playing);
+    
+    // 停止当前进程
+    stop_ffplay()?;
+    
+    // 等待进程完全停止（100毫秒）
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    
+    // 启动新进程，使用-ss参数精确定位
+    let result = play_with_ffplay(path.clone(), Some(target_pos), None).await;
+    
+    // 如果之前是暂停状态，立即暂停
+    if !was_playing {
+        println!("[FFplay] 之前是暂停状态，立即暂停新进程");
+        // 等待进程启动（200毫秒）
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        pause_ffplay()?;
+    }
+    
+    // 确认位置已正确设置
+    {
+        let status = FFPLAY_STATUS.lock().unwrap();
+        println!("[FFplay] ProcessRestartSeek完成: 位置={:.2}秒, 播放状态={}", 
+            status.position, status.is_playing);
+    }
+    
+    result
+}
+
 // 跳转到指定位置
 #[tauri::command]
 pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Value, String> {
