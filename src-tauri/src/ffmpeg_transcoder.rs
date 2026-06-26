@@ -34,6 +34,36 @@ static FFMPEG_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(
 static FFPROBE_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 static FFPLAY_PATH_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
+// Seek策略枚举
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SeekStrategy {
+    /// 无需seek（差值太小）
+    NoSeek,
+    /// 使用stdin方向键（小范围、播放状态）
+    StdinSeek,
+    /// 重启进程（大范围或暂停状态）
+    ProcessRestartSeek,
+}
+
+// Seek策略选择器
+fn decide_seek_strategy(current_pos: f64, target_pos: f64, is_playing: bool) -> SeekStrategy {
+    let diff = target_pos - current_pos;
+    let abs_diff = if diff > 0.0 { diff } else { -diff };
+    
+    // 差值小于5秒，无需seek
+    if abs_diff < 5.0 {
+        return SeekStrategy::NoSeek;
+    }
+    
+    // 暂停状态或差值大于等于10秒，使用进程重启
+    if !is_playing || abs_diff >= 10.0 {
+        return SeekStrategy::ProcessRestartSeek;
+    }
+    
+    // 播放状态且差值在5-10秒之间，使用stdin方向键
+    SeekStrategy::StdinSeek
+}
+
 // 用户自定义FFmpeg路径存储
 static CUSTOM_FFMPEG_PATH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
@@ -331,11 +361,13 @@ impl TranscodeCache {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         
-        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        // 在Windows系统上设置进程创建标志
+        // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+        // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
         }
         
         if cmd.output().is_ok() {
@@ -435,11 +467,13 @@ impl TranscodeCache {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         
-        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        // 在Windows系统上设置进程创建标志
+        // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+        // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
         }
         
         if cmd.output().is_ok() {
@@ -531,11 +565,13 @@ impl TranscodeCache {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         
-        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        // 在Windows系统上设置进程创建标志
+        // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+        // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
         }
         
         if cmd.output().is_ok() {
@@ -752,11 +788,13 @@ impl TranscodeCache {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
             
-            // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            // 在Windows系统上设置进程创建标志
+            // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+            // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                cmd.creation_flags(0x08000000 | 0x00000200);
             }
             
             let probe_result = cmd.output();
@@ -944,11 +982,13 @@ impl TranscodeCache {
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped()); // 捕获错误输出
             
-            // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            // 在Windows系统上设置进程创建标志
+            // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+            // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                cmd.creation_flags(0x08000000 | 0x00000200);
             }
             
             let output = cmd.output();
@@ -1231,7 +1271,8 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
     // 设置FFplay参数
     cmd.arg("-autoexit"); // 播放完成后自动退出
     cmd.arg("-nodisp");  // 不显示视频窗口
-    cmd.arg("-loglevel"); cmd.arg("error"); // 错误模式，只显示错误
+    cmd.arg("-loglevel"); cmd.arg("verbose"); // 详细输出模式，便于解析进度
+    cmd.arg("-stats");    // 显示统计信息（包含时间码）
     
     // 设置起始时间
     if let Some(start) = start_time {
@@ -1246,31 +1287,26 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
     // 添加音频文件路径
     cmd.arg(&path);
     
-    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    // 在Windows系统上设置进程创建标志
+    // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+    // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.creation_flags(0x08000000 | 0x00000200);
     }
     
-    // 重定向输出到文件，便于调试
-    let temp_dir = std::env::temp_dir();
-    let log_path = temp_dir.join("ffplay_output.log");
-    let log_file = std::fs::File::create(&log_path).map_err(|e| format!("创建日志文件失败: {}", e))?;
-    cmd.stdout(log_file.try_clone().map_err(|e| format!("克隆文件句柄失败: {}", e))?);
-
-    // 不重定向错误输出，以便捕获FFplay的错误信息
-    // cmd.stderr(Stdio::null());
-
     // 重定向stdin，以便发送控制命令
     cmd.stdin(Stdio::piped());
+    // 重定向stdout和stderr用于解析进度信息
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     
     // 打印完整的FFplay命令
     println!("[FFplay] 启动命令: {:?}", cmd);
-    println!("[FFplay] FFplay日志文件: {:?}", log_path);
 
     // 启动FFplay进程
-    let child = cmd.spawn()
+    let mut child = cmd.spawn()
         .map_err(|e| format!("启动FFplay失败: {}", e))?;
 
     println!("[FFplay] 进程已启动，PID: {}", child.id());
@@ -1279,11 +1315,17 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
     let old_count = FFPLAY_PROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
     println!("[FFplay] 进程计数增加: {} -> {}", old_count, old_count + 1);
 
+    // 提取stderr用于解析进度信息
+    let stderr = child.stderr.take().expect("无法获取stderr");
+    
     // 保存进程句柄
     {
         let mut process = FFPLAY_PROCESS.lock().unwrap();
         *process = Some(child);
     }
+
+    // 启动输出解析线程
+    start_ffplay_output_parser(stderr);
 
     // 获取音频文件信息
     let audio_info = get_audio_info(&path);
@@ -1422,19 +1464,15 @@ pub fn pause_ffplay() -> Result<String, String> {
             let mut status = FFPLAY_STATUS.lock().unwrap();
             status.is_playing = false;
             
-            // 保存当前播放位置
+            // 保存当前播放位置到全局变量
             let paused_position = status.position;
             drop(status);
             
-            // 清除起始时刻，停止时钟推进；将当前位置存入 FFPLAY_START_OFFSET
-            // 以便恢复时从暂停处继续计时
+            // 清除起始时刻，停止时钟推进
+            // 注意：不要更新 FFPLAY_START_OFFSET，因为ffplay内部时间基准未改变
             {
                 let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
                 *instant = None;
-            }
-            {
-                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
-                *offset = paused_position;
             }
             
             // 保存到全局变量
@@ -1512,25 +1550,147 @@ pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Valu
     println!("[FFplay] 开始seek到位置: {:.2}秒, 路径: {}", position, path);
     
     // 获取当前播放状态
-    let was_playing = {
+    let (current_pos, is_playing) = {
         let status = FFPLAY_STATUS.lock().unwrap();
-        status.is_playing
+        (status.position, status.is_playing)
     };
-    println!("[FFplay] seek前播放状态: {}", was_playing);
     
-    // 直接调用 play_with_ffplay，它会自动处理停止当前播放
-    // 不需要先调用 stop_ffplay()，因为 play_with_ffplay() 已经会调用
-    let result = play_with_ffplay(path, Some(position), None).await;
+    println!("[FFplay] 当前位置: {:.2}秒, 当前播放状态: {}", current_pos, is_playing);
     
-    // 如果之前在播放，确保恢复播放状态（play_with_ffplay已经设置为true）
-    if was_playing {
-        let mut status = FFPLAY_STATUS.lock().unwrap();
-        status.is_playing = true;
-        println!("[FFplay] 恢复播放状态为true");
+    // 如果差值很小，不需要seek，直接更新状态
+    let diff = position - current_pos;
+    if diff.abs() < 0.5 {
+        println!("[FFplay] 差值小于0.5秒，无需seek");
+        return Ok(serde_json::json!({
+            "success": true,
+            "message": "位置已在目标附近",
+            "position": current_pos,
+            "method": "none"
+        }));
     }
     
-    println!("[FFplay] seek完成: {:?}", result);
-    result
+    // 如果当前是暂停状态，使用精确seek（重启进程）
+    if !is_playing {
+        println!("[FFplay] 当前处于暂停状态，使用精确seek（重启进程）");
+        
+        // 调用 play_with_ffplay，它会自动处理停止当前播放
+        let result = play_with_ffplay(path, Some(position), None).await;
+        
+        // 暂停新进程
+        if let Ok(_) = pause_ffplay() {
+            println!("[FFplay] seek后已暂停");
+        }
+        
+        return result;
+    }
+    
+    // 播放状态下，首先尝试使用stdin发送seek命令（不重启进程）
+    let stdin_result = try_seek_via_stdin(position);
+    
+    match stdin_result {
+        Ok(msg) => {
+            // stdin seek成功
+            println!("[FFplay] stdin seek成功: {}", msg);
+            
+            // 更新状态
+            let mut status = FFPLAY_STATUS.lock().unwrap();
+            status.position = position;
+            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+            *instant = Some(std::time::Instant::now());
+            
+            return Ok(serde_json::json!({
+                "success": true,
+                "message": msg,
+                "position": position,
+                "method": "stdin"
+            }));
+        }
+        Err(e) => {
+            // stdin seek失败，回退到重启进程方式
+            println!("[FFplay] stdin seek失败: {}, 回退到重启进程方式", e);
+            
+            // 调用 play_with_ffplay，它会自动处理停止当前播放
+            let result = play_with_ffplay(path, Some(position), None).await;
+            
+            println!("[FFplay] seek完成: {:?}", result);
+            return result;
+        }
+    }
+}
+
+// 通过stdin发送seek命令
+fn try_seek_via_stdin(position: f64) -> Result<String, String> {
+    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    
+    if let Some(ref mut child) = *process {
+        if let Some(ref mut stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            
+            // 获取当前位置
+            let current_pos = {
+                let status = FFPLAY_STATUS.lock().unwrap();
+                status.position
+            };
+            
+            // 计算需要移动的距离
+            let diff = position - current_pos;
+            println!("[FFplay] 当前位置: {:.2}秒, 目标位置: {:.2}秒, 差值: {:.2}秒", 
+                current_pos, position, diff);
+            
+            // 如果差值很小，不需要seek
+            if diff.abs() < 0.5 {
+                println!("[FFplay] 差值小于0.5秒，无需seek");
+                return Ok(format!("位置已在目标附近: {:.2}秒", current_pos));
+            }
+            
+            // 发送seek命令
+            // ffplay的交互式控制: 左键=后退10秒，右键=前进10秒
+            // 对于大跨度seek，我们发送多个方向键命令
+            let times = (diff.abs() / 10.0).ceil() as i32;
+            let direction_byte = if diff > 0.0 { b'C' } else { b'D' };
+            
+            println!("[FFplay] 将发送 {} 次方向键命令 ({})", times, if diff > 0.0 { "前进" } else { "后退" });
+            
+            for i in 0..times {
+                // 发送方向键命令: ESC [ C (右箭头) 或 ESC [ D (左箭头)
+                let cmd = [b'\x1b', b'[', direction_byte];
+                if let Err(e) = stdin.write_all(&cmd) {
+                    return Err(format!("发送方向键失败 (第{}次): {}", i + 1, e));
+                }
+                
+                // 每次发送后稍微等待，避免命令堆积
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            
+            if let Err(e) = stdin.flush() {
+                return Err(format!("刷新stdin失败: {}", e));
+            }
+            
+            println!("[FFplay] 方向键seek命令发送完成");
+            
+            // 更新状态位置（实际位置会由输出解析线程修正）
+            let mut status = FFPLAY_STATUS.lock().unwrap();
+            // 估算新位置（会被输出解析线程修正）
+            let estimated_pos = current_pos + (times as f64 * if diff > 0.0 { 10.0 } else { -10.0 });
+            status.position = estimated_pos;
+            
+            // 关键修复：更新起始偏移量，使输出解析线程能正确计算绝对位置
+            // 方向键seek后，ffplay的内部时间基准不变，但我们需要调整偏移量
+            let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+            *offset = estimated_pos;
+            println!("[FFplay] 方向键seek后更新偏移量: {:.2}秒", *offset);
+            
+            // 重置起始时刻，以便监控线程正确计算
+            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+            *instant = Some(std::time::Instant::now());
+            
+            Ok(format!("Seek命令已发送，估算位置: {:.2}秒", estimated_pos))
+        } else {
+            Err("无法获取ffplay进程的stdin".to_string())
+        }
+    } else {
+        Err("ffplay进程未运行".to_string())
+    }
 }
 
 // 设置音量
@@ -1541,6 +1701,69 @@ pub fn set_ffplay_volume(volume: f32) -> Result<String, String> {
     
     // FFplay不支持动态调整音量，需要重新启动
     Ok(format!("音量已设置为: {}", status.volume))
+}
+
+// 解析ffplay时间格式 HH:MM:SS.ss
+fn parse_ffplay_time(time_str: &str) -> Option<f64> {
+    let parts: Vec<&str> = time_str.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    
+    let hours: f64 = parts[0].parse().ok()?;
+    let minutes: f64 = parts[1].parse().ok()?;
+    let seconds: f64 = parts[2].parse().ok()?;
+    
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
+// 输出解析线程 - 解析ffplay的stderr输出获取实时进度
+fn start_ffplay_output_parser(mut stderr: std::process::ChildStderr) {
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        
+        println!("[FFplay] 输出解析线程已启动");
+        
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        
+        while let Ok(n) = reader.read_line(&mut line) {
+            if n == 0 {
+                println!("[FFplay] 输出解析线程: stderr流结束");
+                break;
+            }
+            
+            // 解析时间信息
+            // 典型输出格式: "frame=  1234 fps= 30 q=-1.0 size=   12345kB time=00:01:23.45 bitrate= 128.0kbits/s speed=1.0x"
+            if line.contains("time=") {
+                if let Some(time_part) = line.split_whitespace().find(|s| s.starts_with("time=")) {
+                    let time_str = time_part.strip_prefix("time=").unwrap_or("");
+                    if let Some(parsed_time) = parse_ffplay_time(time_str) {
+                        // 更新播放状态
+                        let mut status = FFPLAY_STATUS.lock().unwrap();
+                        // 只在播放状态时更新位置，避免暂停时位置继续增加
+                        if status.is_playing {
+                            // 读取起始偏移量，计算绝对位置
+                            let offset = FFPLAY_START_OFFSET.lock().unwrap();
+                            let absolute_position = parsed_time + *offset;
+                            
+                            status.position = absolute_position;
+                            // 更新起始时刻，以便后续计算保持同步
+                            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+                            *instant = Some(std::time::Instant::now());
+                            
+                            println!("[FFplay] 输出解析: 相对时间={:.2}秒, 偏移量={:.2}秒, 绝对位置={:.2}秒", 
+                                parsed_time, *offset, absolute_position);
+                        }
+                    }
+                }
+            }
+            
+            line.clear();
+        }
+        
+        println!("[FFplay] 输出解析线程已退出");
+    });
 }
 
 // 启动FFplay状态监控线程
