@@ -1071,6 +1071,44 @@ const ffplayPosition = ref(0)
 const ffplayVolume = ref(1.0)
 let ffplayStatusInterval: number | null = null
 
+// Seek防抖机制
+let seekDebounceTimer: number | null = null
+let pendingSeekPosition: number | null = null
+
+// 防抖Seek函数（200毫秒延迟）
+const debouncedSeek = async (position: number) => {
+  if (seekDebounceTimer) {
+    clearTimeout(seekDebounceTimer)
+  }
+  
+  pendingSeekPosition = position
+  
+  seekDebounceTimer = window.setTimeout(async () => {
+    if (pendingSeekPosition !== null && isFFplayPlaying.value && currentSong.value) {
+      try {
+        logInfo(`【FFplay】执行防抖Seek: ${pendingSeekPosition}秒`)
+        const result = await invoke('seek_ffplay', {
+          path: currentSong.value.path,
+          position: pendingSeekPosition
+        }) as any
+        
+        if (result && result.success !== false) {
+          playbackStartTime.value = Date.now() - (pendingSeekPosition * 1000)
+          currentPosition.value = pendingSeekPosition
+          const totalSeconds = ffplayDuration.value || 1
+          progress.value = Math.min((pendingSeekPosition / totalSeconds) * 100, 100)
+          logInfo('【SEEK】FFplay防抖seek完成: currentPosition=', pendingSeekPosition, 's')
+        }
+      } catch (error) {
+        logError('【SEEK】FFplay防抖Seek失败:', error)
+      } finally {
+        pendingSeekPosition = null
+        seekDebounceTimer = null
+      }
+    }
+  }, 200)
+}
+
 // 浏览器环境下的文件对象存储
 const browserFileMap = new Map<string, File>()
 
@@ -2020,22 +2058,26 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       logDebug('标准化后的路径:', normalizedPath)
     }
 
+    // 修复：无论新歌是否需要FFplay，都先停止之前的FFplay播放
+    // 这确保从FFplay格式切换到普通格式时，FFplay能正确停止
+    if (isFFplayPlaying.value) {
+      try {
+        logInfo('【FFplay】停止之前的FFplay播放')
+        await invoke('stop_ffplay')
+        isFFplayPlaying.value = false
+        logInfo('【FFplay】FFplay已停止')
+      } catch (error) {
+        logError('停止FFplay播放失败:', error)
+      }
+    }
+
     // 检查是否需要使用FFplay播放（原引擎不支持的无损音频）
-    const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma', '.m4a', '.aac']
-    const needsFFplay = unsupportedFormats.some(ext => playPath.toLowerCase().endsWith(ext))
+    // 注意：.m4a和.aac实际上可以被HTML5 Audio支持，不需要FFplay
+    const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma']
+    let needsFFplay = unsupportedFormats.some(ext => playPath.toLowerCase().endsWith(ext))
     
     if (needsFFplay && !isBrowser.value) {
       logInfo('检测到需要FFplay播放的格式:', playPath)
-      
-      // 停止之前的FFplay播放
-      if (isFFplayPlaying.value) {
-        try {
-          await invoke('stop_ffplay')
-          isFFplayPlaying.value = false
-        } catch (error) {
-          logError('停止FFplay播放失败:', error)
-        }
-      }
       
       // 停止当前的rodio播放
       if (audioElement.value) {
@@ -2792,17 +2834,27 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           console.log('浏览器环境，没有原始文件对象，尝试使用path作为URL:', audioUrl)
           // 这里可以添加其他浏览器环境下的URL处理逻辑
         }
-      } else if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://') && !audioUrl.startsWith('blob:') && !audioUrl.startsWith('blob:http://')) {
+      } else if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://') && !audioUrl.startsWith('blob:')) {
         // 桌面应用环境，获取HTTP URL
         try {
+          logInfo('前端播放: 桌面环境，正在获取HTTP URL...')
           audioUrl = await invoke('get_file_http_url', { filePath: audioUrl }) as string
+          logInfo('前端播放: 获取HTTP URL成功:', audioUrl)
           console.log('获取HTTP URL成功:', audioUrl)
         } catch (urlError) {
           console.error('❌ 前端播放: 获取HTTP URL失败:', urlError)
-          errorMessage = '无法获取文件URL: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
-          isPlaying.value = false
-          isPlaybackFinished = true
-          throw new Error(errorMessage)
+          logError('❌ 前端播放: 获取HTTP URL失败:', urlError)
+          
+          // 获取URL失败，尝试使用FFplay作为回退
+          if (!isBrowser.value && !needsFFplay) {
+            logInfo('获取HTTP URL失败，尝试使用FFplay回退播放')
+            needsFFplay = true
+          } else {
+            errorMessage = '无法获取文件URL: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
+            isPlaying.value = false
+            isPlaybackFinished = true
+            throw new Error(errorMessage)
+          }
         }
       }
       
@@ -2863,6 +2915,21 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                 break
               default:
                 logError('未知音频错误')
+            }
+          }
+        })
+      } else {
+        // 桌面环境也添加错误监听器，用于捕获加载失败
+        audioElement.value.addEventListener('error', (event) => {
+          const audioError = (event as any).target?.error
+          logError('桌面环境音频元素错误:', audioError, 'URL:', audioUrl)
+          if (audioError) {
+            logError('音频错误详情: code=', audioError.code, 'message=', audioError.message)
+            
+            // 桌面环境下，尝试使用FFplay回退
+            if (!isFFplayPlaying.value) {
+              logInfo('桌面环境音频加载失败，标记需要FFplay回退')
+              needsFFplay = true
             }
           }
         })
@@ -3202,9 +3269,26 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }
             
             // 针对特定错误类型的处理策略
-            if (error.code === error.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+            if (error.code === error.MEDIA_ERR_SRC_NOT_SUPPORTED || error.code === error.MEDIA_ERR_DECODE) {
               logInfo('尝试启用转码来处理不支持的格式')
               // 可以在这里触发转码逻辑
+            }
+            
+            // 桌面环境下，如果HTML5 Audio播放失败，尝试使用FFplay回退
+            if (!isBrowser.value && !isFFplayPlaying.value) {
+              logInfo('HTML5 Audio播放失败，尝试使用FFplay回退')
+              // 设置标志，让调用方知道需要使用FFplay
+              needsFFplay = true
+              // 清理当前音频元素
+              try {
+                currentAudioElement.pause()
+                currentAudioElement.src = ''
+              } catch (cleanupError) {
+                logError('清理音频元素失败:', cleanupError)
+              }
+              // 拒绝Promise，让调用方处理FFplay回退
+              reject(new Error('HTML5 Audio播放失败，尝试FFplay回退'))
+              return
             }
           }
           // 只记录错误，不设置播放状态为false，避免清理音频元素
@@ -3482,6 +3566,124 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
   } catch (error) {
     logError('播放歌曲失败:', error)
     logError('播放歌曲失败详情:', typeof error, error)
+    
+    const errorMessage = error && typeof error === 'string' ? error : (error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error))
+    
+    // 前端播放失败时，尝试使用FFplay回退
+    // 检查多种可能的错误情况：
+    // 1. 包含"HTML5 Audio"的错误
+    // 2. 包含"no supported source"的错误（HTML5 Audio常见错误）
+    // 3. 包含"MEDIA_ERR_"的错误（音频元素错误代码）
+    // 4. needsFFplay被标记为true
+    const shouldFallbackToFFplay = !isBrowser.value && !isFFplayPlaying.value && 
+      !needsFFplay && (
+        errorMessage.includes('HTML5 Audio') || 
+        errorMessage.includes('no supported source') || 
+        errorMessage.includes('MEDIA_ERR_') ||
+        errorMessage.includes('Failed to load')
+      )
+    
+    if (shouldFallbackToFFplay) {
+      logInfo('前端播放失败，尝试使用FFplay回退播放')
+      needsFFplay = true
+      
+      // 清理当前状态
+      if (audioElement.value) {
+        try {
+          audioElement.value.pause()
+          audioElement.value.src = ''
+        } catch (cleanupError) {
+          logError('清理音频元素失败:', cleanupError)
+        }
+        audioElement.value = null
+        timeupdateHandler = null
+      }
+      
+      // 重新执行FFplay播放逻辑
+      try {
+        logInfo('【FFplay回退】开始调用 play_with_ffplay')
+        
+        // 停止之前的FFplay播放（如果有）
+        if (isFFplayPlaying.value) {
+          try {
+            await invoke('stop_ffplay')
+            isFFplayPlaying.value = false
+          } catch (stopError) {
+            logError('停止FFplay播放失败:', stopError)
+          }
+        }
+        
+        // 使用FFplay播放
+        const start_position = positionForCue
+        let durationSeconds = 300
+        if (currentSong.value && currentSong.value.duration) {
+          const durationStr = currentSong.value.duration
+          const parts = durationStr.split(':')
+          if (parts.length === 2) {
+            const minutes = parseInt(parts[0])
+            const seconds = parseInt(parts[1])
+            durationSeconds = minutes * 60 + seconds
+          }
+        }
+        
+        const result = await invoke('play_with_ffplay', {
+          path: playPath,
+          start_time: start_position,
+          duration: durationSeconds
+        }) as FFplayResult | string
+        
+        if (typeof result === 'string' && result.includes('未找到')) {
+          logError('FFplay未找到，无法播放:', result)
+          if (autoPlay) {
+            isPlaying.value = false
+          }
+          isPlaybackFinished = true
+          throw new Error('FFplay未找到，无法播放此音频')
+        }
+        
+        // 设置FFplay播放状态
+        isFFplayPlaying.value = true
+        isPlaying.value = true
+        
+        // 更新歌曲信息
+        if (result && typeof result === 'object') {
+          const ffResult = result as FFplayResult
+          if (ffResult.duration !== undefined) {
+            ffplayDuration.value = ffResult.duration
+            ffplayPosition.value = start_position
+            
+            const totalSeconds = Math.round(ffResult.duration)
+            const minutes = Math.floor(totalSeconds / 60)
+            const seconds = totalSeconds % 60
+            song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+            
+            if (ffResult.format) song.format = ffResult.format
+            if (ffResult.sample_rate) song.sample_rate = ffResult.sample_rate
+            if (ffResult.channels) song.channels = ffResult.channels
+            if (ffResult.bit_rate) song.bit_rate = ffResult.bit_rate
+          }
+        }
+        
+        // 自动滚动到当前播放歌曲
+        scrollToCurrentSong()
+        
+        if (playbackMode.value === 'random' && songs.value.length > 1) {
+          let nextIndex
+          do {
+            nextIndex = Math.floor(Math.random() * songs.value.length)
+          } while (nextIndex === currentIndex && songs.value.length > 1)
+          randomNextIndex.value = nextIndex
+        } else {
+          randomNextIndex.value = null
+        }
+        
+        return
+      } catch (ffplayError) {
+        logError('FFplay回退播放失败:', ffplayError)
+        // 继续执行原有的错误处理逻辑
+      }
+    }
+    
     if (autoPlay) {
       isPlaying.value = false
     }
@@ -3505,7 +3707,6 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       }
     }
     
-    const errorMessage = error && typeof error === 'string' ? error : (error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error))
     logError('❌ 播放失败:', errorMessage)
     
     if (errorMessage.includes('FFmpeg') || errorMessage.includes('转码')) {
@@ -3663,6 +3864,17 @@ const togglePlayback = async () => {
       ? (error as Error).message 
       : (error && typeof error === 'string' ? error : '未知错误')
     console.error('详细错误信息:', error)
+    
+    // 如果错误是FFplay回退相关的错误，不显示错误提示，让回退逻辑处理
+    if (errorMessage.includes('HTML5 Audio') || 
+        errorMessage.includes('no supported source') ||
+        errorMessage.includes('MEDIA_ERR_') ||
+        errorMessage.includes('Failed to load')) {
+      logInfo('音频加载失败，已触发FFplay回退，不显示错误提示')
+      // 不显示错误提示，让FFplay回退逻辑处理
+      return
+    }
+    
     alert(`播放控制失败：${errorMessage}`)
   } finally {
     // 释放锁
@@ -3985,9 +4197,9 @@ const seek = async () => {
   const shouldUseFFplay = currentSong.value && currentSongPath && unsupportedFormats.some(ext => currentSongPath.toLowerCase().endsWith(ext))
   console.log('【SEEK】shouldUseFFplay:', shouldUseFFplay)
 
-  // 如果应该使用FFplay播放，使用FFplay的seek功能
+  // 如果应该使用FFplay播放，使用FFplay的seek功能（带防抖）
   if (shouldUseFFplay && currentSong.value) {
-    console.log('【SEEK】使用FFplay seek')
+    console.log('【SEEK】使用FFplay seek（带防抖）')
     
     try {
       // 解析时长格式 "mm:ss"
@@ -4022,15 +4234,10 @@ const seek = async () => {
             }
           }
           
-          // 调用FFplay seek
-          const result = await invoke('seek_ffplay', {
-            path: currentSong.value.path,
-            position: actualPosition
-          }) as any
+          // 使用防抖机制调用FFplay seek
+          debouncedSeek(actualPosition)
           
-          console.log('【SEEK】FFplay seek成功:', result)
-          
-          // 更新进度相关变量
+          // 更新前端进度变量（不等待后端响应）
           playbackStartTime.value = Date.now() - (actualPosition * 1000)
           currentPosition.value = actualPosition
           frontendPosition = actualPosition // 更新前端计算的播放位置
