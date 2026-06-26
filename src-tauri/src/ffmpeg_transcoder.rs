@@ -1588,71 +1588,60 @@ async fn execute_process_restart_seek(path: String, target_pos: f64) -> Result<s
 pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Value, String> {
     println!("[FFplay] 开始seek到位置: {:.2}秒, 路径: {}", position, path);
     
-    // 获取当前播放状态
-    let (current_pos, is_playing) = {
+    // 获取当前位置、播放状态和总时长
+    let (current_pos, is_playing, duration) = {
         let status = FFPLAY_STATUS.lock().unwrap();
-        (status.position, status.is_playing)
+        (status.position, status.is_playing, status.duration)
     };
     
-    println!("[FFplay] 当前位置: {:.2}秒, 当前播放状态: {}", current_pos, is_playing);
+    println!("[FFplay] 当前位置: {:.2}秒, 播放状态: {}, 总时长: {:.2}秒", 
+        current_pos, is_playing, duration);
     
-    // 如果差值很小，不需要seek，直接更新状态
-    let diff = position - current_pos;
-    if diff.abs() < 0.5 {
-        println!("[FFplay] 差值小于0.5秒，无需seek");
-        return Ok(serde_json::json!({
-            "success": true,
-            "message": "位置已在目标附近",
-            "position": current_pos,
-            "method": "none"
-        }));
-    }
+    // 边界检查：确保position在有效范围内
+    let target_pos = if position < 0.0 {
+        0.0
+    } else if position > duration - 1.0 {
+        duration - 1.0
+    } else {
+        position
+    };
     
-    // 如果当前是暂停状态，使用精确seek（重启进程）
-    if !is_playing {
-        println!("[FFplay] 当前处于暂停状态，使用精确seek（重启进程）");
-        
-        // 调用 play_with_ffplay，它会自动处理停止当前播放
-        let result = play_with_ffplay(path, Some(position), None).await;
-        
-        // 暂停新进程
-        if let Ok(_) = pause_ffplay() {
-            println!("[FFplay] seek后已暂停");
-        }
-        
-        return result;
-    }
+    println!("[FFplay] 校正后目标位置: {:.2}秒", target_pos);
     
-    // 播放状态下，首先尝试使用stdin发送seek命令（不重启进程）
-    let stdin_result = execute_stdin_seek(position);
+    // 决策seek策略
+    let strategy = decide_seek_strategy(current_pos, target_pos, is_playing);
+    println!("[FFplay] 选择策略: {:?}", strategy);
     
-    match stdin_result {
-        Ok(msg) => {
-            // stdin seek成功
-            println!("[FFplay] stdin seek成功: {}", msg);
-            
-            // 更新状态
-            let mut status = FFPLAY_STATUS.lock().unwrap();
-            status.position = position;
-            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-            *instant = Some(std::time::Instant::now());
-            
-            return Ok(serde_json::json!({
+    // 执行对应的seek操作
+    match strategy {
+        SeekStrategy::NoSeek => {
+            Ok(serde_json::json!({
                 "success": true,
-                "message": msg,
-                "position": position,
-                "method": "stdin"
-            }));
-        }
-        Err(e) => {
-            // stdin seek失败，回退到重启进程方式
-            println!("[FFplay] stdin seek失败: {}, 回退到重启进程方式", e);
-            
-            // 调用 play_with_ffplay，它会自动处理停止当前播放
-            let result = play_with_ffplay(path, Some(position), None).await;
-            
-            println!("[FFplay] seek完成: {:?}", result);
-            return result;
+                "message": "差值太小，无需seek",
+                "position": current_pos,
+                "method": "none"
+            }))
+        },
+        SeekStrategy::StdinSeek => {
+            // 尝试stdin seek，如果失败则降级到进程重启
+            match execute_stdin_seek(target_pos) {
+                Ok(msg) => {
+                    println!("[FFplay] StdinSeek成功: {}", msg);
+                    Ok(serde_json::json!({
+                        "success": true,
+                        "message": msg,
+                        "position": target_pos,
+                        "method": "stdin"
+                    }))
+                },
+                Err(e) => {
+                    println!("[FFplay] StdinSeek失败: {}, 降级到ProcessRestartSeek", e);
+                    execute_process_restart_seek(path, target_pos).await
+                }
+            }
+        },
+        SeekStrategy::ProcessRestartSeek => {
+            execute_process_restart_seek(path, target_pos).await
         }
     }
 }
