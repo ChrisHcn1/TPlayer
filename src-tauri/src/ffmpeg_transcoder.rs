@@ -1891,104 +1891,123 @@ pub fn stop_ffplay() -> Result<String, String> {
 // 暂停FFplay播放（通过发送空格键）
 #[tauri::command]
 pub fn pause_ffplay() -> Result<String, String> {
-    let mut process = FFPLAY_PROCESS.lock().unwrap();
-    
-    if let Some(ref mut child) = *process {
-        // 向FFplay发送暂停命令（p键）
-        if let Some(ref mut stdin) = child.stdin {
-            use std::io::Write;
-            if let Err(e) = stdin.write_all(b"p") {
-                println!("[FFplay] 发送暂停命令失败: {}", e);
-                return Err(format!("发送暂停命令失败: {}", e));
+    // 步骤1: 发送暂停命令（持有PROCESS锁，仅操作进程）
+    let paused_position = {
+        let mut process = FFPLAY_PROCESS.lock().unwrap();
+        
+        if let Some(ref mut child) = *process {
+            // 向FFplay发送暂停命令（p键）
+            if let Some(ref mut stdin) = child.stdin {
+                use std::io::Write;
+                if let Err(e) = stdin.write_all(b"p") {
+                    println!("[FFplay] 发送暂停命令失败: {}", e);
+                    return Err(format!("发送暂停命令失败: {}", e));
+                }
+                if let Err(e) = stdin.flush() {
+                    println!("[FFplay] 刷新stdin失败: {}", e);
+                    return Err(format!("刷新stdin失败: {}", e));
+                }
+                println!("[FFplay] 已发送暂停命令");
             }
-            if let Err(e) = stdin.flush() {
-                println!("[FFplay] 刷新stdin失败: {}", e);
-                return Err(format!("刷新stdin失败: {}", e));
-            }
-            println!("[FFplay] 已发送暂停命令");
-            
-            // 更新播放状态
-            let mut status = FFPLAY_STATUS.lock().unwrap();
-            status.is_playing = false;
-            
-            // 保存当前播放位置到全局变量
-            let paused_position = status.position;
-            drop(status);
-            
-            // 清除起始时刻，停止时钟推进
-            // 注意：不要更新 FFPLAY_START_OFFSET，因为ffplay内部时间基准未改变
-            {
-                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-                *instant = None;
-            }
-            
-            // 保存到全局变量
-            let mut paused_pos = PAUSED_POSITION.lock().unwrap();
-            *paused_pos = Some(paused_position);
-            drop(paused_pos);
-            
-            println!("[FFplay] 暂停播放，保存位置: {:.2}秒", paused_position);
-            
-            return Ok("FFplay已暂停".to_string());
+        } else {
+            return Err("FFplay未在播放".to_string());
         }
-        return Err("无法访问FFplay进程的stdin".to_string());
+        
+        // 在释放PROCESS锁之前读取当前位置
+        let status = FFPLAY_STATUS.lock().unwrap();
+        let pos = status.position;
+        pos
+    }; // 此处PROCESS锁已释放
+
+    // 步骤2: 更新状态（不持有PROCESS锁，避免死锁）
+    {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing = false;
     }
     
-    Err("FFplay未在播放".to_string())
+    // 步骤3: 清除起始时刻
+    {
+        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+        *instant = None;
+    }
+    
+    // 步骤4: 保存暂停位置
+    {
+        let mut paused_pos = PAUSED_POSITION.lock().unwrap();
+        *paused_pos = Some(paused_position);
+    }
+    
+    println!("[FFplay] 暂停播放，保存位置: {:.2}秒", paused_position);
+    Ok("FFplay已暂停".to_string())
 }
 
 // 恢复FFplay播放
 #[tauri::command]
 pub fn resume_ffplay() -> Result<String, String> {
-    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    // 步骤1: 读取暂停位置（独立锁获取，避免嵌套）
+    let paused_position = {
+        let paused_pos = PAUSED_POSITION.lock().unwrap();
+        *paused_pos
+    };
     
-    if let Some(ref mut child) = *process {
-        // 向FFplay发送恢复命令（p键）
-        if let Some(ref mut stdin) = child.stdin {
-            use std::io::Write;
-            if let Err(e) = stdin.write_all(b"p") {
-                println!("[FFplay] 发送恢复命令失败: {}", e);
-                return Err(format!("发送恢复命令失败: {}", e));
+    // 步骤2: 发送恢复命令（持有PROCESS锁，仅操作进程）
+    {
+        let mut process = FFPLAY_PROCESS.lock().unwrap();
+        
+        if let Some(ref mut child) = *process {
+            // 向FFplay发送恢复命令（p键）
+            if let Some(ref mut stdin) = child.stdin {
+                use std::io::Write;
+                if let Err(e) = stdin.write_all(b"p") {
+                    println!("[FFplay] 发送恢复命令失败: {}", e);
+                    return Err(format!("发送恢复命令失败: {}", e));
+                }
+                if let Err(e) = stdin.flush() {
+                    println!("[FFplay] 刷新stdin失败: {}", e);
+                    return Err(format!("刷新stdin失败: {}", e));
+                }
+                println!("[FFplay] 已发送恢复命令");
             }
-            if let Err(e) = stdin.flush() {
-                println!("[FFplay] 刷新stdin失败: {}", e);
-                return Err(format!("刷新stdin失败: {}", e));
-            }
-            println!("[FFplay] 已发送恢复命令");
-            
-            // 保存当前播放位置
-            let paused_position = {
-                let paused_pos = PAUSED_POSITION.lock().unwrap();
-                *paused_pos
-            };
-            
-            // 重置起始时刻为当前时刻，使监控线程从暂停位置继续计时
-            {
-                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-                *instant = Some(std::time::Instant::now());
-            }
-            
-            // 更新播放状态
+        } else {
+            return Err("FFplay未在播放".to_string());
+        }
+    } // 此处PROCESS锁已释放
+    
+    // 步骤3: 更新状态（不持有PROCESS锁，避免死锁）
+    // 顺序：START_OFFSET → START_INSTANT → STATUS
+    if let Some(pos) = paused_position {
+        // 先更新 START_OFFSET
+        {
+            let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+            *offset = pos;
+        }
+        
+        // 重置起始时刻为当前时刻
+        {
+            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+            *instant = Some(std::time::Instant::now());
+        }
+        
+        // 更新播放状态
+        {
             let mut status = FFPLAY_STATUS.lock().unwrap();
             status.is_playing = true;
-            
-            // 从保存的位置恢复
-            if let Some(pos) = paused_position {
-                status.position = pos;
-                // 确保 FFPLAY_START_OFFSET 也反映暂停位置
-                drop(status);
-                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
-                *offset = pos;
-            }
-            
-            println!("[FFplay] 恢复播放");
-            
-            return Ok("FFplay已恢复播放".to_string());
+            status.position = pos;
         }
-        return Err("无法访问FFplay进程的stdin".to_string());
+    } else {
+        // 没有暂停位置，直接设置播放状态
+        {
+            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+            *instant = Some(std::time::Instant::now());
+        }
+        {
+            let mut status = FFPLAY_STATUS.lock().unwrap();
+            status.is_playing = true;
+        }
     }
     
-    Err("FFplay未在播放".to_string())
+    println!("[FFplay] 恢复播放");
+    Ok("FFplay已恢复播放".to_string())
 }
 
 // ProcessRestartSeek执行器：重启进程实现精确定位
@@ -2104,79 +2123,84 @@ pub async fn seek_ffplay(path: String, position: f64, window: tauri::WebviewWind
 
 // StdinSeek执行器：发送方向键命令
 fn execute_stdin_seek(target_pos: f64) -> Result<String, String> {
-    let mut process = FFPLAY_PROCESS.lock().unwrap();
+    // 步骤1: 先获取当前状态（独立锁获取，避免嵌套）
+    let (current_pos, is_playing) = {
+        let status = FFPLAY_STATUS.lock().unwrap();
+        (status.position, status.is_playing)
+    };
     
-    if let Some(ref mut child) = *process {
-        if let Some(ref mut stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            
-            // 获取当前位置和播放状态
-            let (current_pos, is_playing) = {
-                let status = FFPLAY_STATUS.lock().unwrap();
-                (status.position, status.is_playing)
-            };
-            
-            // 确保在播放状态
-            if !is_playing {
-                return Err("暂停状态下不建议使用stdin seek".to_string());
-            }
-            
-            // 计算需要移动的距离和方向键次数
-            let diff = target_pos - current_pos;
-            let abs_diff = if diff > 0.0 { diff } else { -diff };
-            
-            // 确认距离在合理范围（5-10秒）
-            if abs_diff < 5.0 {
-                return Ok("差值太小，无需seek".to_string());
-            }
-            if abs_diff >= 10.0 {
-                return Err("距离过大，建议使用进程重启方式".to_string());
-            }
-            
-            // 计算方向键次数（每次10秒）
-            let times = (abs_diff / 10.0).ceil() as i32;
-            let direction_byte = if diff > 0.0 { b'C' } else { b'D' };
-            
-            println!("[FFplay] StdinSeek: 当前={:.2}秒, 目标={:.2}秒, 差值={:.2}秒, 次数={}", 
-                current_pos, target_pos, diff, times);
-            
-            // 发送方向键命令
-            for i in 0..times {
-                let cmd = [b'\x1b', b'[', direction_byte];
-                if let Err(e) = stdin.write_all(&cmd) {
-                    return Err(format!("发送第{}次方向键失败: {}", i + 1, e));
-                }
-                // 每次发送后等待50毫秒
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            
-            // 估算新位置
-            let estimated_pos = current_pos + (times as f64 * 10.0 * if diff > 0.0 { 1.0 } else { -1.0 });
-            
-            // 关键修复：更新起始偏移量，使输出解析线程能正确计算绝对位置
-            {
-                let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
-                *offset = estimated_pos;
-                println!("[FFplay] StdinSeek后更新偏移量: {:.2}秒", *offset);
-            }
-            
-            // 更新状态位置
-            {
-                let mut status = FFPLAY_STATUS.lock().unwrap();
-                status.position = estimated_pos;
-            }
-            
-            // 重置起始时刻，以便监控线程正确计算
-            {
-                let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-                *instant = Some(std::time::Instant::now());
-            }
-            
-            return Ok(format!("StdinSeek成功，估算位置: {:.2}秒", estimated_pos));
-        }
+    // 确保在播放状态
+    if !is_playing {
+        return Err("暂停状态下不建议使用stdin seek".to_string());
     }
     
-    Err("FFplay进程不存在或stdin不可用".to_string())
+    // 计算需要移动的距离和方向键次数
+    let diff = target_pos - current_pos;
+    let abs_diff = if diff > 0.0 { diff } else { -diff };
+    
+    // 确认距离在合理范围（5-10秒）
+    if abs_diff < 5.0 {
+        return Ok("差值太小，无需seek".to_string());
+    }
+    if abs_diff >= 10.0 {
+        return Err("距离过大，建议使用进程重启方式".to_string());
+    }
+    
+    // 计算方向键次数（每次10秒）
+    let times = (abs_diff / 10.0).ceil() as i32;
+    let direction_byte = if diff > 0.0 { b'C' } else { b'D' };
+    
+    println!("[FFplay] StdinSeek: 当前={:.2}秒, 目标={:.2}秒, 差值={:.2}秒, 次数={}", 
+        current_pos, target_pos, diff, times);
+    
+    // 步骤2: 发送方向键命令（持有PROCESS锁，仅操作进程）
+    {
+        let mut process = FFPLAY_PROCESS.lock().unwrap();
+        
+        if let Some(ref mut child) = *process {
+            if let Some(ref mut stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                
+                // 发送方向键命令
+                for i in 0..times {
+                    let cmd = [b'\x1b', b'[', direction_byte];
+                    if let Err(e) = stdin.write_all(&cmd) {
+                        return Err(format!("发送第{}次方向键失败: {}", i + 1, e));
+                    }
+                    // 每次发送后等待50毫秒
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            } else {
+                return Err("FFplay进程stdin不可用".to_string());
+            }
+        } else {
+            return Err("FFplay进程不存在".to_string());
+        }
+    } // 此处PROCESS锁已释放
+    
+    // 步骤3: 更新状态（不持有PROCESS锁，避免死锁）
+    let estimated_pos = current_pos + (times as f64 * 10.0 * if diff > 0.0 { 1.0 } else { -1.0 });
+    
+    // 更新起始偏移量
+    {
+        let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+        *offset = estimated_pos;
+        println!("[FFplay] StdinSeek后更新偏移量: {:.2}秒", *offset);
+    }
+    
+    // 更新状态位置
+    {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.position = estimated_pos;
+    }
+    
+    // 重置起始时刻，以便监控线程正确计算
+    {
+        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+        *instant = Some(std::time::Instant::now());
+    }
+    
+    Ok(format!("StdinSeek成功，估算位置: {:.2}秒", estimated_pos))
 }
 
 // 设置音量
