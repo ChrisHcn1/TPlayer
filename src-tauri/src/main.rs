@@ -15,7 +15,7 @@ mod updater;
 use commands::PlayerState;
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
-use tauri::{Emitter, Listener, Manager, tray::{TrayIconBuilder, TrayIconEvent}};
+use tauri::{Emitter, Listener, Manager, tray::{TrayIconBuilder, TrayIconEvent}, WindowEvent};
 
 // 日志开关：设置为 false 可禁用所有日志输出
 const ENABLE_LOGS: bool = true;
@@ -123,15 +123,21 @@ fn main() {
         .setup(|app| {
             let app_handle = app.handle();
             
-            // 监听应用退出事件，清理资源
-            let _app_handle_for_cleanup = app_handle.clone();
-            app.listen("tauri://close-requested", move |_| {
-                println!("[应用] 收到退出请求，清理资源");
-                // 清理播放器资源（包括进度更新线程）
-                commands::cleanup_player_resources();
-                // 清理FFplay资源
-                ffmpeg_transcoder::cleanup_ffplay();
-            });
+            // 监听窗口关闭事件（Tauri v2 正确 API）
+            let app_handle_for_close = app_handle.clone();
+            if let Some(window) = app_handle.get_webview_window("main") {
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        println!("[应用] 收到窗口关闭请求，清理资源");
+                        // 清理播放器资源
+                        commands::cleanup_player_resources();
+                        // 清理FFplay资源
+                        ffmpeg_transcoder::cleanup_ffplay();
+                        // 退出应用
+                        let _ = app_handle_for_close.exit(0);
+                    }
+                });
+            }
             
             // 创建托盘菜单
             let menu = tauri::menu::Menu::with_items(
@@ -172,9 +178,10 @@ fn main() {
                             let _ = app.emit("tray-previous-song", ());
                         }
                         "quit" => {
-                            // 清理FFplay资源
+                            // 清理资源并退出
+                            println!("[应用] 用户点击托盘退出");
+                            commands::cleanup_player_resources();
                             ffmpeg_transcoder::cleanup_ffplay();
-                            // 退出应用
                             app.exit(0);
                         }
                         _ => {}
