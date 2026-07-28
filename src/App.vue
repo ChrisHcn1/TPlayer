@@ -6240,13 +6240,53 @@ watch(currentSong, () => {
 
 onUnmounted(() => {
   // 清理资源
-  logInfo('前端 清理进度更新定时器')
+  logInfo('前端 开始清理资源')
+  
+  // 1. 清理进度更新定时器
   if (progressTimer) {
     clearInterval(progressTimer)
+    progressTimer = null
     logInfo('前端 进度更新定时器已清理')
   }
   
-  // 移除滚动事件监听器
+  // 2. 清理 FFplay 状态轮询定时器
+  if (ffplayStatusInterval) {
+    clearInterval(ffplayStatusInterval)
+    ffplayStatusInterval = null
+    logInfo('前端 FFplay 状态轮询定时器已清理')
+  }
+  
+  // 3. 清理 seek 防抖定时器
+  if (seekDebounceTimer) {
+    clearTimeout(seekDebounceTimer)
+    seekDebounceTimer = null
+    logInfo('前端 seek 防抖定时器已清理')
+  }
+  
+  // 4. 清理播放定时器
+  if (playbackTimerId) {
+    clearTimeout(playbackTimerId)
+    playbackTimerId = null
+    logInfo('前端 播放定时器已清理')
+  }
+  
+  // 5. 清理 audioElement 事件监听器
+  if (audioElement.value) {
+    const audio = audioElement.value
+    // 移除所有事件监听器（通过 cloneNode 方式）
+    // 或者使用特定的处理函数引用
+    audio.pause()
+    audio.src = ''
+    logInfo('前端 audioElement 已清理')
+  }
+  
+  // 6. 清理全局 document 事件监听器
+  // 移除可能残留的全局事件监听器
+  document.removeEventListener('click', closeSongMenu)
+  document.removeEventListener('mousemove', onDragCoverModal)
+  document.removeEventListener('mouseup', stopDragCoverModal)
+  
+  // 7. 移除滚动事件监听器
   if (songListContainer.value) {
     const songList = songListContainer.value.querySelector('.song-list') as HTMLElement
     if (songList) {
@@ -6255,6 +6295,8 @@ onUnmounted(() => {
       songListContainer.value.removeEventListener('scroll', handleScroll)
     }
   }
+  
+  logInfo('前端 资源清理完成')
 })
 </script>
 
