@@ -235,11 +235,13 @@ fn get_duration_with_ffprobe(path: &Path) -> Option<f64> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     
-    // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+    // 在Windows系统上设置进程创建标志
+    // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+    // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.creation_flags(0x08000000 | 0x00000200);
     }
     
     let result = cmd.output().ok()?;
@@ -813,20 +815,28 @@ pub async fn play_song(
     if ffmpeg_transcoder::needs_ffplay_playback(&path) {
         println!("[播放] 检测到需要FFplay播放的格式: {}", path);
         
-        // 停止当前的rodio播放
-        unsafe {
-            if let Some(player) = &mut GLOBAL_PLAYER {
-                if let Some(old_sink) = player.sink.take() {
-                    println!("[播放] 停止旧的rodio播放");
-                    old_sink.stop();
+        // 停止当前的rodio播放（加锁保护，防止数据竞争）
+        {
+            let _lock = PLAYER_MUTEX.lock().unwrap();
+            unsafe {
+                if let Some(player) = &mut GLOBAL_PLAYER {
+                    if let Some(old_sink) = player.sink.take() {
+                        println!("[播放] 停止旧的rodio播放");
+                        old_sink.stop();
+                    }
                 }
             }
         }
         
         // 使用 FFplay 播放
         let start_position = position.unwrap_or(start_time_val.unwrap_or(0.0));
+        // 提取主窗口HWND，用于遮盖CLI窗口
+        #[cfg(windows)]
+        let main_hwnd = window.hwnd().map(|h| h.0 as isize).ok();
+        #[cfg(not(windows))]
+        let main_hwnd: Option<isize> = None;
         // 传递 None 作为 duration 参数，让后端自己获取
-        match ffmpeg_transcoder::play_with_ffplay(path.clone(), Some(start_position), None).await {
+        match ffmpeg_transcoder::play_with_ffplay(path.clone(), Some(start_position), None, main_hwnd).await {
             Ok(result) => {
                 println!("[播放] FFplay 播放已启动");
                 
@@ -1030,10 +1040,15 @@ pub async fn play_song(
             
             // 解码失败，尝试使用ffplay回退播放
             println!("[播放] 尝试使用ffplay回退播放...");
+            #[cfg(windows)]
+            let fallback_hwnd = window.hwnd().map(|h| h.0 as isize).ok();
+            #[cfg(not(windows))]
+            let fallback_hwnd: Option<isize> = None;
             return ffmpeg_transcoder::play_with_ffplay(
-                play_path.clone(), 
-                position, 
-                None
+                play_path.clone(),
+                position,
+                None,
+                fallback_hwnd,
             ).await;
         }
     };
@@ -1262,8 +1277,8 @@ pub async fn play_song(
     // 5. 先停止旧的进度更新线程
     stop_progress_updater();
     
-    // 6. 短暂延迟，确保旧线程有时间退出
-    std::thread::sleep(Duration::from_millis(100));
+    // 6. 短暂延迟，确保旧线程有时间退出（使用 tokio 异步 sleep 避免阻塞执行器）
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 7. 启动新的进度更新
     println!("[播放] 启动进度更新线程");
@@ -1319,16 +1334,19 @@ fn start_progress_updater(
                 break;
             }
 
-            // 检查播放器是否播放完成
-            let should_stop = unsafe {
-                if let Some(player) = &GLOBAL_PLAYER {
-                    if let Some(sink) = &player.sink {
-                        sink.empty()
+            // 检查播放器是否播放完成（加锁保护，防止数据竞争）
+            let should_stop = {
+                let _lock = PLAYER_MUTEX.lock().unwrap();
+                unsafe {
+                    if let Some(player) = &GLOBAL_PLAYER {
+                        if let Some(sink) = &player.sink {
+                            sink.empty()
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     }
-                } else {
-                    false
                 }
             };
 
@@ -1368,11 +1386,14 @@ fn start_progress_updater(
                 {
                     let mut player_state = state.lock().unwrap();
                     player_state.is_playing = false;
-                    // 停止播放器
-                    unsafe {
-                        if let Some(player) = &GLOBAL_PLAYER {
-                            if let Some(sink) = &player.sink {
-                                sink.stop();
+                    // 停止播放器（加锁保护，防止数据竞争）
+                    {
+                        let _lock = PLAYER_MUTEX.lock().unwrap();
+                        unsafe {
+                            if let Some(player) = &GLOBAL_PLAYER {
+                                if let Some(sink) = &player.sink {
+                                    sink.stop();
+                                }
                             }
                         }
                     }
@@ -1445,11 +1466,13 @@ pub async fn get_audio_duration(path: String) -> Result<serde_json::Value, Strin
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         
-        // 在Windows系统上设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+        // 在Windows系统上设置进程创建标志
+        // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+        // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
         }
         
         let probe_result = cmd.output();
@@ -1667,9 +1690,11 @@ pub async fn open_readme() -> Result<(), String> {
             let mut cmd = Command::new("cmd");
             cmd.args(["/c", "start", "", cwd_readme_path.to_str().unwrap()]);
             
-            // 设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            // 设置进程创建标志
+            // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+            // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
             
             cmd.spawn()
                 .map_err(|e| format!("打开README.md文件失败: {}", e))?;
@@ -1689,9 +1714,11 @@ pub async fn open_readme() -> Result<(), String> {
             let mut cmd = Command::new("cmd");
             cmd.args(["/c", "start", "", readme_path.to_str().unwrap()]);
             
-            // 设置CREATE_NO_WINDOW标志，隐藏控制台窗口
+            // 设置进程创建标志
+            // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+            // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x08000000 | 0x00000200);
             
             cmd.spawn()
                 .map_err(|e| format!("打开README.md文件失败: {}", e))?;
@@ -1700,7 +1727,7 @@ pub async fn open_readme() -> Result<(), String> {
         #[cfg(not(windows))]
         {
             Command::new("open")
-                .arg(readme_path.to_str().unwrap())
+                .arg(readme_path.to_str().ok_or("README路径包含非法字符")?)
                 .spawn()
                 .map_err(|e| format!("打开README.md文件失败: {}", e))?;
         }

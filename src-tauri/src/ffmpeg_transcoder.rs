@@ -1140,44 +1140,32 @@ pub async fn pretranscode_audio(path: String, force_transcode: Option<bool>) -> 
 pub async fn get_transcoded_path(path: String, timeout_secs: Option<u64>, audio_info: Option<serde_json::Value>) -> Result<String, String> {
     let cache = get_transcode_cache()
         .ok_or_else(|| "转码缓存未初始化".to_string())?;
-    
+
     if !needs_transcode(&path) {
-        // 对于不需要转码的文件，也返回HTTP URL
-        if let Some(http_url) = crate::http_server::get_file_url(&path) {
-            return Ok(http_url);
-        } else {
-            return Ok(path);
-        }
+        // 对于不需要转码的文件，直接返回文件路径，前端通过 convertFileSrc 转换
+        return Ok(path);
     }
-    
+
     // 获取或创建缓存项
     let item = cache.get_or_create(&path)
         .ok_or_else(|| "创建缓存项失败".to_string())?;
-    
-    // 如果已经转码完成，直接返回HTTP URL
+
+    // 如果已经转码完成，直接返回转码后的文件路径
     if item.is_ready && std::path::Path::new(&item.transcoded_path).exists() {
-        if let Some(http_url) = crate::http_server::get_file_url(&item.transcoded_path) {
-            return Ok(http_url);
-        } else {
-            return Ok(item.transcoded_path);
-        }
+        return Ok(item.transcoded_path);
     }
-    
+
     // 开始转码
     let _transcoded_path = cache.start_transcode_with_info(&path, audio_info)?;
-    
+
     // 等待转码完成
     // 使用前端传递的超时时间，如果没有传递则使用默认值300秒（5分钟）
     let timeout = timeout_secs.unwrap_or(300);
     println!("[转码] 等待转码完成，超时时间: {}秒", timeout);
     match cache.wait_for_transcode(&path, timeout) {
         Some(transcoded_path) => {
-            // 返回HTTP URL
-            if let Some(http_url) = crate::http_server::get_file_url(&transcoded_path) {
-                Ok(http_url)
-            } else {
-                Ok(transcoded_path)
-            }
+            // 返回转码后的文件路径，前端通过 convertFileSrc 转换
+            Ok(transcoded_path)
         }
         None => Err("转码超时".to_string()),
     }
@@ -1197,6 +1185,15 @@ pub struct FFplayStatus {
 
 // 全局FFplay进程句柄
 static FFPLAY_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+// 目标 FFplay 进程ID（用于 EnumWindows 回调中匹配窗口）
+#[cfg(windows)]
+static TARGET_FFPLAY_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+// 持久化窗口监控器：在整个播放期间持续隐藏CLI窗口
+#[cfg(windows)]
+static WINDOW_MONITOR_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[cfg(windows)]
+static WINDOW_MONITOR_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 static FFPLAY_STATUS: Mutex<FFplayStatus> = Mutex::new(FFplayStatus {
     is_playing: false,
     duration: 0.0,
@@ -1225,10 +1222,34 @@ static MONITOR_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 // 清理FFplay资源（在程序退出时调用）
 pub fn cleanup_ffplay() {
     println!("[FFplay] 清理FFplay资源");
-    
-    // 停止FFplay播放
+
+    // 首先停止窗口监控器，避免监控器操作已终止进程的窗口
+    stop_window_monitor();
+
+    // 停止FFplay播放（内部会再次调用 stop_window_monitor，重复调用是幂等的）
     let _ = stop_ffplay();
-    
+
+    // 确保监控线程退出：自增 generation 让监控线程尽快退出，然后 join（带超时）
+    {
+        let monitor_handle = {
+            let mut monitor = MONITOR_THREAD.lock().unwrap();
+            monitor.take()
+        };
+        if let Some(handle) = monitor_handle {
+            MONITOR_GENERATION.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _joiner = std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(std::time::Duration::from_millis(500)).is_err() {
+                println!("[FFplay] 监控线程未在500ms内退出，继续清理");
+            } else {
+                println!("[FFplay] 监控线程已退出");
+            }
+        }
+    }
+
     // 确保进程已完全停止
     let mut process = FFPLAY_PROCESS.lock().unwrap();
     if let Some(mut child) = process.take() {
@@ -1240,97 +1261,115 @@ pub fn cleanup_ffplay() {
                 // 进程仍在运行，强制终止
                 println!("[FFplay] 强制终止FFplay进程");
                 let _ = child.kill();
+                // 非阻塞等待进程退出，最多500ms
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => {
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
                 // 减少进程计数
-            FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
-            println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
+                FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
+                println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
             }
             Err(e) => {
                 println!("[FFplay] 检查进程状态失败: {:?}", e);
             }
         }
     }
-    
+
     println!("[FFplay] FFplay资源清理完成");
 }
 
 // 使用FFplay播放音频文件
 #[tauri::command]
-pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: Option<f64>) -> Result<serde_json::Value, String> {
+pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: Option<f64>, main_hwnd: Option<isize>) -> Result<serde_json::Value, String> {
     // 先停止当前播放
     stop_ffplay()?;
-    
+
     // 检查FFplay是否可用
     let ffplay_path = TranscodeCache::get_ffplay_path()
         .ok_or_else(|| "FFplay未找到，请确保已安装FFplay或使用内置版本".to_string())?;
-    
-    println!("[FFplay] 使用ffplay播放: {}", path);
-    
+
+    println!("[FFplay] 使用ffplay播放（静默模式）: {}", path);
+
     // 构建FFplay命令
     let mut cmd = Command::new(&ffplay_path);
-    
-    // 设置FFplay参数
+
+    // 设置FFplay参数 - 完全静默模式
     cmd.arg("-autoexit"); // 播放完成后自动退出
     cmd.arg("-nodisp");  // 不显示视频窗口
-    cmd.arg("-loglevel"); cmd.arg("verbose"); // 详细输出模式，便于解析进度
-    cmd.arg("-stats");    // 显示统计信息（包含时间码）
-    
+    cmd.arg("-nostats"); // 禁用统计信息输出
+    cmd.arg("-loglevel"); cmd.arg("quiet"); // 安静模式，完全禁用输出
+    cmd.arg("-hide_banner"); // 隐藏版权信息
+
     // 设置起始时间
     if let Some(start) = start_time {
         cmd.arg("-ss");
         cmd.arg(start.to_string());
     }
-    
+
     // 设置音量
     cmd.arg("-volume");
     cmd.arg("100");
-    
+
     // 添加音频文件路径
     cmd.arg(&path);
-    
+
     // 在Windows系统上设置进程创建标志
-    // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+    // 注意：CREATE_NO_WINDOW (0x08000000) 与 DETACHED_PROCESS (0x00000008) 互斥，
+    // 同时使用会导致 CREATE_NO_WINDOW 被忽略。仅使用 CREATE_NO_WINDOW。
+    // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口（对控制台子系统应用生效）
     // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000 | 0x00000200);
     }
-    
-    // 重定向stdin，以便发送控制命令
+
+    // 重定向stdin，以便发送暂停/恢复命令
     cmd.stdin(Stdio::piped());
-    // 重定向stdout和stderr用于解析进度信息
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    
+    // 完全静默：重定向stdout和stderr到null
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
     // 打印完整的FFplay命令
     println!("[FFplay] 启动命令: {:?}", cmd);
 
     // 启动FFplay进程
-    let mut child = cmd.spawn()
+    let child = cmd.spawn()
         .map_err(|e| format!("启动FFplay失败: {}", e))?;
 
-    println!("[FFplay] 进程已启动，PID: {}", child.id());
-    
+    let process_id = child.id();
+    println!("[FFplay] 进程已启动，PID: {}", process_id);
+
+    // Windows 平台：启动持久化窗口监控器，在整个播放期间持续隐藏CLI窗口
+    #[cfg(windows)]
+    {
+        start_window_monitor(process_id, main_hwnd);
+    }
+
     // 增加进程计数
     let old_count = FFPLAY_PROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
     println!("[FFplay] 进程计数增加: {} -> {}", old_count, old_count + 1);
 
-    // 提取stderr用于解析进度信息
-    let stderr = child.stderr.take().expect("无法获取stderr");
-    
     // 保存进程句柄
     {
         let mut process = FFPLAY_PROCESS.lock().unwrap();
         *process = Some(child);
     }
 
-    // 启动输出解析线程
-    start_ffplay_output_parser(stderr);
-
     // 获取音频文件信息
     let audio_info = get_audio_info(&path);
     let mut final_duration = 300.0; // 先设置默认值
-    
+
     // 记录起始偏移量（用于后续精确计算位置）
     let start_offset = start_time.unwrap_or(0.0);
     {
@@ -1367,8 +1406,9 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
         println!("[FFplay] 初始状态: is_playing={}, position={}, duration={}",
             status.is_playing, status.position, status.duration);
     }
-    
-    // 启动状态监控线程
+
+    // 使用时钟监控线程估算进度（静默模式下无输出可解析）
+    start_clock_monitor();
     start_ffplay_monitor();
     
     // 构建返回对象，包含音频文件信息
@@ -1401,20 +1441,427 @@ pub async fn play_with_ffplay(path: String, start_time: Option<f64>, duration: O
     Ok(response)
 }
 
-// 停止FFplay播放
+// 使用FFmpeg播放音频文件（替代ffplay，避免控制台窗口）
+// 注意：ffmpeg 本身不能直接播放音频到音频设备，这里使用 ffplay 但使用多种方法隐藏其窗口
+#[tauri::command]
+pub async fn play_audio_with_ffmpeg(path: String, start_time: Option<f64>, duration: Option<f64>, window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+    // 先停止当前播放
+    stop_ffplay()?;
+    
+    // 检查FFplay是否可用
+    let ffplay_path = TranscodeCache::get_ffplay_path()
+        .ok_or_else(|| "FFplay未找到，请确保已安装FFplay或使用内置版本".to_string())?;
+    
+    println!("[FFmpegAudio] 使用ffplay播放音频（增强隐藏窗口模式）: {}", path);
+    
+    // 构建FFplay命令
+    let mut cmd = Command::new(&ffplay_path);
+    
+    // 设置FFplay参数
+    cmd.arg("-autoexit"); // 播放完成后自动退出
+    cmd.arg("-nodisp");   // 不显示视频窗口
+    cmd.arg("-nostats");  // 禁用统计信息输出
+    cmd.arg("-loglevel"); cmd.arg("quiet"); // 安静模式，完全禁用输出
+    cmd.arg("-hide_banner"); // 隐藏版权信息
+    
+    // 设置起始时间
+    if let Some(start) = start_time {
+        cmd.arg("-ss");
+        cmd.arg(start.to_string());
+    }
+    
+    // 设置音量
+    cmd.arg("-volume");
+    cmd.arg("100");
+    
+    // 添加音频文件路径
+    cmd.arg(&path);
+    
+    // 在Windows系统上设置进程创建标志
+    // 注意：CREATE_NO_WINDOW 与 DETACHED_PROCESS 互斥，同时使用会导致 CREATE_NO_WINDOW 被忽略
+    // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+    // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000 | 0x00000200);
+    }
+
+    // 重定向stdin以便发送暂停/恢复命令，stdout和stderr完全静默
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
+    // 打印完整的命令（用于调试）
+    println!("[FFmpegAudio] 启动命令: {:?}", cmd);
+
+    // 启动FFplay进程
+    let child = cmd.spawn()
+        .map_err(|e| format!("启动FFplay失败: {}", e))?;
+
+    let process_id = child.id();
+    println!("[FFmpegAudio] 进程已启动，PID: {}", process_id);
+    // Windows 平台：启动持久化窗口监控器，在整个播放期间持续隐藏CLI窗口
+    #[cfg(windows)]
+    {
+        // 获取主窗口HWND
+        let main_hwnd = window.hwnd()
+            .map(|h| h.0 as isize)
+            .ok();
+        start_window_monitor(process_id, main_hwnd);
+    }
+    
+    // 增加进程计数
+    let old_count = FFPLAY_PROCESS_COUNT.fetch_add(1, Ordering::SeqCst);
+    println!("[FFmpegAudio] 进程计数增加: {} -> {}", old_count, old_count + 1);
+
+    // 保存进程句柄
+    {
+        let mut process = FFPLAY_PROCESS.lock().unwrap();
+        *process = Some(child);
+    }
+
+    // 获取音频文件信息
+    let audio_info = get_audio_info(&path);
+    let mut final_duration = 300.0;
+    
+    // 记录起始偏移量
+    let start_offset = start_time.unwrap_or(0.0);
+    {
+        let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
+        *offset = start_offset;
+    }
+    {
+        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
+        *instant = Some(std::time::Instant::now());
+    }
+
+    // 更新播放状态
+    {
+        let mut status = FFPLAY_STATUS.lock().unwrap();
+        status.is_playing = true;
+        status.position = start_offset;
+
+        if let Some(info) = &audio_info {
+            status.duration = info.duration;
+            final_duration = info.duration;
+            println!("[FFmpegAudio] 音频时长: {}秒", info.duration);
+        } else if let Some(d) = duration {
+            status.duration = d;
+            final_duration = d;
+        } else {
+            status.duration = 300.0;
+        }
+    }
+    
+    // 启动时钟监控（因为没有输出解析，使用时钟估算进度）
+    start_clock_monitor();
+    
+    // 构建返回对象
+    let mut response = serde_json::json!({
+        "success": true,
+        "message": format!("音频已开始播放: {}", path),
+        "path": path,
+        "duration": final_duration,
+        "position": start_time.unwrap_or(0.0),
+        "is_ffplay": true,
+        "player": "ffplay-silent"
+    });
+    
+    if let Some(info) = audio_info {
+        response["format"] = serde_json::Value::String(info.format);
+        if let Some(sample_rate) = info.sample_rate {
+            response["sample_rate"] = serde_json::Value::Number(serde_json::Number::from(sample_rate));
+        }
+        if let Some(channels) = info.channels {
+            response["channels"] = serde_json::Value::Number(serde_json::Number::from(channels));
+        }
+        if let Some(bit_rate) = info.bit_rate {
+            response["bit_rate"] = serde_json::Value::Number(serde_json::Number::from(bit_rate));
+        }
+        if let Some(bit_depth) = info.bit_depth {
+            response["bit_depth"] = serde_json::Value::Number(serde_json::Number::from(bit_depth));
+        }
+    }
+    
+    Ok(response)
+}
+
+// Windows 平台：多重策略隐藏 CLI 窗口
+// 持久化窗口监控器：在整个播放期间持续隐藏CLI窗口
+// 策略1：将窗口移到屏幕外 (-32000, -32000)
+// 策略2：设置窗口 Z 序为最底层 (HWND_BOTTOM)
+// 策略3：隐藏窗口 (SW_HIDE)
+// 策略4：禁用窗口交互 (EnableWindow false)
+// 策略5：将主窗口设为置顶 (HWND_TOPMOST)
+// 策略6：1ms 高频轮询，确保窗口出现即隐藏，无明显闪烁
+
+/// 停止窗口监控器（阻塞等待监控线程退出）
+#[cfg(windows)]
+fn stop_window_monitor() {
+    use std::time::Duration;
+    WINDOW_MONITOR_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut handle = WINDOW_MONITOR_HANDLE.lock().unwrap();
+    if let Some(h) = handle.take() {
+        // 等待线程退出，最多等待 50ms
+        let _ = h.join();
+    }
+    std::mem::drop(handle);
+    // 短暂等待确保资源释放
+    std::thread::sleep(Duration::from_millis(2));
+}
+
+/// 启动持久化窗口监控器
+/// 在整个播放期间持续运行，每 1ms 轮询一次，确保 CLI 窗口出现即被隐藏
+#[cfg(windows)]
+fn start_window_monitor(process_id: u32, main_hwnd_opt: Option<isize>) {
+    use std::thread;
+    use std::time::Duration;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, SetWindowPos,
+        HWND_TOPMOST, SWP_NOSIZE, SWP_NOACTIVATE,
+    };
+    use windows::Win32::Foundation::HWND;
+
+    println!("[窗口监控] 启动持久化窗口监控器，进程ID: {}", process_id);
+
+    // 停止现有监控器
+    stop_window_monitor();
+
+    // 重置停止标志
+    WINDOW_MONITOR_STOP.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // 更新目标进程ID
+    TARGET_FFPLAY_PID.store(process_id, std::sync::atomic::Ordering::SeqCst);
+
+    let main_hwnd = main_hwnd_opt.unwrap_or(0);
+
+    let handle = thread::spawn(move || {
+        // 立即将主窗口设为置顶，在任何 CLI 窗口出现之前
+        if main_hwnd != 0 {
+            let main_handle = HWND(main_hwnd as *mut _);
+            unsafe {
+                let _ = SetWindowPos(
+                    main_handle,
+                    HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+            println!("[窗口监控] 主窗口已设为置顶");
+        }
+
+        // 持续监控循环：每 1ms 轮询一次，直到停止标志被设置
+        // 初始阶段使用 1ms 间隔（前 500 次约 0.5 秒），之后使用 5ms 间隔降低 CPU 占用
+        let mut iteration: u64 = 0;
+        loop {
+            // 检查停止标志
+            if WINDOW_MONITOR_STOP.load(std::sync::atomic::Ordering::SeqCst) {
+                println!("[窗口监控] 收到停止信号，退出监控循环");
+                break;
+            }
+
+            // 枚举所有顶层窗口，隐藏属于目标进程的窗口
+            // lparam 为 0，表示持久监控模式（不需要 found 标志）
+            let _ = unsafe {
+                EnumWindows(
+                    Some(move_window_offscreen_callback),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+            };
+
+            // 动态调整轮询间隔
+            // 前 500 次（约 0.5 秒）使用 1ms 间隔，确保窗口出现即隐藏
+            // 之后使用 5ms 间隔，降低 CPU 占用
+            let interval = if iteration < 500 {
+                Duration::from_millis(1)
+            } else {
+                Duration::from_millis(5)
+            };
+            thread::sleep(interval);
+            iteration += 1;
+        }
+
+        // 退出前确保主窗口置顶
+        if main_hwnd != 0 {
+            let main_handle = HWND(main_hwnd as *mut _);
+            unsafe {
+                let _ = SetWindowPos(
+                    main_handle,
+                    HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+
+        println!("[窗口监控] 监控线程退出");
+    });
+
+    // 保存线程句柄
+    *WINDOW_MONITOR_HANDLE.lock().unwrap() = Some(handle);
+}
+
+#[cfg(not(windows))]
+fn start_window_monitor(_process_id: u32, _main_hwnd_opt: Option<isize>) {}
+
+#[cfg(not(windows))]
+fn stop_window_monitor() {}
+
+// EnumWindows 回调函数：将属于目标进程的窗口移到屏幕外并设为底层
+#[cfg(windows)]
+unsafe extern "system" fn move_window_offscreen_callback(
+    hwnd: windows::Win32::Foundation::HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, SetWindowPos, ShowWindow, SW_HIDE,
+        HWND_BOTTOM, SWP_NOSIZE, SWP_NOACTIVATE,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+    use windows::Win32::Foundation::BOOL;
+
+    let target_pid = TARGET_FFPLAY_PID.load(std::sync::atomic::Ordering::SeqCst);
+
+    // 获取窗口所属进程ID
+    let mut window_pid: u32 = 0;
+    let _ = GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+
+    // 检查是否属于目标进程
+    if window_pid == target_pid {
+        // 策略1：将窗口移到屏幕外 + 设置为底层Z序
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            -32000, -32000,  // 移到屏幕外
+            0, 0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+
+        // 策略2：隐藏窗口
+        let _ = ShowWindow(hwnd, SW_HIDE);
+
+        // 策略3：禁用窗口交互
+        let _ = EnableWindow(hwnd, false);
+
+        // 如果 lparam 不为 0，设置 found 标志（兼容旧的一次性调用方式）
+        if lparam.0 != 0 {
+            let found_ptr = lparam.0 as *const std::sync::Arc<std::sync::atomic::AtomicBool>;
+            let found = &*found_ptr;
+            found.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        // 继续枚举，处理同进程的其它窗口（持久监控模式需要处理所有窗口）
+        return BOOL(1);
+    }
+
+    // 继续枚举
+    BOOL(1)
+}
+
+// 时钟监控线程（用于静默模式下估算播放进度）
+fn start_clock_monitor() {
+    std::thread::spawn(|| {
+        println!("[时钟监控] 启动时钟监控线程");
+        
+        // 每秒更新一次进度
+        let mut last_update = std::time::Instant::now();
+        
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            
+            // 检查播放状态
+            let is_playing = {
+                let status = FFPLAY_STATUS.lock().unwrap();
+                status.is_playing
+            };
+            
+            if !is_playing {
+                println!("[时钟监控] 播放已停止，退出监控线程");
+                break;
+            }
+            
+            // 获取起始偏移量和起始时刻
+            let (start_offset, start_instant) = {
+                let offset = *FFPLAY_START_OFFSET.lock().unwrap();
+                let instant = FFPLAY_START_INSTANT.lock().unwrap().clone();
+                (offset, instant)
+            };
+            
+            if let Some(instant) = start_instant {
+                let elapsed = instant.elapsed().as_secs_f64();
+                let current_position = start_offset + elapsed;
+                
+                // 更新播放位置
+                {
+                    let mut status = FFPLAY_STATUS.lock().unwrap();
+                    status.position = current_position;
+                }
+                
+                // 检查是否播放完成
+                let duration = {
+                    let status = FFPLAY_STATUS.lock().unwrap();
+                    status.duration
+                };
+                
+                if current_position >= duration {
+                    println!("[时钟监控] 播放完成，位置: {:.2}s, 时长: {:.2}s", current_position, duration);
+                    {
+                        let mut status = FFPLAY_STATUS.lock().unwrap();
+                        status.is_playing = false;
+                    }
+                    break;
+                }
+                
+                // 每秒打印一次进度（用于调试）
+                if last_update.elapsed().as_secs() >= 5 {
+                    println!("[时钟监控] 当前位置: {:.2}s, 时长: {:.2}s", current_position, duration);
+                    last_update = std::time::Instant::now();
+                }
+            }
+        }
+        
+        println!("[时钟监控] 监控线程结束");
+    });
+}
+
+// 停止FFPlay播放
 #[tauri::command]
 pub fn stop_ffplay() -> Result<String, String> {
+    // 先停止窗口监控器，避免监控器操作已终止进程的窗口
+    stop_window_monitor();
+
     let mut process = FFPLAY_PROCESS.lock().unwrap();
-    
+
     if let Some(mut child) = process.take() {
         // 尝试优雅地终止进程
         match child.kill() {
             Ok(_) => {
-                println!("[FFplay] 已停止播放");
-                // 不等待进程结束，避免阻塞
-                // // 减少进程计数
-            FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
-            println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
+                println!("[FFplay] 已发送kill信号");
+                // 非阻塞等待进程完全终止，最多等待500ms，确保资源释放
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            println!("[FFplay] 进程已完全终止");
+                            break;
+                        }
+                        Ok(None) => {
+                            if std::time::Instant::now() >= deadline {
+                                println!("[FFplay] 等待进程退出超时(500ms)，放弃等待");
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => {
+                            println!("[FFplay] 等待进程退出时出错: {}", e);
+                            break;
+                        }
+                    }
+                }
+                // 减少进程计数
+                FFPLAY_PROCESS_COUNT.fetch_sub(1, Ordering::SeqCst);
+                println!("[FFplay] 进程已结束，当前进程数量：{}/{}", FFPLAY_PROCESS_COUNT.load(Ordering::SeqCst), MAX_FFPLAY_PROCESSES);
             }
             Err(e) => {
                 println!("[FFplay] 停止播放失败: {}", e);
@@ -1545,7 +1992,7 @@ pub fn resume_ffplay() -> Result<String, String> {
 }
 
 // ProcessRestartSeek执行器：重启进程实现精确定位
-async fn execute_process_restart_seek(path: String, target_pos: f64) -> Result<serde_json::Value, String> {
+async fn execute_process_restart_seek(path: String, target_pos: f64, main_hwnd: Option<isize>) -> Result<serde_json::Value, String> {
     println!("[FFplay] ProcessRestartSeek: 路径={}, 目标位置={:.2}秒", path, target_pos);
     
     // 保存当前播放状态
@@ -1563,7 +2010,7 @@ async fn execute_process_restart_seek(path: String, target_pos: f64) -> Result<s
     std::thread::sleep(std::time::Duration::from_millis(100));
     
     // 启动新进程，使用-ss参数精确定位
-    let result = play_with_ffplay(path.clone(), Some(target_pos), None).await;
+    let result = play_with_ffplay(path.clone(), Some(target_pos), None, main_hwnd).await;
     
     // 如果之前是暂停状态，立即暂停
     if !was_playing {
@@ -1585,9 +2032,15 @@ async fn execute_process_restart_seek(path: String, target_pos: f64) -> Result<s
 
 // 跳转到指定位置
 #[tauri::command]
-pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Value, String> {
+pub async fn seek_ffplay(path: String, position: f64, window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
     println!("[FFplay] 开始seek到位置: {:.2}秒, 路径: {}", position, path);
-    
+
+    // 提取主窗口HWND，用于遮盖CLI窗口
+    #[cfg(windows)]
+    let main_hwnd = window.hwnd().map(|h| h.0 as isize).ok();
+    #[cfg(not(windows))]
+    let main_hwnd: Option<isize> = None;
+
     // 获取当前位置、播放状态和总时长
     let (current_pos, is_playing, duration) = {
         let status = FFPLAY_STATUS.lock().unwrap();
@@ -1636,12 +2089,15 @@ pub async fn seek_ffplay(path: String, position: f64) -> Result<serde_json::Valu
                 },
                 Err(e) => {
                     println!("[FFplay] StdinSeek失败: {}, 降级到ProcessRestartSeek", e);
-                    execute_process_restart_seek(path, target_pos).await
+                    // execute_process_restart_seek 内部会调用 stop_ffplay，
+                    // stop_ffplay 在 kill 后会通过 try_wait 循环等待进程完全终止（最多500ms），
+                    // 然后才会启动新进程，因此不会出现新旧进程并存的资源泄漏问题。
+                    execute_process_restart_seek(path, target_pos, main_hwnd).await
                 }
             }
         },
         SeekStrategy::ProcessRestartSeek => {
-            execute_process_restart_seek(path, target_pos).await
+            execute_process_restart_seek(path, target_pos, main_hwnd).await
         }
     }
 }
@@ -1798,15 +2254,34 @@ fn start_ffplay_output_parser(mut stderr: std::process::ChildStderr) {
 
 // 启动FFplay状态监控线程
 fn start_ffplay_monitor() {
-    // 自增 generation，旧线程检测到版本号变化后会自行退出，无需 join 阻塞
+    // 自增 generation，旧线程检测到版本号变化后会自行退出
     let my_gen = MONITOR_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    // 丢弃旧的线程句柄（不等待它结束，让它自行退出）
+    // 在启动新线程前，尝试 join 旧线程（带超时），确保旧线程有机会退出
+    // 避免 Handle 被 drop 后旧线程仍在后台运行导致的资源泄漏
     {
-        let mut old_thread = MONITOR_THREAD.lock().unwrap();
-        let _ = old_thread.take(); // 旧 JoinHandle 被 drop，但线程仍在后台，会在下次循环自行退出
+        let old_handle = {
+            let mut old_thread = MONITOR_THREAD.lock().unwrap();
+            old_thread.take()
+        };
+        if let Some(handle) = old_handle {
+            // 通过 channel 实现 join 带超时：joiner 线程负责 join，主线程通过 recv_timeout 等待
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _joiner = std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(()) => {
+                    println!("[FFplay] 旧监控线程已退出 (gen<{})", my_gen);
+                }
+                Err(_) => {
+                    println!("[FFplay] 旧监控线程未在200ms内退出，继续启动新线程 (gen={})", my_gen);
+                }
+            }
+        }
     }
-    
+
     let thread = std::thread::spawn(move || {
         println!("[FFplay] 状态监控线程已启动 (gen={})", my_gen);
         

@@ -149,7 +149,9 @@ fn perform_conversion(config: AudioConversionConfig) -> Result<String, String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+        // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
+        // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
+        cmd.creation_flags(0x08000000 | 0x00000200);
     }
 
     let result = cmd

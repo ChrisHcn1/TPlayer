@@ -46,7 +46,9 @@ pub async fn scan_cue_files(directory: String) -> Result<serde_json::Value, Stri
                         &album,
                         &album.file_path.to_string_lossy()
                     );
-                    all_tracks.push(serde_json::to_value(track_song).unwrap());
+                    let track_value = serde_json::to_value(track_song)
+                        .map_err(|e| format!("序列化音轨失败: {}", e))?;
+                    all_tracks.push(track_value);
                 }
             }
             Err(e) => {
@@ -76,11 +78,14 @@ pub async fn parse_cue_file_command(cue_path: String) -> Result<serde_json::Valu
                 "file_path": album.file_path.to_string_lossy().to_string(),
                 "file_type": album.file_type,
                 "tracks": album.tracks.iter().map(|t| {
+                    let end_time_str = t.end_time
+                        .map(|d| d.as_secs().to_string())
+                        .unwrap_or_else(|| "0".to_string());
                     let title_with_times = format!(
                         "{}::{}::{}",
                         if t.title.is_empty() { format!("Track {}", t.number) } else { t.title.clone() },
                         t.start_time.as_secs(),
-                        t.end_time.map(|d| d.as_secs().to_string()).unwrap_or_default()
+                        end_time_str
                     );
                     serde_json::json!({
                         "number": t.number.to_string(),

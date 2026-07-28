@@ -8,8 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
 use urlencoding;
 
-// 日志开关：设置为 true 可启用日志输出
+// 日志开关：设置为 true 可启用详细诊断日志
 const ENABLE_LOGS: bool = true;
+
+// MSIX 环境诊断标志
+static MSIX_DIAGNOSTIC_DONE: once_cell::sync::Lazy<Mutex<bool>> = once_cell::sync::Lazy::new(|| Mutex::new(false));
 
 // 条件性日志宏
 macro_rules! log_info {
@@ -58,16 +61,102 @@ pub struct HttpServer {
     token: String,
 }
 
+// MSIX 环境诊断函数
+fn run_msix_diagnostic_impl() {
+    log_info!("========== MSIX 环境诊断 ==========");
+    
+    // 检查是否在 MSIX 环境下运行
+    let exe_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "未知".to_string());
+    
+    log_info!("进程路径: {}", exe_path);
+    
+    // MSIX 环境特征检测
+    let is_msix = exe_path.contains("WindowsApps") || exe_path.contains("Program Files");
+    log_info!("MSIX 环境检测: {}", if is_msix { "是" } else { "否" });
+    
+    // 检查网络相关环境变量
+    log_info!("网络环境检查:");
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        log_info!("  LOCALAPPDATA: {}", local_app_data);
+    }
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        log_info!("  USERPROFILE: {}", user_profile);
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        log_info!("  APPDATA: {}", app_data);
+    }
+    
+    // 检查网络接口
+    log_info!("网络接口检查:");
+    if let Ok(interfaces) = std::net::TcpListener::bind("127.0.0.1:0") {
+        log_info!("  ✓ 可以创建 TCP socket");
+        // 立即释放测试 socket
+        let _ = interfaces;
+    } else {
+        log_error!("  ✗ 无法创建 TCP socket - 网络权限可能受限");
+    }
+    
+    // 检查文件系统访问权限
+    log_info!("文件系统访问检查:");
+    let test_path = std::path::Path::new("C:\\Users");
+    if test_path.exists() {
+        log_info!("  ✓ 可以访问 C:\\Users");
+    } else {
+        log_error!("  ✗ 无法访问 C:\\Users - 文件系统权限受限");
+    }
+    
+    log_info!("========== MSIX 环境诊断结束 ==========");
+}
+
 impl HttpServer {
+    // MSIX 环境诊断
+    fn run_msix_diagnostic() {
+        run_msix_diagnostic_impl();
+    }
     // 创建并启动 HTTP 服务器
     pub fn start() -> Result<Self, String> {
+        // MSIX 环境诊断
+        {
+            let mut diagnostic_done = MSIX_DIAGNOSTIC_DONE.lock().unwrap();
+            if !*diagnostic_done {
+                *diagnostic_done = true;
+                Self::run_msix_diagnostic();
+            }
+        }
+        
+        log_info!("========== HTTP服务器启动诊断开始 ==========");
+        log_info!("当前进程路径: {:?}", std::env::current_exe());
+        log_info!("当前工作目录: {:?}", std::env::current_dir());
+        log_info!("应用数据目录: {:?}", std::env::var("LOCALAPPDATA").ok());
+        log_info!("用户目录: {:?}", std::env::var("USERPROFILE").ok());
+        
         // 尝试在 8000-9000 端口范围内找到一个可用端口
+        log_info!("开始扫描可用端口 (8000-9000)...");
         let port = (8000..=9000)
-            .find(|&p| TcpListener::bind("127.0.0.1:".to_string() + &p.to_string()).is_ok())
-            .ok_or_else(|| "无法找到可用端口，端口范围 8000-9000 全部被占用".to_string())?;
+            .find(|&p| {
+                let result = TcpListener::bind("127.0.0.1:".to_string() + &p.to_string());
+                log_info!("尝试绑定端口 {}: {}", p, if result.is_ok() { "成功" } else { "失败" });
+                result.is_ok()
+            })
+            .ok_or_else(|| {
+                let error_msg = "无法找到可用端口，端口范围 8000-9000 全部被占用或网络权限受限".to_string();
+                log_error!("❌ {}", error_msg);
+                log_error!("可能原因: MSIX 沙箱限制网络访问，或防火墙阻止端口绑定");
+                error_msg
+            })?;
 
+        log_info!("✅ 找到可用端口: {}", port);
+        
         let listener = TcpListener::bind("127.0.0.1:".to_string() + &port.to_string())
-            .map_err(|e| format!("绑定端口失败: {}", e))?;
+            .map_err(|e| {
+                let error_msg = format!("绑定端口 {} 失败: {}", port, e);
+                log_error!("❌ {}", error_msg);
+                error_msg
+            })?;
+
+        log_info!("✅ HTTP服务器成功绑定端口: {}", port);
 
         // 生成随机Token
         let token = generate_token();
@@ -114,21 +203,41 @@ impl HttpServer {
 
     // 验证请求中的Token
     fn validate_token(request: &str, valid_token: &str) -> bool {
-        // 从URL参数中提取token
+        // 空 token 直接拒绝，避免空值误匹配
+        if valid_token.is_empty() {
+            return false;
+        }
+
+        // 从请求行提取路径（含查询字符串）
         let path = request
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
 
-        // 检查URL中是否包含有效的token参数
-        let token_param = format!("token={}", valid_token);
-        path.contains(&token_param)
+        // 提取查询字符串部分
+        let query = match path.split('?').nth(1) {
+            Some(q) => q,
+            None => return false,
+        };
+
+        // 精确匹配 token 查询参数，避免子串误判（如 "xtoken=" 或 "token=abcde" 误命中）
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            if kv.next() == Some("token") {
+                if let Some(value) = kv.next() {
+                    if value == valid_token {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     // 处理HTTP连接
     fn handle_connection(mut stream: TcpStream, token: &str) {
-        let mut buffer = [0; 1024];
+        let mut buffer = [0; 8192];
         let bytes_read = match stream.read(&mut buffer) {
             Ok(n) => n,
             Err(e) => {
@@ -203,27 +312,69 @@ impl HttpServer {
                         .and_then(|line| line.split(':').nth(1).map(|s| s.trim()));
 
                     let (start_byte, end_byte, status_code, content_range) = if let Some(range) = range_header {
-                        // 解析 Range 头 (格式: "bytes=start-end")
+                        // 解析 Range 头 (格式: "bytes=start-end"，支持 "start-"、"start-end"、"-suffix")
                         log_info!("收到 Range 请求: {}", range);
                         let range = range.strip_prefix("bytes=").unwrap_or(range);
-                        let parts: Vec<&str> = range.split('-').collect();
+                        let parts: Vec<&str> = range.splitn(2, '-').collect();
 
-                        if parts.len() >= 2 {
-                            let start = parts[0].parse::<u64>().unwrap_or(0).min(file_size);
-                            let end = if parts[1].is_empty() {
-                                file_size.saturating_sub(1)
+                        // 解析失败时回退到完整文件响应（200），避免 unwrap_or 静默掩盖错误
+                        let parsed_range = if parts.len() == 2 {
+                            let start_str = parts[0].trim();
+                            let end_str = parts[1].trim();
+
+                            let start = if start_str.is_empty() {
+                                None
                             } else {
-                                parts[1].parse::<u64>().unwrap_or(file_size.saturating_sub(1)).min(file_size.saturating_sub(1))
+                                match start_str.parse::<u64>() {
+                                    Ok(v) => Some(v),
+                                    Err(_) => {
+                                        log_error!("Range 起始位置解析失败: '{}'", start_str);
+                                        None
+                                    }
+                                }
                             };
-                            
-                            // 检查边界条件
-                            if start > end {
-                                (0, None, 200, None)
+
+                            let end = if end_str.is_empty() {
+                                None
                             } else {
-                                (start, Some(end), 206, Some(format!("bytes {}-{}/{}", start, end, file_size)))
+                                match end_str.parse::<u64>() {
+                                    Ok(v) => Some(v),
+                                    Err(_) => {
+                                        log_error!("Range 结束位置解析失败: '{}'", end_str);
+                                        None
+                                    }
+                                }
+                            };
+
+                            match (start, end) {
+                                (Some(s), Some(e)) => Some((s, e)),
+                                (Some(s), None) => Some((s, file_size.saturating_sub(1))),
+                                (None, Some(e)) => {
+                                    // 后缀范围：请求最后 e 个字节
+                                    if e == 0 || file_size == 0 {
+                                        None
+                                    } else {
+                                        Some((file_size.saturating_sub(e), file_size.saturating_sub(1)))
+                                    }
+                                }
+                                (None, None) => None,
                             }
                         } else {
-                            (0, None, 200, None)
+                            None
+                        };
+
+                        // 应用边界约束并生成响应
+                        match parsed_range {
+                            Some((start, end)) if file_size > 0 => {
+                                let start = start.min(file_size);
+                                let end = end.min(file_size.saturating_sub(1));
+                                if start > end {
+                                    (0, None, 200, None)
+                                } else {
+                                    (start, Some(end), 206, Some(format!("bytes {}-{}/{}", start, end, file_size)))
+                                }
+                            }
+                            _ => (0, None, 200, None),
                         }
                     } else {
                         (0, None, 200, None)
@@ -240,29 +391,47 @@ impl HttpServer {
                         } else {
                             (file_size - start_byte) as usize
                         };
-                        format!(
-                            "HTTP/1.1 206 Partial Content\r\n\
-                             Content-Type: {}\r\n\
-                             Content-Length: {}\r\n\
-                             Content-Range: {}\r\n\
-                             Accept-Ranges: bytes\r\n\
-                             Connection: close\r\n\
-                             Access-Control-Allow-Origin: *\r\n\
-                             \r\n",
-                            mime_type,
-                            content_length,
-                            content_range.unwrap_or_default()
-                        )
+                        // content_range 为 None 时不能输出空的 Content-Range 头，
+                        // 否则会产生非法的 HTTP 响应，此时退回到 200 完整响应
+                        match content_range {
+                            Some(cr) => format!(
+                                "HTTP/1.1 206 Partial Content\r\n\
+Content-Type: {}\r\n\
+Content-Length: {}\r\n\
+Content-Range: {}\r\n\
+Accept-Ranges: bytes\r\n\
+Connection: close\r\n\
+Access-Control-Allow-Origin: *\r\n\
+\r\n",
+                                mime_type,
+                                content_length,
+                                cr
+                            ),
+                            None => {
+                                log_error!("206 响应缺少 Content-Range，退回 200 响应");
+                                format!(
+                                    "HTTP/1.1 200 OK\r\n\
+Content-Type: {}\r\n\
+Content-Length: {}\r\n\
+Accept-Ranges: bytes\r\n\
+Connection: close\r\n\
+Access-Control-Allow-Origin: *\r\n\
+\r\n",
+                                    mime_type,
+                                    file_size
+                                )
+                            }
+                        }
                     } else {
                         // 普通 200 响应
                         format!(
                             "HTTP/1.1 200 OK\r\n\
-                             Content-Type: {}\r\n\
-                             Content-Length: {}\r\n\
-                             Accept-Ranges: bytes\r\n\
-                             Connection: close\r\n\
-                             Access-Control-Allow-Origin: *\r\n\
-                             \r\n",
+Content-Type: {}\r\n\
+Content-Length: {}\r\n\
+Accept-Ranges: bytes\r\n\
+Connection: close\r\n\
+Access-Control-Allow-Origin: *\r\n\
+\r\n",
                             mime_type,
                             file_size
                         )
@@ -270,6 +439,10 @@ impl HttpServer {
                     
                     if let Err(e) = stream.write(response.as_bytes()) {
                         log_error!("发送响应头失败: {}", e);
+                        return;
+                    }
+                    if let Err(e) = stream.flush() {
+                        log_error!("刷新响应头失败: {}", e);
                         return;
                     }
 
@@ -319,6 +492,9 @@ impl HttpServer {
                         }
                     }
                     
+                    if let Err(e) = stream.flush() {
+                        log_error!("刷新文件内容失败: {}", e);
+                    }
                     log_info!("文件发送完成: {}", file_path);
                 }
                 Err(e) => {
@@ -347,7 +523,7 @@ impl HttpServer {
         } else if file_path.ends_with(".flac") {
             "audio/flac"
         } else if file_path.ends_with(".wav") {
-            "audio/wav"
+            "audio/x-wav"
         } else if file_path.ends_with(".ogg") {
             "audio/ogg"
         } else if file_path.ends_with(".aac") {
@@ -393,18 +569,19 @@ impl HttpServer {
     fn send_error(stream: &mut TcpStream, code: u16, status: &str, body: &str) {
         let response = format!(
             "HTTP/1.1 {} {}\r\n\
-             Content-Type: text/plain\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             Access-Control-Allow-Origin: *\r\n\
-             \r\n\
-             {}",
+Content-Type: text/plain\r\n\
+Content-Length: {}\r\n\
+Connection: close\r\n\
+Access-Control-Allow-Origin: *\r\n\
+\r\n\
+{}",
             code,
             status,
             body.len(),
             body
         );
         let _ = stream.write(response.as_bytes());
+        let _ = stream.flush();
     }
 }
 
@@ -440,4 +617,32 @@ pub fn get_file_url(file_path: &str) -> Option<String> {
 #[tauri::command]
 pub fn get_file_http_url(file_path: String) -> Result<String, String> {
     get_file_url(&file_path).ok_or_else(|| "HTTP服务器未初始化".to_string())
+}
+
+// 检查HTTP服务器状态（用于诊断）
+#[tauri::command]
+pub fn check_http_server_status() -> Result<serde_json::Value, String> {
+    let server = get_http_server();
+    
+    if let Some(s) = server {
+        Ok(serde_json::json!({
+            "status": "running",
+            "port": s.port,
+            "token": s.token,
+            "url": s.get_url()
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "status": "not_running",
+            "error": "HTTP服务器未启动"
+        }))
+    }
+}
+
+// 打开开发者工具
+#[tauri::command]
+pub fn open_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
+    log_info!("尝试打开开发者工具");
+    window.open_devtools();
+    Ok(())
 }

@@ -878,7 +878,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { localStorageService, type Playlist } from './stores/local'
@@ -1074,6 +1074,8 @@ let ffplayStatusInterval: number | null = null
 // Seek防抖机制
 let seekDebounceTimer: number | null = null
 let pendingSeekPosition: number | null = null
+let seekInProgress: boolean = false  // Seek进行中标志，防止状态轮询覆盖位置
+let seekCompleteTimestamp: number = 0  // Seek完成时间戳，用于延迟恢复状态轮询
 
 // 防抖Seek函数（200毫秒延迟）
 const debouncedSeek = async (position: number) => {
@@ -1082,6 +1084,7 @@ const debouncedSeek = async (position: number) => {
   }
   
   pendingSeekPosition = position
+  seekInProgress = true  // 标记Seek开始
   
   seekDebounceTimer = window.setTimeout(async () => {
     if (pendingSeekPosition !== null && isFFplayPlaying.value && currentSong.value) {
@@ -1097,6 +1100,7 @@ const debouncedSeek = async (position: number) => {
           currentPosition.value = pendingSeekPosition
           const totalSeconds = ffplayDuration.value || 1
           progress.value = Math.min((pendingSeekPosition / totalSeconds) * 100, 100)
+          seekCompleteTimestamp = Date.now()  // 记录Seek完成时间
           logInfo('【SEEK】FFplay防抖seek完成: currentPosition=', pendingSeekPosition, 's')
         }
       } catch (error) {
@@ -1104,7 +1108,16 @@ const debouncedSeek = async (position: number) => {
       } finally {
         pendingSeekPosition = null
         seekDebounceTimer = null
+        // 延迟500ms后清除Seek进行中标志，给FFplay状态更新留出时间
+        setTimeout(() => {
+          seekInProgress = false
+        }, 500)
       }
+    } else {
+      // 如果条件不满足，也要清除标志
+      pendingSeekPosition = null
+      seekDebounceTimer = null
+      seekInProgress = false
     }
   }, 200)
 }
@@ -2112,18 +2125,18 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       }
       
       try {
-        logInfo('【FFplay】开始调用 play_with_ffplay')
-        console.log('【FFplay】开始调用 play_with_ffplay - 同步日志')
-        // 使用FFplay播放
+        logInfo('【FFmpeg】开始调用 play_audio_with_ffmpeg')
+        console.log('【FFmpeg】开始调用 play_audio_with_ffmpeg - 同步日志')
+        // 使用FFmpeg播放
         const start_position = positionForCue
-        console.log('【FFplay】start_position 设置为:', start_position)
-        logInfo('【FFplay】start_position 设置为:', start_position)
+        console.log('【FFmpeg】start_position 设置为:', start_position)
+        logInfo('【FFmpeg】start_position 设置为:', start_position)
         let result
-        console.log('【FFplay】开始执行 invoke 调用')
-        logInfo('【FFplay】开始执行 invoke 调用')
+        console.log('【FFmpeg】开始执行 invoke 调用')
+        logInfo('【FFmpeg】开始执行 invoke 调用')
         try {
-          logInfo('【FFplay】准备调用 invoke，path:', playPath, 'start_time:', start_position)
-          console.log('【FFplay】准备调用 invoke，path:', playPath, 'start_time:', start_position)
+          logInfo('【FFmpeg】准备调用 invoke，path:', playPath, 'start_time:', start_position)
+          console.log('【FFmpeg】准备调用 invoke，path:', playPath, 'start_time:', start_position)
           // 解析歌曲时长（如果有的话）
           let durationSeconds = 300; // 默认值
           if (currentSong.value && currentSong.value.duration) {
@@ -2136,15 +2149,15 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }
           }
           
-          result = await invoke('play_with_ffplay', {
+          result = await invoke('play_audio_with_ffmpeg', {
             path: playPath,
             start_time: start_position,
             duration: durationSeconds
           }) as FFplayResult | string
-          console.log('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
+          console.log('【FFmpeg】invoke 调用成功，result:', JSON.stringify(result))
           // 确保 logInfo 是函数后再调用
           if (typeof logInfo === 'function') {
-            logInfo('【FFplay】invoke 调用成功，result:', JSON.stringify(result))
+            logInfo('【FFmpeg】invoke 调用成功，result:', JSON.stringify(result))
             logInfo('result类型:', typeof result)
             if (typeof result === 'object' && result !== null) {
               logInfo('result.duration:', (result as FFplayResult).duration)
@@ -2389,8 +2402,9 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                   logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
                 }
 
-                // 只有当status.position有效时才更新currentPosition
-                if (status.position !== undefined && status.position !== null) {
+                // 只有当status.position有效且Seek未在进行中时才更新currentPosition
+                // 防止状态轮询覆盖Seek后的位置
+                if (status.position !== undefined && status.position !== null && !seekInProgress) {
                   console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   if (typeof logInfo === 'function') {
                     logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
@@ -2400,9 +2414,14 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                   frontendPosition = status.position
                   console.log('【FFplay】更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                   logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                } else if (seekInProgress) {
+                  console.log('【FFplay】Seek进行中，跳过位置更新，保持当前位置:', currentPosition.value)
+                  if (typeof logInfo === 'function') {
+                    logInfo('Seek进行中，跳过位置更新')
+                  }
                 }
                 
-                // 计算进度百分比
+                // 计算进度百分比（Seek进行中时也更新，因为currentPosition已被保护）
                 if (ffplayDuration.value > 0) {
                   const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
                   console.log('【FFplay】更新进度百分比前:', progress.value, '更新后:', newProgress)
@@ -2835,22 +2854,22 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           // 这里可以添加其他浏览器环境下的URL处理逻辑
         }
       } else if (!audioUrl.startsWith('http://') && !audioUrl.startsWith('https://') && !audioUrl.startsWith('blob:')) {
-        // 桌面应用环境，获取HTTP URL
+        // 桌面应用环境，使用 Tauri 的 convertFileSrc 将文件路径转换为 asset 协议 URL
         try {
-          logInfo('前端播放: 桌面环境，正在获取HTTP URL...')
-          audioUrl = await invoke('get_file_http_url', { filePath: audioUrl }) as string
-          logInfo('前端播放: 获取HTTP URL成功:', audioUrl)
-          console.log('获取HTTP URL成功:', audioUrl)
+          logInfo('前端播放: 桌面环境，使用 convertFileSrc 转换文件路径...')
+          audioUrl = convertFileSrc(audioUrl)
+          logInfo('前端播放: convertFileSrc 转换成功:', audioUrl)
+          console.log('convertFileSrc 转换成功:', audioUrl)
         } catch (urlError) {
-          console.error('❌ 前端播放: 获取HTTP URL失败:', urlError)
-          logError('❌ 前端播放: 获取HTTP URL失败:', urlError)
-          
-          // 获取URL失败，尝试使用FFplay作为回退
+          console.error('❌ 前端播放: convertFileSrc 转换失败:', urlError)
+          logError('❌ 前端播放: convertFileSrc 转换失败:', urlError)
+
+          // 转换失败，尝试使用FFplay作为回退
           if (!isBrowser.value && !needsFFplay) {
-            logInfo('获取HTTP URL失败，尝试使用FFplay回退播放')
+            logInfo('convertFileSrc 转换失败，尝试使用FFplay回退播放')
             needsFFplay = true
           } else {
-            errorMessage = '无法获取文件URL: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
+            errorMessage = '无法转换文件路径: ' + (urlError && typeof urlError === 'object' && 'message' in urlError ? (urlError.message as string) : String(urlError))
             isPlaying.value = false
             isPlaybackFinished = true
             throw new Error(errorMessage)
@@ -3125,7 +3144,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       
       // 等待音频元素加载完成后再播放
       if (autoPlay) {
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
           // 保存当前音频元素的引用，避免被其他操作修改
           const currentAudioElement = audioElement.value
           
@@ -3231,8 +3250,18 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }
           }
         
+        // 添加防重入标志，避免重复处理错误
+        let errorHandled = false
+        
         // 处理错误
         currentAudioElement.onerror = (event) => {
+          // 检查是否已经处理过错误，避免重复处理导致级联错误
+          if (errorHandled) {
+            logInfo('错误已经处理过，忽略重复触发')
+            return
+          }
+          errorHandled = true
+          
           // 检查音频元素是否为null或已被替换
           if (!audioElement.value || audioElement.value !== currentAudioElement) {
             logInfo('音频元素已被清理或替换，onerror事件处理被忽略')
@@ -3250,19 +3279,15 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             switch(error.code) {
               case error.MEDIA_ERR_ABORTED:
                 logError('音频加载被中止: 可能是用户中断了加载过程')
-                // 可以尝试重新加载
                 break
               case error.MEDIA_ERR_NETWORK:
                 logError('网络错误导致音频加载失败: 检查网络连接或文件服务器')
-                // 可以尝试重新加载或切换到备用源
                 break
               case error.MEDIA_ERR_DECODE:
                 logError('音频解码失败: 音频文件可能损坏或格式不被支持')
-                // 可以尝试转码或使用其他播放器
                 break
               case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
                 logError('音频格式不支持: 当前浏览器不支持此音频格式')
-                // 可以尝试转码为支持的格式
                 break
               default:
                 logError('未知音频错误: 请检查音频文件和播放环境')
@@ -3271,14 +3296,12 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             // 针对特定错误类型的处理策略
             if (error.code === error.MEDIA_ERR_SRC_NOT_SUPPORTED || error.code === error.MEDIA_ERR_DECODE) {
               logInfo('尝试启用转码来处理不支持的格式')
-              // 可以在这里触发转码逻辑
             }
             
             // 桌面环境下，如果HTML5 Audio播放失败，尝试使用FFplay回退
             if (!isBrowser.value && !isFFplayPlaying.value) {
               logInfo('HTML5 Audio播放失败，尝试使用FFplay回退')
-              // 设置标志，让调用方知道需要使用FFplay
-              needsFFplay = true
+              // 不在此处设置 needsFFplay，让 catch 块统一处理 FFplay 回退
               // 清理当前音频元素
               try {
                 currentAudioElement.pause()
@@ -3599,21 +3622,21 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         timeupdateHandler = null
       }
       
-      // 重新执行FFplay播放逻辑
+      // 重新执行FFmpeg播放逻辑
       try {
-        logInfo('【FFplay回退】开始调用 play_with_ffplay')
+        logInfo('【FFmpeg回退】开始调用 play_audio_with_ffmpeg')
         
-        // 停止之前的FFplay播放（如果有）
+        // 停止之前的FFmpeg播放（如果有）
         if (isFFplayPlaying.value) {
           try {
             await invoke('stop_ffplay')
             isFFplayPlaying.value = false
           } catch (stopError) {
-            logError('停止FFplay播放失败:', stopError)
+            logError('停止FFmpeg播放失败:', stopError)
           }
         }
         
-        // 使用FFplay播放
+        // 使用FFmpeg播放
         const start_position = positionForCue
         let durationSeconds = 300
         if (currentSong.value && currentSong.value.duration) {
@@ -3626,14 +3649,14 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           }
         }
         
-        const result = await invoke('play_with_ffplay', {
+        const result = await invoke('play_audio_with_ffmpeg', {
           path: playPath,
           start_time: start_position,
           duration: durationSeconds
         }) as FFplayResult | string
         
         if (typeof result === 'string' && result.includes('未找到')) {
-          logError('FFplay未找到，无法播放:', result)
+          logError('FFmpeg未找到，无法播放:', result)
           if (autoPlay) {
             isPlaying.value = false
           }
@@ -4290,8 +4313,8 @@ const seek = async () => {
                   logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
                 }
 
-                // 只有当status.position有效时才更新currentPosition
-                if (status.position !== undefined && status.position !== null) {
+                // Seek进行中时，不允许状态轮询覆盖Seek位置
+                if (!seekInProgress && status.position !== undefined && status.position !== null) {
                   console.log('【SEEK】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   if (typeof logInfo === 'function') {
                     logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
@@ -4302,6 +4325,8 @@ const seek = async () => {
                   if (typeof logInfo === 'function') {
                     logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                   }
+                } else if (seekInProgress) {
+                  console.log('【SEEK】立即更新被跳过（Seek进行中），保持位置:', currentPosition.value)
                 }
                 
                 // 计算进度百分比
@@ -6027,6 +6052,18 @@ onMounted(() => {
         }
       } catch (e) {
         logError('检查首次运行状态失败:', e);
+      }
+    })
+    
+    // 绑定 F12 快捷键打开开发者工具
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'F12') {
+        e.preventDefault();
+        logInfo('F12 快捷键被按下，尝试打开开发者工具');
+        // 使用 Tauri API 打开开发者工具
+        invoke('open_devtools').catch(err => {
+          logError('打开开发者工具失败:', err);
+        });
       }
     })
   } catch (error) {
