@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "TPlayer",
-  "version": "1.0.4",
-  "identifier": "TPlayer.TPlayer",
+  "version": "1.0.6",
+  "identifier": "D57E920A.TPlayer",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -78,14 +78,13 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.svg",
-      "icons/32x32.png",
-      "icons/48x48.png",
-      "icons/64x64.png",
-      "icons/128x128.png",
-      "icons/256x256.png",
-      "icons/512x512.png",
       "icons/icon.ico",
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon_512.png",
+      "icons/icon_1024.png",
       "icons/Square44x44Logo.png",
       "icons/Square150x150Logo.png",
       "icons/Square310x310Logo.png",
@@ -94,7 +93,7 @@
     "resources": [
       "bin/*"
     ],
-    "copyright": "2024 TPlayer Team. All rights reserved.",
+    "copyright": "2024 格力森. All rights reserved.",
     "publisher": "CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0",
     "shortDescription": "A modern music player with DSD support and advanced lyric features.",
     "longDescription": "TPlayer is a powerful music player designed for audiophiles. Features include:\n\n- High-quality audio playback with DSD support via FFplay\n- Real-time lyrics display with multi-source lyric search\n- Support for multiple audio formats (MP3, FLAC, WAV, AAC, OGG, M4A, WMA, DSD)\n- Beautiful and intuitive user interface with dark/light themes\n- Playlist management and favorites\n- Crossfade and gapless playback\n- Online lyric matching from multiple sources\n- Multi-language support (Chinese, English and more)\n\nExperience the ultimate music listening experience with TPlayer.",

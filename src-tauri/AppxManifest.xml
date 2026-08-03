@@ -4,13 +4,13 @@
          xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap uap3 rescap">
-  <Identity Name="TPlayer.TPlayer"
+  <Identity Name="D57E920A.TPlayer"
             Publisher="CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0"
-            Version="1.0.4.0"
+            Version="1.0.6.0"
             ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>TPlayer</DisplayName>
-    <PublisherDisplayName>TPlayer Team</PublisherDisplayName>
+    <PublisherDisplayName>格力森</PublisherDisplayName>
     <Logo>icons\StoreLogo.png</Logo>
     <Description>A modern music player with DSD support and advanced lyric features.</Description>
   </Properties>
@@ -34,7 +34,7 @@
   <Applications>
     <Application Id="App"
                  Executable="app.exe"
-                 EntryPoint="$targetentrypoint$">
+                 EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="TPlayer"
         Description="A modern music player with DSD support and advanced lyric features."
@@ -56,6 +56,11 @@
               <uap:FileType>.wma</uap:FileType>
               <uap:FileType>.dsf</uap:FileType>
               <uap:FileType>.dff</uap:FileType>
+              <uap:FileType>.dsd</uap:FileType>
+              <uap:FileType>.ape</uap:FileType>
+              <uap:FileType>.wv</uap:FileType>
+              <uap:FileType>.tta</uap:FileType>
+              <uap:FileType>.mqa</uap:FileType>
             </uap:SupportedFileTypes>
           </uap3:FileTypeAssociation>
         </uap3:Extension>

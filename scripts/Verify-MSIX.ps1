@@ -2,7 +2,7 @@
 # Verify the integrity and installation of the MSIX package
 
 param(
-    [string]$PackagePath = "E:\TPlayer\msix-output\TPlayer_1.0.3.0_x64.msix"
+    [string]$PackagePath = "E:\TPlayer\msix-output\D57E920A.TPlayer_1.0.4.0_x64.msix"
 )
 
 Write-Host "Starting MSIX package verification..." -ForegroundColor Green
@@ -35,22 +35,26 @@ if ($makeAppxPath) {
         $manifestPath = "E:\TPlayer\msix-temp\AppxManifest.xml"
         if (Test-Path $manifestPath) {
             Write-Host "Manifest file found" -ForegroundColor Green
-            [xml]$manifest = Get-Content $manifestPath
+            [xml]$manifest = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8)
             
             # Display package information
             Write-Host "`nPackage Information:" -ForegroundColor Cyan
             Write-Host "Name: $($manifest.Package.Identity.Name)" -ForegroundColor White
             Write-Host "Version: $($manifest.Package.Identity.Version)" -ForegroundColor White
             Write-Host "Publisher: $($manifest.Package.Identity.Publisher)" -ForegroundColor White
+            Write-Host "Publisher Display Name: $($manifest.Package.Properties.PublisherDisplayName)" -ForegroundColor White
             Write-Host "Processor Architecture: $($manifest.Package.Identity.ProcessorArchitecture)" -ForegroundColor White
             Write-Host "Display Name: $($manifest.Package.Properties.DisplayName)" -ForegroundColor White
             Write-Host "Description: $($manifest.Package.Properties.Description)" -ForegroundColor White
             
             # Check supported file types
             Write-Host "`nSupported File Types:" -ForegroundColor Cyan
-            $fileTypes = $manifest.Package.Applications.Application.Extensions.'uap3:FileTypeAssociation'.'uap:SupportedFileTypes'.'uap:FileType'
+            $ns = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+            $ns.AddNamespace("uap", "http://schemas.microsoft.com/appx/manifest/uap/windows10")
+            $ns.AddNamespace("uap3", "http://schemas.microsoft.com/appx/manifest/uap/windows10/3")
+            $fileTypes = $manifest.SelectNodes("//uap:SupportedFileTypes/uap:FileType", $ns)
             foreach ($fileType in $fileTypes) {
-                Write-Host "  - $fileType" -ForegroundColor White
+                Write-Host "  - $($fileType.InnerText)" -ForegroundColor White
             }
         }
         

@@ -45,6 +45,9 @@ dist-ssr
 # Build outputs
 build/
 out/
+msix-output/
+*.pfx
+*.msix
 
 # Dependency directories
 node_modules/

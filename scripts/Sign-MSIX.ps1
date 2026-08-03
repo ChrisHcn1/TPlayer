@@ -17,7 +17,7 @@ Password for the certificate
 #>
 
 param(
-    [string]$MsixPath = "src-tauri/target/release/bundle/msix/TPlayer_1.0.2.0.msix",
+    [string]$MsixPath = "E:\TPlayer\msix-output\D57E920A.TPlayer_1.0.6.0_x64.msix",
     [string]$CertificatePassword = "test1234"
 )
 
@@ -50,7 +50,7 @@ try {
 
     Write-Host "`n[1/3] Creating self-signed certificate..." -ForegroundColor $InfoColor
     
-    $certSubject = "CN=TPlayer Test Publisher"
+    $certSubject = "CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0"
     $cert = New-SelfSignedCertificate -Type Custom -Subject $certSubject -KeyUsage DigitalSignature -FriendlyName "TPlayer Test Certificate" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3")
     
     if (-not $cert) {

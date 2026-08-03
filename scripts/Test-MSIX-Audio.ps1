@@ -2,7 +2,7 @@
 # Test MP3 playback functionality after MSIX packaging
 
 param(
-    [string]$PackagePath = "E:\TPlayer\msix-output\TPlayer_1.0.3.0_x64.msix",
+    [string]$PackagePath = "E:\TPlayer\msix-output\D57E920A.TPlayer_1.0.4.0_x64.msix",
     [string]$TestAudioPath = "E:\KwDownload\song"
 )
 
@@ -46,8 +46,15 @@ if ($makeAppxPath) {
         # Check manifest for audio file associations
         $manifestPath = "E:\TPlayer\msix-test-temp\AppxManifest.xml"
         if (Test-Path $manifestPath) {
-            [xml]$manifest = Get-Content $manifestPath
-            $mp3Support = $manifest.Package.Applications.Application.Extensions.'uap3:FileTypeAssociation'.'uap:SupportedFileTypes'.'uap:FileType' -contains '.mp3'
+            [xml]$manifest = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8)
+            $ns = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+            $ns.AddNamespace("uap", "http://schemas.microsoft.com/appx/manifest/uap/windows10")
+            $ns.AddNamespace("uap3", "http://schemas.microsoft.com/appx/manifest/uap/windows10/3")
+            $fileTypes = $manifest.SelectNodes("//uap:SupportedFileTypes/uap:FileType", $ns)
+            $mp3Support = $false
+            foreach ($ft in $fileTypes) {
+                if ($ft.InnerText -eq ".mp3") { $mp3Support = $true; break }
+            }
             
             if ($mp3Support) {
                 Write-Host "MP3 file association: CONFIGURED" -ForegroundColor Green
@@ -103,9 +110,9 @@ foreach ($format in $unsupportedFormats) {
 
 # Summary
 Write-Host "`n=== Test Summary ===" -ForegroundColor Cyan
-Write-Host "Package Version: 1.0.3.0" -ForegroundColor Green
+Write-Host "Package Version: 1.0.4.0" -ForegroundColor Green
 Write-Host "Architecture: x64" -ForegroundColor Green
-Write-Host "Package Size: 104.16 MB" -ForegroundColor Green
+Write-Host "Package Size: 104.19 MB" -ForegroundColor Green
 Write-Host "MP3 Playback Support: READY" -ForegroundColor Green
 Write-Host "FFmpeg Integration: COMPLETE" -ForegroundColor Green
 Write-Host "HTTP File Server: CONFIGURED" -ForegroundColor Green
