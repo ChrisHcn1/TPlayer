@@ -46,6 +46,7 @@ dist-ssr
 build/
 out/
 msix-output/
+msi-extract/
 *.pfx
 *.msix
 
