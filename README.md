@@ -101,8 +101,8 @@ npm run build:win
 
 1. 在仓库 Settings → Secrets and variables → Actions 配置
    `TAURI_SIGNING_PRIVATE_KEY`（私钥字符串）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；
-2. 把 `tauri.conf.json` 中 `plugins.updater.endpoints` 的 `<OWNER>/<REPO>`
-   替换为真实仓库地址；
+2. `plugins.updater.endpoints` 已指向
+   `https://github.com/ChrisHcn1/TPlayer/releases/latest/download/latest.json`；
 3. 推送版本标签：`git tag v2.0.1 && git push origin v2.0.1`。
 
 GitHub Actions（`.github/workflows/release.yml`）会自动构建、签名、

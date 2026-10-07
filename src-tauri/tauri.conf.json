@@ -70,7 +70,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RkU0NEFFQjhBQTZENzUKUldSMWJhcTRya1QrOTQxNUZreGkrdVllS2ZIZEpTRVY0cExqZG0yUzI0MnowOXVJei9idGFHRnUK",
       "endpoints": [
-        "https://github.com/<OWNER>/<REPO>/releases/latest/download/latest.json"
+        "https://github.com/ChrisHcn1/TPlayer/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
