@@ -1,0 +1,35 @@
+{
+  "name": "tplayer-next",
+  "private": true,
+  "version": "2.0.0-beta",
+  "description": "TPlayer Next - redesigned desktop music player (Tauri 2 + Vue 3 + TypeScript)",
+  "license": "ISC",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "tauri": "tauri",
+    "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.13.1",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.29",
+    "vue-router": "^4.6.4",
+    "vue-virtual-scroller": "^2.0.0-beta.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
+    "@types/node": "^22.0.0",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0",
+    "vue-tsc": "^2.2.0"
+  }
+}

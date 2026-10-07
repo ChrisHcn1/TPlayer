@@ -1,0 +1,80 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TPlayer Next",
+  "mainBinaryName": "TPlayerNext",
+  "version": "2.0.0-beta",
+  "identifier": "com.tplayer.next",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:3100",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "TPlayer",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 960,
+        "minHeight": 620,
+        "resizable": true,
+        "center": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$AUDIO/**", "$HOME/Music/**", "$APPDATA/cover-cache/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Music",
+    "shortDescription": "TPlayer Next —— 本地优先的桌面音乐播放器",
+    "longDescription": "TPlayer Next 是 TPlayer 的下一代版本：本地优先的桌面音乐播放器，曲库数据与在线能力解耦，在线模块默认关闭且默认不上传本地曲库信息。与旧版 TPlayer 采用不同的应用标识与数据目录，可共存安装。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../bin/ffmpeg.exe": "bin/ffmpeg.exe",
+      "../bin/ffprobe.exe": "bin/ffprobe.exe"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["mp3", "flac", "wav", "aac", "ogg", "oga", "opus", "m4a", "wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts"],
+        "name": "TPlayer Audio",
+        "description": "音频文件",
+        "role": "Viewer"
+      }
+    ],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RkU0NEFFQjhBQTZENzUKUldSMWJhcTRya1QrOTQxNUZreGkrdVllS2ZIZEpTRVY0cExqZG0yUzI0MnowOXVJei9idGFHRnUK",
+      "endpoints": [
+        "https://github.com/<OWNER>/<REPO>/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

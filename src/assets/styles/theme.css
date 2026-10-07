@@ -1,0 +1,296 @@
+/* ==========================================================================
+   theme.css —— TPlayer v2 Design Tokens（全项目唯一定义处）
+   规范来源：docs/DESIGN.md §3；文档与实现冲突时以 DESIGN.md 为准。
+
+   硬约束：
+     1. 颜色 / 字号 / 间距 / 圆角 / 阴影 / 动效 / 尺寸 / 层叠只在本文件定义；
+     2. 组件样式只允许引用语义 token（如 --color-bg-surface），禁止写十六进制色值；
+     3. 主题切换只改 <html data-theme="dark|light">，不改 class、不重挂载组件、不重新取数；
+     4. :root 即暗色主题，保证无 JS 时首帧颜色也正确（配合 index.html 内联脚本，无主题闪烁）。
+   ========================================================================== */
+
+:root {
+  /* ---- 原始调色板（仅供本文件内引用，组件禁止直接使用） ---- */
+  --palette-neutral-950: #0f1115;
+  --palette-neutral-900: #121419;
+  --palette-neutral-850: #16181d;
+  --palette-neutral-800: #1e2128;
+  --palette-neutral-700: #2a2e37;
+  --palette-neutral-600: #3a3f4b;
+  --palette-neutral-400: #6b7280;
+  --palette-neutral-300: #9aa0aa;
+  --palette-neutral-100: #e8eaed;
+  --palette-white: #ffffff;
+
+  /* ---- 色彩：暗色主题（默认） ---- */
+  --color-bg-base: var(--palette-neutral-950);
+  --color-bg-surface: var(--palette-neutral-850);
+  --color-bg-elevated: var(--palette-neutral-800);
+  --color-bg-sidebar: var(--palette-neutral-900);
+  --color-bg-input: rgba(15, 17, 21, 0.55);
+  --color-bg-hover: rgba(255, 255, 255, 0.06);
+  --color-bg-active: rgba(255, 255, 255, 0.1);
+  --color-bg-selected: rgba(122, 149, 255, 0.16);
+  --color-bg-scrim: rgba(0, 0, 0, 0.45);
+  --color-overlay: rgba(15, 17, 21, 0.72);
+  --color-overlay-strong: rgba(15, 17, 21, 0.88);
+
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border: var(--palette-neutral-700);
+  --color-border-strong: var(--palette-neutral-600);
+
+  --color-text-primary: var(--palette-neutral-100);
+  --color-text-secondary: var(--palette-neutral-300);
+  --color-text-tertiary: var(--palette-neutral-400);
+  --color-text-disabled: #4b515c;
+  --color-text-inverse: var(--palette-neutral-950);
+
+  --color-brand: #7a95ff;
+  --color-brand-solid: #4a69e0;
+  --color-brand-hover: #5876e8;
+  --color-brand-active: #3e5acb;
+  --color-brand-subtle: rgba(122, 149, 255, 0.16);
+  --color-on-brand: var(--palette-white);
+
+  --color-success: #3dbe8b;
+  --color-success-bg: rgba(61, 190, 139, 0.14);
+  --color-warning: #e0a93b;
+  --color-warning-bg: rgba(224, 169, 59, 0.14);
+  --color-danger: #f2555a;
+  --color-danger-bg: rgba(242, 85, 90, 0.14);
+  --color-info: #4b9fe1;
+  --color-info-bg: rgba(75, 159, 225, 0.14);
+
+  --color-focus-ring: #7a95ff;
+  --color-scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --color-scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+  --color-cover-placeholder: linear-gradient(135deg, #232830 0%, #191c22 100%);
+  --color-blur-backdrop: rgba(22, 24, 29, 0.72);
+
+  color-scheme: dark;
+
+  /* ---- 字体 ---- */
+  --font-family-base:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC',
+    'Noto Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-family-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --font-size-2xs: 11px;
+  --line-height-2xs: 16px;
+  --font-size-xs: 12px;
+  --line-height-xs: 18px;
+  --font-size-sm: 13px;
+  --line-height-sm: 20px;
+  --font-size-base: 14px;
+  --line-height-base: 22px;
+  --font-size-md: 16px;
+  --line-height-md: 24px;
+  --font-size-lg: 20px;
+  --line-height-lg: 28px;
+  --font-size-xl: 24px;
+  --line-height-xl: 32px;
+  --font-size-2xl: 30px;
+  --line-height-2xl: 38px;
+  --font-letter-spacing-tight: -0.01em;
+
+  /* ---- 间距（4px 基数） ---- */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- 圆角 ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 999px;
+
+  /* ---- 阴影层级（暗色以描边 + 柔和投影共同表达层级） ---- */
+  --shadow-elevation-0: none;
+  --shadow-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-elevation-2: 0 -1px 0 rgba(255, 255, 255, 0.04), 0 2px 8px rgba(0, 0, 0, 0.28);
+  --shadow-elevation-3: 0 8px 24px rgba(0, 0, 0, 0.36);
+  --shadow-elevation-4: 0 16px 48px rgba(0, 0, 0, 0.48);
+  --shadow-focus: 0 0 0 2px var(--color-bg-surface), 0 0 0 4px var(--color-focus-ring);
+
+  /* ---- 动效 ---- */
+  --duration-instant: 80ms;
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 240ms;
+  --duration-slower: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --transition-colors: color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+  --transition-transform: transform var(--duration-base) var(--ease-emphasized);
+  --transition-opacity: opacity var(--duration-fast) var(--ease-standard);
+
+  /* ---- 尺寸（区域级） ---- */
+  --size-titlebar-h: 36px;
+  --size-sidebar-w: 240px;
+  --size-sidebar-w-min: 200px;
+  --size-sidebar-w-max: 280px;
+  --size-sidebar-collapsed: 64px;
+  --size-panel-w: 320px;
+  --size-panel-w-min: 280px;
+  --size-panel-w-max: 420px;
+  --size-playerbar-h: 72px;
+  --size-row-h: 48px;
+  --size-header-h: 32px;
+  --size-toolbar-h: 48px;
+  --size-selectionbar-h: 56px;
+  --size-card-min: 168px;
+  --size-cover-sm: 40px;
+  --size-cover-md: 48px;
+  --size-cover-lg: 200px;
+  --size-icon-sm: 16px;
+  --size-icon-md: 20px;
+  --size-icon-lg: 24px;
+  --size-control-h: 32px;
+  --size-control-h-lg: 40px;
+  --size-scrollbar: 10px;
+
+  /* ---- 层叠 ---- */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-panel: 20;
+  --z-playerbar: 30;
+  --z-titlebar: 40;
+  --z-dropdown: 100;
+  --z-tooltip: 110;
+  --z-modal-backdrop: 200;
+  --z-modal: 210;
+  --z-toast: 300;
+}
+
+/* ==========================================================================
+   亮色主题：仅重映射语义 token，不新增组件级规则
+   ========================================================================== */
+[data-theme='light'] {
+  --color-bg-base: #f0f1f4;
+  --color-bg-surface: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-bg-sidebar: #eaecf0;
+  --color-bg-input: #ffffff;
+  --color-bg-hover: rgba(15, 17, 21, 0.05);
+  --color-bg-active: rgba(15, 17, 21, 0.09);
+  --color-bg-selected: rgba(47, 111, 235, 0.1);
+  --color-bg-scrim: rgba(15, 17, 21, 0.28);
+  --color-overlay: rgba(15, 17, 21, 0.36);
+  --color-overlay-strong: rgba(15, 17, 21, 0.56);
+
+  --color-border-subtle: rgba(15, 17, 21, 0.06);
+  --color-border: #d8dbe0;
+  --color-border-strong: #bfc4cc;
+
+  --color-text-primary: #1b1f26;
+  --color-text-secondary: #5b6270;
+  --color-text-tertiary: #868d99;
+  --color-text-disabled: #a8aeb8;
+  --color-text-inverse: #ffffff;
+
+  --color-brand: #1f5bd8;
+  --color-brand-solid: #2f6feb;
+  --color-brand-hover: #2560d8;
+  --color-brand-active: #1b4fbf;
+  --color-brand-subtle: rgba(47, 111, 235, 0.1);
+  --color-on-brand: #ffffff;
+
+  --color-success: #12734e;
+  --color-success-bg: rgba(31, 157, 107, 0.12);
+  --color-warning: #8a5a00;
+  --color-warning-bg: rgba(183, 122, 15, 0.12);
+  --color-danger: #c22b33;
+  --color-danger-bg: rgba(217, 54, 62, 0.1);
+  --color-info: #14639e;
+  --color-info-bg: rgba(31, 123, 196, 0.1);
+
+  --color-focus-ring: #1f5bd8;
+  --color-scrollbar-thumb: rgba(15, 17, 21, 0.18);
+  --color-scrollbar-thumb-hover: rgba(15, 17, 21, 0.32);
+  --color-cover-placeholder: linear-gradient(135deg, #e6e8ec 0%, #d9dce2 100%);
+  --color-blur-backdrop: rgba(255, 255, 255, 0.72);
+
+  --shadow-elevation-1: 0 1px 2px rgba(15, 17, 21, 0.06);
+  --shadow-elevation-2: 0 -1px 0 rgba(15, 17, 21, 0.06), 0 2px 8px rgba(15, 17, 21, 0.08);
+  --shadow-elevation-3: 0 8px 24px rgba(15, 17, 21, 0.12);
+  --shadow-elevation-4: 0 16px 48px rgba(15, 17, 21, 0.18);
+
+  color-scheme: light;
+}
+
+/* ---- 密度档（由 <html data-density> 覆写，组件不得自行判断密度） ---- */
+[data-density='compact'] {
+  --size-row-h: 40px;
+  --size-toolbar-h: 44px;
+  --size-cover-md: 40px;
+}
+[data-density='regular'] {
+  --size-row-h: 48px;
+  --size-toolbar-h: 48px;
+  --size-cover-md: 48px;
+}
+[data-density='comfortable'] {
+  --size-row-h: 56px;
+  --size-toolbar-h: 52px;
+  --size-cover-md: 56px;
+}
+
+/* ---- 布局断点覆写（由根容器 resize 观察写入 data-layout，见 DESIGN.md §2.8） ---- */
+[data-layout='compact'],
+[data-layout='narrow'] {
+  --size-sidebar-w: var(--size-sidebar-collapsed);
+  --size-playerbar-h: 88px;
+  --size-card-min: 148px;
+}
+[data-layout='wide'] {
+  --size-sidebar-w: 264px;
+  --size-card-min: 176px;
+}
+
+/* ---- 减弱动效 ---- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-instant: 1ms;
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
+    --duration-slower: 1ms;
+    --transition-transform: none;
+    --transition-opacity: none;
+  }
+}
+
+/* ==========================================================================
+   过渡期兼容别名
+   M0 骨架的早期组件使用了旧变量名（--color-bg / --color-text / --layout-*）。
+   为不破坏已生成组件，这里提供只读别名；M1 完成组件改造后统一移除，
+   新代码一律使用上方语义 token，禁止再引用本段变量。
+   ========================================================================== */
+:root {
+  --color-bg: var(--color-bg-surface);
+  --color-text: var(--color-text-primary);
+  --color-text-muted: var(--color-text-tertiary);
+  --color-primary: var(--color-brand);
+  --color-primary-hover: var(--color-brand-hover);
+  --layout-sidebar-width: var(--size-sidebar-w);
+  --layout-playerbar-height: var(--size-playerbar-h);
+  --transition-fast: var(--duration-fast) var(--ease-standard);
+}

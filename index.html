@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>TPlayer</title>
+    <script>
+      /*
+       * 首屏主题预加载（M0 修正版）
+       *
+       * 修复旧版 index.html 的三处问题：
+       *  1. 死代码：旧版在 <head> 中判断 document.body 是否存在，解析期必然为 null，
+       *     整个 DOMContentLoaded 分支从未生效；
+       *  2. 逻辑重复：旧版同时设置 documentElement 的 data-theme、class="light"
+       *     和 body 内联样式三套机制，互相覆盖且难以维护；
+       *  3. 默认值不一致：旧版 CSS 写死深色、脚本默认浅色，首屏颜色取决于哪段先执行。
+       *
+       * 现约定：
+       *  - 主题唯一载体是 <html data-theme="dark|light">，样式全部走 CSS 变量；
+       *  - 唯一数据源是 localStorage 的主题键 'tplayer-next.theme'，其唯一持有者为
+       *    src/composables/useTheme.ts（settings store 已移除 theme 字段，杜绝双写双源）；
+       *  - 默认主题固定为 dark，与 <html> 上的静态属性及 theme.css 兜底值一致；
+       *  - 此脚本不访问 document.body（此时尚未解析），只做一次最小同步。
+       */
+      (function () {
+        try {
+          var THEME_KEY = 'tplayer-next.theme'
+          var theme = localStorage.getItem(THEME_KEY)
+          if (theme !== 'light' && theme !== 'dark') {
+            theme = 'dark'
+          }
+          document.documentElement.setAttribute('data-theme', theme)
+        } catch (e) {
+          /* localStorage 不可用（隐私模式/受限 WebView）时，保留静态默认值 dark */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="tplayer-logo-title">
+  <title id="tplayer-logo-title">TPlayer</title>
+  <desc>圆角方形徽章内三根声波柱，象征本地音乐与高保真音频播放。</desc>
+  <!-- 底板：品牌实心色（color-brand-solid），圆角为边长 25% -->
+  <rect x="0" y="0" width="128" height="128" rx="32" fill="#2F6FEB"/>
+  <!-- 声波柱：中柱高 64、两侧高 40，宽 20、间距 8、胶囊端（color-on-brand） -->
+  <g fill="#FFFFFF">
+    <rect x="26" y="44" width="20" height="40" rx="10"/>
+    <rect x="54" y="32" width="20" height="64" rx="10"/>
+    <rect x="82" y="44" width="20" height="40" rx="10"/>
+  </g>
+</svg>

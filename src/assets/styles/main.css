@@ -1,0 +1,233 @@
+/**
+ * main.css —— 全局基础样式（TPlayer v2）
+ *
+ * 职责边界（只有三件事，禁止扩张）：
+ *   1. reset：清除浏览器默认样式差异；
+ *   2. 底座：html / body / #app 的尺寸、字体、颜色、滚动行为；
+ *   3. 全局通用规则：滚动条、焦点可见性、选区、无障碍辅助类。
+ * 组件级样式一律写在各自 <style scoped> 中，且只允许引用 theme.css 的语义 token。
+ *
+ * 相对旧版的修正：
+ *   - 旧版全窗口可整体滚动，导致侧栏/播放条随页面位移；现改为只有内容区内滚；
+ *   - 旧版滚动条宽度 8px 硬编码、颜色取 --color-border（与非交互边框混用）；现取 --size-scrollbar
+ *     与 --color-scrollbar-thumb 专用 token；
+ *   - 旧版无 :focus-visible 规则，键盘用户丢失焦点位置；现补齐统一焦点环。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* 桌面应用：整窗永不滚动，只有内容区内部滚动（DESIGN §2.1 硬性规则 1） */
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-base);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-base);
+  /* 桌面应用语义：默认不可选中文本与拖拽，交互元素内部自行开启 */
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100%;
+  isolation: isolate;
+}
+
+/* ---- 文字与媒体元素 ---- */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+dl,
+dd {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: var(--color-brand);
+  text-decoration: none;
+  transition: var(--transition-colors);
+}
+
+a:hover {
+  color: var(--color-brand-hover);
+}
+
+/* ---- 表单元素：统一继承字体与颜色，不保留浏览器原生外观差异 ---- */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  margin: 0;
+}
+
+button {
+  cursor: pointer;
+  user-select: none;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-disabled);
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+/* 输入框占位符统一为三级文字色，避免各浏览器默认值不一致 */
+::placeholder {
+  color: var(--color-text-tertiary);
+  opacity: 1;
+}
+
+/* ---- 焦点可见性（键盘可达性红线，DESIGN §6.2）----
+   :focus-visible 保证鼠标点击不出现焦点环、键盘 Tab 必现焦点环。 */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* ---- 文本选区 ---- */
+::selection {
+  background-color: var(--color-brand-subtle);
+  color: var(--color-text-primary);
+}
+
+/* ---- 滚动条（宽度取尺寸 token，颜色取专用 token，不与非交互边框混用） ---- */
+::-webkit-scrollbar {
+  width: var(--size-scrollbar);
+  height: var(--size-scrollbar);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-scrollbar-thumb);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ==========================================================================
+   通用工具类
+   仅限跨视图复用、无视觉主张的原子能力；带外观的样式一律回组件内实现。
+   ========================================================================== */
+
+/** 屏幕阅读器可见、视觉不可见（供 §6.4 的 SR 标签使用） */
+.u-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/** 单行省略 */
+.u-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/** 等宽数字：时间码、时长、百分比等数值位不得因字宽变化而抖动（对齐旧版 B-14） */
+.u-tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+/** 可滚动容器：统一使用细滚动条与惯性滚动 */
+.u-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/** 拖拽区域（Tauri 无边框窗口标题栏使用） */
+.u-drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.u-no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* ---- 动效降级：减弱动效时禁用平滑滚动，避免长列表滚动延迟感 ---- */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

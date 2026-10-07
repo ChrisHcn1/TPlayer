@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="tplayer-icon-title">
+  <title id="tplayer-icon-title">TPlayer</title>
+  <desc>应用图标源图：圆角方形徽章内三根声波柱，与 logo.svg 同构等比放大。</desc>
+  <!-- 底板：品牌实心色（color-brand-solid），圆角为边长 25% -->
+  <rect x="0" y="0" width="1024" height="1024" rx="256" fill="#2F6FEB"/>
+  <!-- 声波柱：中柱高 512、两侧高 320，宽 160、间距 64、胶囊端（color-on-brand） -->
+  <g fill="#FFFFFF">
+    <rect x="208" y="352" width="160" height="320" rx="80"/>
+    <rect x="432" y="256" width="160" height="512" rx="80"/>
+    <rect x="656" y="352" width="160" height="320" rx="80"/>
+  </g>
+</svg>

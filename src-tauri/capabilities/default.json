@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "M0 最小权限集：窗口/事件基础能力 + 音乐库目录范围内的只读文件访问。禁止 **/* 全盘授权（旧版问题，见 ARCHITECTURE.md §9）。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open",
+    "updater:default",
+    "process:default",
+    "fs:allow-exists",
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [{ "path": "$AUDIO/**" }, { "path": "$HOME/Music/**" }]
+    },
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "$AUDIO/**" }, { "path": "$HOME/Music/**" }]
+    }
+  ]
+}

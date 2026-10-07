@@ -1,0 +1,35 @@
+# 依赖 / 构建产物
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen
+
+# 升级签名密钥（私钥绝不能入库；公钥已写入 tauri.conf.json）
+src-tauri/.tauri-signing/
+# 自动升级安装包与签名产物
+*.nsis.zip
+*.nsis.zip.sig
+*-setup.exe.sig
+latest.json
+
+# 运行时资源（按需注入，不入库）
+src-tauri/resources/ffmpeg/*
+!src-tauri/resources/ffmpeg/.gitkeep
+
+# 日志
+logs
+*.log
+
+# 本地临时/实测脚本
+temp/
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo

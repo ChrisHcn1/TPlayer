@@ -1,0 +1,63 @@
+name: Release
+
+# 推送 v 开头的 tag 触发发布（如 v2.0.1）；也支持 Actions 页面手动触发
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # tauri-action 会执行 tauri build，并自动：
+      #   - 用 TAURI_SIGNING_PRIVATE_KEY 对安装包签名（生成 .nsis.zip.sig）
+      #   - 生成 latest.json（应用内自动升级的清单）
+      #   - 把 *.exe / *.nsis.zip / *.sig / latest.json 上传到 GitHub Release
+      #
+      # 需要在仓库 Settings → Secrets and variables → Actions 配置：
+      #   TAURI_SIGNING_PRIVATE_KEY          私钥字符串（minisign .key 文件内容）
+      #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（无密码可留空 secret）
+      #
+      # 客户端检查地址 tauri.conf.json → plugins.updater.endpoints，
+      # 形如 https://github.com/<OWNER>/<REPO>/releases/latest/download/latest.json
+      - name: Build and publish Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'TPlayer Next ${{ github.ref_name }}'
+          releaseBody: |
+            ## TPlayer Next ${{ github.ref_name }}
+
+            ### 安装
+            - 下载 `TPlayer.Next_*_x64-setup.exe` 双击安装（自动升级用户无需手动操作）。
+          releaseDraft: true
+          prerelease: false

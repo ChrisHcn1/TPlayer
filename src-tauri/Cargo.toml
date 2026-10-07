@@ -1,0 +1,65 @@
+# TPlayer Next —— 后端 crate（M0 骨架）
+#
+# 命名约定（与 README.md「命名与共存方案」表格一致，不得随意改动）：
+#   - 包名/可执行文件名：tplayer-next（crate 名用连字符；最终安装包名由 tauri.conf.json 决定）
+#   - 产品名 productName：TPlayer Next
+#   - 应用标识 identifier：com.tplayer.next
+# 版本号需与 package.json / tauri.conf.json 在发布前保持一致（M1 验收项，见 ROADMAP.md）。
+
+[package]
+name = "tplayer-next"
+version = "2.0.0"
+description = "TPlayer Next —— 本地优先的桌面音乐播放器（Tauri 2 后端）"
+authors = ["TPlayer Next Contributors"]
+edition = "2021"
+rust-version = "1.77"
+license = "ISC"
+
+[lib]
+# Tauri 2 约定：业务逻辑放在 lib 中，main.rs 仅作入口。
+# 拆 lib 的好处：后续可接入集成测试与移动端目标，无需改动逻辑分层。
+name = "tplayer_next_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# protocol-asset：封面/歌词封面通过 asset:// 协议展示时必需；
+# 其访问范围由 tauri.conf.json 的 app.security.assetProtocol.scope 限定（禁止 **/*）。
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+# 应用内自动升级（GitHub Releases 通道，minisign 签名校验）
+tauri-plugin-updater = "2"
+# 升级完成后重启应用
+tauri-plugin-process = "2"
+# 曲库持久化：bundled 编译自带 SQLite amalgamation，无需目标机安装系统库
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# 播放引擎：rodio 内置 symphonia 解码，支持 mp3/flac/wav/ogg/aac 等
+rodio = "0.19"
+# 元数据读取：标题/艺术家/专辑/时长/封面等标签
+lofty = "0.22"
+# 稳定曲目 ID 生成（基于文件路径哈希）
+sha2 = "0.10"
+# 异步运行时（Tauri 已带 tokio，但显式声明便于 spawn 扫描任务）
+tokio = { version = "1", features = ["sync", "rt"] }
+# 时间戳
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 随机播放模式
+rand = "0.8"
+# LRC 时间标签解析
+regex = "1"
+# 在线歌词抓取（默认关闭，受设置开关控制）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[profile.release]
+# 旧版安装包体积偏大（FFmpeg 约 240MB 全量随包分发），发布构建开启体积优化。
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
