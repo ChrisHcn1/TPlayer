@@ -79,6 +79,9 @@
     "selectAlbum": "Please select an album",
     "selectCueAlbum": "Please select a CUE album",
     "createPlaylist": "Create playlist",
+    "myPlaylists": "My Playlists",
+    "noPlaylists": "No playlists yet, create one below",
+    "emptyPlaylistHint": "This playlist is empty. Right-click a song to add it.",
     "searchPlaceholder": "Search for songs, artists or albums...",
     "titleHeader": "Title",
     "artistHeader": "Artist",
@@ -119,7 +122,8 @@
     "addToFavorites": "Add to Favorites",
     "removeFromFavorites": "Remove from Favorites",
     "editTags": "Edit Song Tags",
-    "delete": "Delete"
+    "delete": "Delete",
+    "newPlaylist": "New playlist"
   },
   "modal": {
     "editTagsTitle": "Edit Song Tags",

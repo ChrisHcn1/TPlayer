@@ -35,12 +35,13 @@ export const fetchLyricById = (id: number) => {
 };
 
 // 本地歌曲文件匹配
+// 说明：album/duration/md5 预留给真正的文件指纹匹配，当前搜索匹配未使用
 export const matchSong = (
   title: string,
   artist: string,
-  album: string,
-  duration: number,
-  md5: string
+  _album: string,
+  _duration: number,
+  _md5: string
 ) => {
   // 使用搜索API作为替代，因为文件匹配API可能需要特殊权限
   return apiClient({

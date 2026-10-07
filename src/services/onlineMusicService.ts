@@ -1,6 +1,6 @@
 import { cacheService } from './cacheService'
 import { findBestMatch } from '../utils/stringSimilarity'
-import { parseLrc, parseSmartLrc, parseQrcLyric, parseTTML, type LyricLine } from './lyricParser'
+import { parseSmartLrc, parseQrcLyric, type LyricLine } from './lyricParser'
 
 export interface OnlineSong {
   id: string
@@ -23,7 +23,6 @@ export interface LyricResult {
 class OnlineMusicService {
   private readonly QQ_MUSIC_API = 'https://api.lxmusic.top/qq'
   private readonly NETEASE_API = 'https://music.163.com/api'
-  private readonly AMLL_API = 'https://amll.nyakku.moe/ttml'
 
   /**
    * 搜索歌曲

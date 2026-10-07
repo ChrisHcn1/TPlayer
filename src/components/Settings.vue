@@ -440,8 +440,25 @@ const handleBackgroundUpdateChange = (event: Event) => {
 }
 
 const checkUpdate = async () => {
+  if (isCheckingUpdate.value) return
   isCheckingUpdate.value = true
-  emit('checkUpdate')
+  try {
+    if (props.isBrowser) {
+      alert('浏览器环境不支持更新检查，请使用桌面版')
+      return
+    }
+    const result = await invoke<{ has_update: boolean; update_info: any; current_version: string }>('check_update_manual')
+    if (result.has_update && result.update_info) {
+      emit('checkUpdate', result.update_info, result.current_version)
+    } else {
+      alert(t('settings.noUpdate', '当前已是最新版本'))
+    }
+  } catch (error) {
+    console.error('检查更新失败:', error)
+    alert(t('settings.checkUpdateFailed', '检查更新失败，请稍后重试'))
+  } finally {
+    isCheckingUpdate.value = false
+  }
 }
 
 // 保存设置

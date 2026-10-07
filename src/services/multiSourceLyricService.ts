@@ -1,6 +1,8 @@
-import { onlineMusicService, MusicSearchResult } from './onlineMusicService'
-import { chartLyricsService, ChartLyricsSearchResult } from './chartLyricsService'
+import { onlineMusicService } from './onlineMusicService'
+import { chartLyricsService } from './chartLyricsService'
 import { localStorageService } from '../stores/local'
+import { findBestMatch } from '../utils/stringSimilarity'
+import type { LyricLine } from './lyricParser'
 
 export enum LyricSourcePriority {
   EMBEDDED = 1,
@@ -31,8 +33,31 @@ export interface LyricScore {
     timestampAccuracy: number
   }
   lyricText?: string
-  lyricLines?: any[]
-  yrcData?: any[]
+  lyricLines?: LyricLine[]
+  yrcData?: LyricLine[]
+}
+
+// 多源歌词在 localStorage 中的缓存结构
+interface CachedSourceEntry {
+  lrcData?: LyricLine[]
+  yrcData?: LyricLine[]
+  fetchedAt?: number
+  score?: LyricScore
+}
+
+interface MultiSourceCache {
+  songId: string
+  sources: Record<string, CachedSourceEntry>
+  bestSource: string | null
+  updatedAt: number
+}
+
+// 将结构化歌词行重新拼成纯文本，用于完整度评分
+function lyricLinesToText(lines: LyricLine[]): string {
+  return lines
+    .map(line => line.words.map(word => word.word).join(''))
+    .filter(text => text.trim().length > 0)
+    .join('\n')
 }
 
 const SCORE_WEIGHTS = {
@@ -46,8 +71,8 @@ const SCORE_WEIGHTS = {
 export function calculateLyricScore(
   source: LyricSourceType,
   lyricText?: string,
-  lyricLines?: any[],
-  yrcData?: any[]
+  lyricLines?: LyricLine[],
+  yrcData?: LyricLine[]
 ): LyricScore {
   let completeness = 0
   let hasTranslation = false
@@ -57,15 +82,20 @@ export function calculateLyricScore(
 
   if (lyricText && lyricText.trim().length > 50) {
     completeness = Math.min(100, lyricText.trim().length / 5)
+  } else if (lyricLines && lyricLines.length > 0) {
+    // 没有纯文本时，用结构化歌词行的文本长度估算完整度
+    completeness = Math.min(100, lyricLinesToText(lyricLines).trim().length / 5)
   }
 
   if (lyricLines && lyricLines.length > 0) {
-    hasTranslation = lyricLines.some(line => line.translation?.trim())
-    hasRomanization = lyricLines.some(line => line.romanization?.trim())
-    
-    const linesWithTime = lyricLines.filter(line => line.time !== null && line.time !== undefined)
-    timestampAccuracy = linesWithTime.length > 0 
-      ? (linesWithTime.length / lyricLines.length) * 100 
+    hasTranslation = lyricLines.some(line => line.translatedLyric?.trim())
+    hasRomanization = lyricLines.some(line => line.romanLyric?.trim())
+
+    const linesWithTime = lyricLines.filter(
+      line => Number.isFinite(line.startTime) && line.startTime > 0
+    )
+    timestampAccuracy = linesWithTime.length > 0
+      ? (linesWithTime.length / lyricLines.length) * 100
       : 0
   }
 
@@ -116,7 +146,7 @@ export class MultiSourceLyricService {
   async getLyric(
     song: SongInfo,
     mode: 'auto' | 'manual' = 'auto',
-    skipLocalLRC: boolean = false
+    _skipLocalLRC: boolean = false
   ): Promise<MultiSourceLyricResult> {
     const allSources = new Map<LyricSourceType, LyricScore>()
     const songId = song.id || `${song.artist}-${song.title}`.toLowerCase()
@@ -128,10 +158,10 @@ export class MultiSourceLyricService {
         if (multiCache) {
           for (const [sourceName, sourceData] of Object.entries(multiCache.sources)) {
             const sourceType = this.sourceNameToType(sourceName)
-            if (sourceType) {
+            if (sourceType && sourceData.lrcData && sourceData.lrcData.length > 0) {
               const score = calculateLyricScore(
                 sourceType,
-                sourceData.lrcData ? JSON.stringify(sourceData.lrcData) : undefined,
+                lyricLinesToText(sourceData.lrcData),
                 sourceData.lrcData,
                 sourceData.yrcData
               )
@@ -166,20 +196,21 @@ export class MultiSourceLyricService {
         this.queryChartLyrics(song)
       ])
 
-      if (neteaseResult.status === 'fulfilled') {
+      // 只有真正拿到歌词行的源才计入候选，0 分空结果不得参与“选优”
+      if (neteaseResult.status === 'fulfilled' && neteaseResult.value) {
         allSources.set(LyricSourceType.NETEASE, neteaseResult.value)
       }
-      if (qqResult.status === 'fulfilled') {
+      if (qqResult.status === 'fulfilled' && qqResult.value) {
         allSources.set(LyricSourceType.QQ_MUSIC, qqResult.value)
       }
-      if (chartLyricsResult.status === 'fulfilled') {
+      if (chartLyricsResult.status === 'fulfilled' && chartLyricsResult.value) {
         allSources.set(LyricSourceType.CHARTLYRICS, chartLyricsResult.value)
       }
 
       if (allSources.size > 0) {
-        const sourcesToCache: Record<string, any> = {}
+        const sourcesToCache: Record<string, CachedSourceEntry> = {}
         allSources.forEach((score, sourceType) => {
-          if (score.lyricLines) {
+          if (score.lyricLines && score.lyricLines.length > 0) {
             sourcesToCache[this.sourceTypeToName(sourceType)] = {
               lrcData: score.lyricLines,
               yrcData: score.yrcData,
@@ -228,62 +259,63 @@ export class MultiSourceLyricService {
     }
   }
 
-  private async queryNetease(song: SongInfo): Promise<LyricScore> {
-    const result = await onlineMusicService.searchSong(
-      song.title,
-      song.artist,
-      'netease'
-    )
+  // 在合并搜索结果中筛选指定来源，并用标题/艺术家相似度挑出最匹配的歌曲
+  private async findBestSong(
+    song: SongInfo,
+    source: 'qq' | 'netease'
+  ) {
+    const keyword = `${song.title} ${song.artist}`.trim()
+    const candidates = (await onlineMusicService.searchSong(keyword))
+      .filter(item => item.source === source)
+    return findBestMatch({ title: song.title, artist: song.artist }, candidates)
+  }
 
-    if (!result.success) {
-      return calculateLyricScore(LyricSourceType.NETEASE)
+  private async queryNetease(song: SongInfo): Promise<LyricScore | null> {
+    const matched = await this.findBestSong(song, 'netease')
+    if (!matched) {
+      return null
     }
 
-    const lyricResult = await onlineMusicService.getLyric(
-      result.songs[0].id,
-      'netease'
-    )
+    const lyricResult = await onlineMusicService.getLyric(matched.id, 'netease')
+    if (lyricResult.lrcData.length === 0 && lyricResult.yrcData.length === 0) {
+      return null
+    }
 
     return calculateLyricScore(
       LyricSourceType.NETEASE,
-      lyricResult.lrc?.lyric,
-      lyricResult.parsedLrc,
-      lyricResult.yrc
+      undefined,
+      lyricResult.lrcData,
+      lyricResult.yrcData
     )
   }
 
-  private async queryQQMusic(song: SongInfo): Promise<LyricScore> {
-    const result = await onlineMusicService.searchSong(
-      song.title,
-      song.artist,
-      'qq'
-    )
-
-    if (!result.success) {
-      return calculateLyricScore(LyricSourceType.QQ_MUSIC)
+  private async queryQQMusic(song: SongInfo): Promise<LyricScore | null> {
+    const matched = await this.findBestSong(song, 'qq')
+    if (!matched) {
+      return null
     }
 
-    const lyricResult = await onlineMusicService.getLyric(
-      result.songs[0].id,
-      'qq'
-    )
+    const lyricResult = await onlineMusicService.getLyric(matched.id, 'qq')
+    if (lyricResult.lrcData.length === 0 && lyricResult.yrcData.length === 0) {
+      return null
+    }
 
     return calculateLyricScore(
       LyricSourceType.QQ_MUSIC,
-      lyricResult.lrc?.lyric,
-      lyricResult.parsedLrc,
-      lyricResult.yrc
+      undefined,
+      lyricResult.lrcData,
+      lyricResult.yrcData
     )
   }
 
-  private async queryChartLyrics(song: SongInfo): Promise<LyricScore> {
+  private async queryChartLyrics(song: SongInfo): Promise<LyricScore | null> {
     const result = await chartLyricsService.searchLyric(
       song.artist,
       song.title
     )
 
-    if (!result.success || !result.lyricLines) {
-      return calculateLyricScore(LyricSourceType.CHARTLYRICS)
+    if (!result.success || !result.lyricLines || result.lyricLines.length === 0) {
+      return null
     }
 
     return calculateLyricScore(
@@ -326,20 +358,20 @@ export class MultiSourceLyricService {
     return mapping[type]
   }
 
-  private getMultiSourceCache(songId: string): any {
+  private getMultiSourceCache(songId: string): MultiSourceCache | null {
     try {
       const cacheKey = `multi_lyric_${songId}`
       const data = localStorage.getItem(cacheKey)
-      return data ? JSON.parse(data) : null
+      return data ? (JSON.parse(data) as MultiSourceCache) : null
     } catch (e) {
       return null
     }
   }
 
-  private saveMultiSourceCache(songId: string, sources: Record<string, any>): void {
+  private saveMultiSourceCache(songId: string, sources: Record<string, CachedSourceEntry>): void {
     try {
       const cacheKey = `multi_lyric_${songId}`
-      const cache = {
+      const cache: MultiSourceCache = {
         songId,
         sources,
         bestSource: null,

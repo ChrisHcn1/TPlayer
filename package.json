@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
     "tauri": "tauri"
   },
   "keywords": [],
@@ -15,7 +16,9 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1",
     "@types/lodash-es": "^4.17.12",
-    "json-autotranslate": "^1.16.2"
+    "json-autotranslate": "^1.16.2",
+    "vitest": "^4.1.11",
+    "vue-tsc": "^2.2.12"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

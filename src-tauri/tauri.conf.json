@@ -30,7 +30,7 @@
         "enable": true,
         "scope": ["**/*"]
       },
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self'; media-src 'self' asset: http://asset.localhost http://127.0.0.1 http://127.0.0.1:8000 http://localhost http://localhost:8000; connect-src 'self' http://ipc.localhost http://asset.localhost http://127.0.0.1 http://127.0.0.1:8000 http://localhost http://localhost:8000 https://*.music-api.vercel.app https://*.netease.com https://*.qq.com https://api.github.com https://github.com https://objects.githubusercontent.com;",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self'; media-src 'self' asset: http://asset.localhost; connect-src 'self' http://ipc.localhost http://asset.localhost https://*.music-api.vercel.app https://*.netease.com https://*.qq.com https://api.github.com https://github.com https://objects.githubusercontent.com;",
       "capabilities": [
         {
           "identifier": "default",

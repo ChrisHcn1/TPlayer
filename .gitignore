@@ -154,6 +154,9 @@ $null
 test/
 tests/
 __tests__/
+# 但保留前端源码目录内的单元测试
+!src/**/__tests__/
+!src/**/__tests__/**
 
 # Workbuddy memory and logs
 .workbuddy/

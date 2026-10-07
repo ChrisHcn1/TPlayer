@@ -192,7 +192,7 @@ pub async fn download_update(
                 .map_err(|e| format!("打开已存在文件失败: {}", e))?;
             let _ = response
                 .headers_mut()
-                .insert("Range", format!("bytes={}-", existing_size).parse().unwrap());
+                .insert("Range", format!("bytes={}-", existing_size).parse().map_err(|e| format!("构造 Range 头失败: {}", e))?);
             (f, existing_size)
         } else {
             fs::remove_file(&file_path).ok();
@@ -293,7 +293,7 @@ pub fn compare_versions(v1: &str, v2: &str) -> i32 {
 }
 
 pub fn should_check_for_updates() -> bool {
-    let last_check = *LAST_CHECK_TIME.lock().unwrap();
+    let last_check = *LAST_CHECK_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let now = SystemTime::now();
 
     match now.duration_since(last_check) {
@@ -303,7 +303,7 @@ pub fn should_check_for_updates() -> bool {
 }
 
 pub fn update_last_check_time() {
-    *LAST_CHECK_TIME.lock().unwrap() = SystemTime::now();
+    *LAST_CHECK_TIME.lock().unwrap_or_else(|e| e.into_inner()) = SystemTime::now();
 }
 
 #[tauri::command]

@@ -65,8 +65,23 @@
             </li>
           </ul>
         </nav>
+        <div class="sidebar-playlists" v-if="playlists.length > 0">
+          <div class="sidebar-section-title">{{ t('playlist.myPlaylists') }}</div>
+          <ul>
+            <li
+              v-for="pl in playlists"
+              :key="pl.id"
+              class="nav-item"
+              :class="{ active: currentFilter === 'playlist' && selectedPlaylistId === pl.id }"
+              @click="openPlaylist(pl.id)"
+            >
+              <span class="nav-icon">📂</span>
+              <span class="nav-text">{{ pl.name }}</span>
+            </li>
+          </ul>
+        </div>
         <div class="sidebar-footer">
-          <button class="btn primary" @click="createPlaylist" :title="t('playlist.createPlaylist')">
+          <button class="btn primary" @click="handleCreatePlaylist" :title="t('playlist.createPlaylist')">
             + {{ t('playlist.createPlaylist') }}
           </button>
         </div>
@@ -124,7 +139,7 @@
             </span>
           </div>
           <div class="selection-toolbar-right">
-            <button class="selection-action-btn" @click="addSelectedToPlaylist" :title="t('selection.addToPlaylist')">
+            <button class="selection-action-btn" @click="addSelectedToPlaylist($event)" :title="t('selection.addToPlaylist')">
               <span class="btn-icon">+</span>
               <span class="btn-text">{{ t('selection.addToPlaylist') }}</span>
             </button>
@@ -331,6 +346,9 @@
             
             <!-- 普通滚动列表 -->
             <div class="song-list">
+              <div v-if="currentFilter === 'playlist' && filteredSongs.length === 0" class="playlist-empty-hint">
+                🎶 {{ t('playlist.emptyPlaylistHint') }}
+              </div>
               <div
                 v-for="(item, index) in filteredSongs"
                 :key="item.id"
@@ -587,12 +605,26 @@
     <div v-if="showSongMenu" class="song-menu" :style="menuPosition">
       <ul>
         <li @click="playSong(selectedSong!)">{{ t('menu.play') }}</li>
-        <li @click="addSongToPlaylist(selectedSong!)">{{ t('menu.addToPlaylist') }}</li>
+        <li @click="openAddToPlaylistMenu(selectedSong!, $event)">{{ t('menu.addToPlaylist') }}</li>
         <li @click="toggleFavorite(selectedSong!)">
           {{ selectedSong?.isFavorite ? t('menu.removeFromFavorites') : t('menu.addToFavorites') }}
         </li>
         <li @click="editSongTags(selectedSong!)">{{ t('menu.editTags') }}</li>
         <li @click="deleteSong(selectedSong!)" class="danger">{{ t('menu.delete') }}</li>
+      </ul>
+    </div>
+
+    <!-- 加入歌单弹层：点选已有歌单或新建 -->
+    <div v-if="showAddToPlaylistMenu" class="song-menu add-to-playlist-menu" :style="addMenuPosition">
+      <ul>
+        <li v-if="playlists.length === 0" class="menu-hint">{{ t('playlist.noPlaylists') }}</li>
+        <li v-for="pl in playlists" :key="pl.id" @click="addToPlaylist(pl.id)">
+          <span class="menu-item-icon">📂</span>{{ pl.name }}
+        </li>
+        <li class="menu-separator"></li>
+        <li class="menu-new-item" @click="createPlaylistAndAdd">
+          <span class="menu-item-icon">＋</span>{{ t('menu.newPlaylist') }}
+        </li>
       </ul>
     </div>
     
@@ -794,6 +826,7 @@
             v-model:forceTranscode="forceTranscode"
             :isBrowser="isBrowser"
             @browseMusicDirectory="browseMusicDirectory"
+            @checkUpdate="handleCheckUpdate"
             @save="showSettingsModal = false"
             @cancel="showSettingsModal = false"
           />
@@ -873,6 +906,15 @@
       :visible="showAudioConverter"
       @close="showAudioConverter = false"
     />
+
+    <!-- 更新模态框 -->
+    <UpdateModal
+      :visible="showUpdateModal"
+      :updateInfo="updateInfo"
+      :currentVersion="currentVersion"
+      @close="closeUpdateModal"
+      @update="closeUpdateModal"
+    />
   </div>
 </template>
 
@@ -882,14 +924,20 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { localStorageService, type Playlist } from './stores/local'
-import { musicDataService } from './services/musicDataService'
 import { parseSmartLrc } from './services/lyricParser'
 import { multiSourceLyricService } from './services/multiSourceLyricService'
-import * as mm from 'music-metadata'
+import { useSongTagsEditor } from './composables/useSongTagsEditor'
+import { useCoverModal } from './composables/useCoverModal'
+import { useWindowControls } from './composables/useWindowControls'
+import { useSongContextMenu } from './composables/useSongContextMenu'
+import { useLibraryActions } from './composables/useLibraryActions'
+import { useSongSelection } from './composables/useSongSelection'
 import Settings from './components/Settings.vue'
+import UpdateModal from './components/UpdateModal.vue'
 import OnlineMatchModal from './components/OnlineMatchModal.vue'
 import AudioConverter from './components/AudioConverter.vue'
 import { i18nService, t } from './services/i18n'
+import type { Song } from './types/song'
 import {
   cueAlbums,
   cueTracks,
@@ -898,6 +946,12 @@ import {
   getCueAlbumTracks,
   scanCueFiles
 } from './composables/useCue'
+import { useUpdater } from './composables/useUpdater'
+import { getDisplayTitle, getDisplayArtist, getDisplayAlbum } from './utils/songDisplay'
+import { toSimpleLyricLines } from './utils/lyrics'
+import { getBandLabel, getEqPreset } from './utils/equalizer'
+import { isBrowserScannableAudio } from './utils/fileTypes'
+import { needsFFplayEngine } from './constants/playbackFormats'
 import { exists } from '@tauri-apps/plugin-fs'
 // RecycleScroller组件通过VueVirtualScroller插件注册
 
@@ -930,37 +984,7 @@ const logDebug = (...args: any[]) => {
   }
 }
 
-// 类型定义 - 独立的Song接口，与local.ts中的Song兼容
-interface Song {
-  id: string
-  title: string
-  artist: string
-  album: string
-  path: string
-  duration: string
-  cover: string
-  year: string
-  genre: string
-  lyric?: string
-  isFavorite?: boolean
-  isCueTrack?: boolean
-  startTime?: string | number
-  endTime?: string | number
-  parentFile?: string
-  trackNumber?: string
-  cueInfo?: string
-  dynamicCoverUrl?: string
-  // 转码相关
-  needs_transcode: boolean
-  // 浏览器环境下的原始文件对象（仅浏览器环境使用）
-  file?: File
-  // 音频元数据
-  format?: string
-  sample_rate?: number
-  channels?: number
-  bit_rate?: number
-  bit_depth?: number
-}
+// Song 类型已移至 types/song.ts
 
 // 歌词行类型
 interface LyricLine {
@@ -983,20 +1007,12 @@ interface FFplayResult {
 const sidebarVisible = ref(true)
 const equalizerVisible = ref(false)
 const showFullControls = ref(false)
-const showSongMenu = ref(false)
-const menuPosition = ref({ left: '0px', top: '0px' })
-const selectedSong = ref<Song | null>(null)
-const showEditTagsModal = ref(false)
 const showSettingsModal = ref(false)
-const showCoverModal = ref(false)
-const showOnlineMatchModal = ref(false)
 const showAudioConverter = ref(false)
+// 更新流程状态（由 useUpdater composable 管理）
+const { showUpdateModal, updateInfo, currentVersion, openUpdateModal, closeUpdateModal } = useUpdater()
 const activeTab = ref('info')
 const isLoading = ref(true)
-
-// 选择相关状态
-const selectedSongIds = ref<Set<string>>(new Set())
-const isSelectionMode = ref(false)
 
 // 歌词相关状态
 const lyrics = ref<LyricLine[]>([])
@@ -1041,22 +1057,6 @@ const audioElement = ref<HTMLAudioElement | null>(null) // 前端音频元素
 // 时间更新事件处理器
 let timeupdateHandler: ((this: HTMLAudioElement, ev: Event) => any) | null = null
 
-const editTagsForm = ref({
-  title: '',
-  artist: '',
-  album: '',
-  year: '',
-  genre: '',
-  fileName: '',
-  albumArtist: '',
-  trackNumber: '',
-  discNumber: '',
-  alia: '',
-  lyric: '',
-  cover: ''
-})
-const songToEdit = ref<Song | null>(null)
-
 // 歌曲相关
 const songs = ref<Song[]>([])
 const currentSong = ref<Song | null>(null)
@@ -1075,7 +1075,7 @@ let ffplayStatusInterval: number | null = null
 let seekDebounceTimer: number | null = null
 let pendingSeekPosition: number | null = null
 let seekInProgress: boolean = false  // Seek进行中标志，防止状态轮询覆盖位置
-let seekCompleteTimestamp: number = 0  // Seek完成时间戳，用于延迟恢复状态轮询
+let seekCompleteTimer: number | null = null  // seek 完成后延迟清除标志的定时器
 
 // 防抖Seek函数（200毫秒延迟）
 const debouncedSeek = async (position: number) => {
@@ -1100,7 +1100,6 @@ const debouncedSeek = async (position: number) => {
           currentPosition.value = pendingSeekPosition
           const totalSeconds = ffplayDuration.value || 1
           progress.value = Math.min((pendingSeekPosition / totalSeconds) * 100, 100)
-          seekCompleteTimestamp = Date.now()  // 记录Seek完成时间
           logInfo('【SEEK】FFplay防抖seek完成: currentPosition=', pendingSeekPosition, 's')
         }
       } catch (error) {
@@ -1109,8 +1108,9 @@ const debouncedSeek = async (position: number) => {
         pendingSeekPosition = null
         seekDebounceTimer = null
         // 延迟500ms后清除Seek进行中标志，给FFplay状态更新留出时间
-        setTimeout(() => {
+        seekCompleteTimer = window.setTimeout(() => {
           seekInProgress = false
+          seekCompleteTimer = null
         }, 500)
       }
     } else {
@@ -1189,10 +1189,11 @@ const playlists = ref<Playlist[]>([])
 const favorites = ref<string[]>([])
 
 // 过滤和搜索
-const currentFilter = ref<'all' | 'favorites' | 'artists' | 'albums' | 'cue'>('all')
+const currentFilter = ref<'all' | 'favorites' | 'artists' | 'albums' | 'cue' | 'playlist'>('all')
 const searchQuery = ref('')
 const selectedArtist = ref<string>('')
 const selectedAlbum = ref<string>('')
+const selectedPlaylistId = ref<string>('')
 
 // 均衡器
 const currentPreset = ref('flat')
@@ -1202,14 +1203,17 @@ const equalizerBands = ref<number[]>([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 const currentFilterText = computed(() => {
   // 依赖语言和翻译状态，确保语言切换时重新计算
   i18nService.getCurrentLanguage()
+  if (currentFilter.value === 'playlist') {
+    return playlists.value.find(p => p.id === selectedPlaylistId.value)?.name || t('playlist.title')
+  }
   const filters = {
     all: t('playlist.allSongs'),
     favorites: t('playlist.favorites'),
     artists: t('playlist.artists'),
     albums: t('playlist.albums'),
     cue: 'CUE专辑'
-  }
-  return filters[currentFilter.value]
+  } as const
+  return filters[currentFilter.value as 'all' | 'favorites' | 'artists' | 'albums' | 'cue']
 })
 
 // 艺术家列表
@@ -1256,6 +1260,16 @@ const filteredSongs = computed(() => {
       const artistName = getDisplayArtist(song)
       return `${albumName} - ${artistName}` === selectedAlbum.value
     })
+  } else if (currentFilter.value === 'playlist') {
+    const playlist = playlists.value.find(p => p.id === selectedPlaylistId.value)
+    if (playlist) {
+      // 按歌单内保存的 id 顺序解析歌曲
+      result = playlist.songs
+        .map(id => songs.value.find(song => song.id === id))
+        .filter((song): song is Song => !!song)
+    } else {
+      result = []
+    }
   }
   
   // 应用搜索
@@ -1312,21 +1326,11 @@ const titleElement = ref<HTMLElement | null>(null)
 const artistElement = ref<HTMLElement | null>(null)
 const coverLyricsContainer = ref<HTMLElement | null>(null)
 const coverLyricLineRefs = ref<(any | null)[]>([])
-const coverModalContent = ref<HTMLElement | null>(null)
 const songListContainer = ref<HTMLElement | null>(null)
 
 // 滚动相关状态
 const showScrollTopButton = ref(true) // 始终显示回到顶部按钮
 const showJumpToCurrentButton = ref(true) // 始终显示跳到当前播放曲目的按钮
-
-// 封面模态框拖动和全屏状态
-const isCoverModalFullscreen = ref(false)
-const coverModalPosition = ref<{ left: string; top: string; transform?: string }>({ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' })
-let isDraggingCoverModal = false
-let dragStartX = 0
-let dragStartY = 0
-let modalStartX = 0
-let modalStartY = 0
 
 // 滚动事件处理函数
 const handleScroll = () => {
@@ -1376,8 +1380,22 @@ const switchFilter = (filter: 'all' | 'favorites' | 'artists' | 'albums' | 'cue'
   if (filter !== 'cue') {
     selectedCueAlbum.value = null
   }
-  
+  selectedPlaylistId.value = ''
+
   // 更新悬浮按钮的显示状态
+  nextTick(() => {
+    handleScroll()
+  })
+}
+
+// 进入指定用户歌单
+const openPlaylist = (playlistId: string) => {
+  selectedPlaylistId.value = playlistId
+  currentFilter.value = 'playlist'
+  selectedArtist.value = ''
+  selectedAlbum.value = ''
+  selectedCueAlbum.value = null
+
   nextTick(() => {
     handleScroll()
   })
@@ -1477,10 +1495,7 @@ const scanMusic = async () => {
       try {
         // 在浏览器中，使用File API扫描音乐文件
         const audioFiles: Song[] = []
-        
-        // 支持的音频格式
-        const audioExtensions = ['.mp3', '.flac', '.wav', '.ogg', '.aac', '.m4a']
-        
+
         // 创建文件选择器，允许选择多个文件
         const input = document.createElement('input')
         input.type = 'file'
@@ -1493,11 +1508,8 @@ const scanMusic = async () => {
             if (target.files && target.files.length > 0) {
               const files = Array.from(target.files)
               
-              // 过滤出音频文件
-              const audioFileList = files.filter(file => {
-                const extension = '.' + file.name.split('.').pop()?.toLowerCase() || ''
-                return audioExtensions.includes(extension)
-              })
+              // 过滤出音频文件（浏览器环境可播放的格式）
+              const audioFileList = files.filter(file => isBrowserScannableAudio(file.name))
               
               logInfo(`找到 ${audioFileList.length} 个音频文件`)
               
@@ -1701,74 +1713,6 @@ let frontendPosition = 0
 let playSongLock: Promise<void> | null = null
 let currentPlayId = 0 // 用于跟踪当前播放请求的唯一ID
 
-// 歌曲行点击处理
-const handleSongRowClick = (song: Song, event: MouseEvent) => {
-  if (event.ctrlKey || event.metaKey) {
-    // Ctrl/Cmd + 点击：选择歌曲
-    toggleSongSelection(song)
-  } else if (isSelectionMode.value || selectedSongIds.value.size > 0) {
-    // 选择模式下：切换选择状态
-    toggleSongSelection(song)
-  } else {
-    // 默认：播放歌曲
-    playSong(song)
-  }
-}
-
-const toggleSongSelection = (song: Song) => {
-  const newSet = new Set(selectedSongIds.value)
-  if (newSet.has(song.id)) {
-    newSet.delete(song.id)
-  } else {
-    newSet.add(song.id)
-  }
-  selectedSongIds.value = newSet
-}
-
-const isSongSelected = (song: Song) => {
-  return selectedSongIds.value.has(song.id)
-}
-
-const clearSelection = () => {
-  selectedSongIds.value.clear()
-  selectedSongIds.value = new Set()
-  isSelectionMode.value = false
-}
-
-const addSelectedToPlaylist = () => {
-  const selectedSongs = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
-  selectedSongs.forEach((song: Song) => {
-    addSongToPlaylist(song)
-  })
-  logInfo('[批量操作] 已添加', selectedSongs.length, '首歌曲到播放队列')
-  clearSelection()
-}
-
-const playSelectedSongs = () => {
-  const selectedSongsList = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
-  if (selectedSongsList.length > 0) {
-    playSong(selectedSongsList[0])
-  }
-}
-
-const deleteSelectedSongs = async () => {
-  const selectedSongs = filteredSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
-  if (selectedSongs.length === 0) return
-
-  const confirmed = confirm(`确定要删除选中的 ${selectedSongs.length} 首歌曲吗？此操作不可撤销。`)
-  if (!confirmed) return
-
-  for (const song of selectedSongs) {
-    try {
-      await deleteSong(song)
-    } catch (e) {
-      logError('删除歌曲失败:', song.title, e)
-    }
-  }
-  logInfo('[批量操作] 已删除', selectedSongs.length, '首歌曲')
-  clearSelection()
-}
-
 const playSong = async (song: Song, position: number = 0, cueStartTime?: number, cueEndTime?: number, autoPlay: boolean = true) => {
   // 生成本次播放请求的唯一ID
   const thisPlayId = ++currentPlayId
@@ -1794,7 +1738,15 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
   playSongLock = new Promise<void>((resolve) => {
     resolveLock = resolve
   })
-  
+
+  // 以下变量需要在 try 对应的 catch 回退分支中访问，
+  // 而 let/const 是块级作用域，在 try 内声明的变量在 catch 中不可见，
+  // 因此统一在 try 外预先声明（修复 catch 分支 ReferenceError）
+  let currentIndex = -1
+  let positionForCue = position
+  let playPath = ''
+  let needsFFplay = false
+
   try {
     
     // 重置预转码标志
@@ -1906,7 +1858,8 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
     }
     
     // 获取当前歌曲索引（用于随机模式预先确定下一首）
-    const currentIndex = songs.value.findIndex(s => s.id === song.id)
+    // 声明已提升到 try 外，供 catch 回退分支使用
+    currentIndex = songs.value.findIndex(s => s.id === song.id)
     
     // 交叉淡入淡出处理
     let originalVolume = isMuted.value ? previousVolume.value : volume.value
@@ -1972,8 +1925,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
     nextTick(() => {
       handleScroll()
     })
-    // 对于CUE track，计算相对位置
-    let positionForCue = position
+    // 对于CUE track，计算相对位置（positionForCue 已在 try 外初始化）
     if (song.isCueTrack && song.startTime) {
       // 首先验证position是否合理
       if (isNaN(position) || position < 0 || position > 1000000) {
@@ -2042,7 +1994,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
     // 准备CUE参数（如果是CUE track）
     let startTime = cueStartTime !== undefined ? cueStartTime : (song.isCueTrack ? song.startTime : undefined)
     let endTime = cueEndTime !== undefined ? cueEndTime : (song.isCueTrack ? song.endTime : undefined)
-    const playPath = song.isCueTrack && song.parentFile ? song.parentFile : song.path
+    playPath = song.isCueTrack && song.parentFile ? song.parentFile : song.path
     
     // 检查playPath是否有效
     logDebug('计算playPath:', {
@@ -2086,8 +2038,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
 
     // 检查是否需要使用FFplay播放（原引擎不支持的无损音频）
     // 注意：.m4a和.aac实际上可以被HTML5 Audio支持，不需要FFplay
-    const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma']
-    let needsFFplay = unsupportedFormats.some(ext => playPath.toLowerCase().endsWith(ext))
+    needsFFplay = needsFFplayEngine(playPath)
     
     if (needsFFplay && !isBrowser.value) {
       logInfo('检测到需要FFplay播放的格式:', playPath)
@@ -2126,17 +2077,13 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       
       try {
         logInfo('【FFmpeg】开始调用 play_audio_with_ffmpeg')
-        console.log('【FFmpeg】开始调用 play_audio_with_ffmpeg - 同步日志')
         // 使用FFmpeg播放
         const start_position = positionForCue
-        console.log('【FFmpeg】start_position 设置为:', start_position)
         logInfo('【FFmpeg】start_position 设置为:', start_position)
         let result
-        console.log('【FFmpeg】开始执行 invoke 调用')
         logInfo('【FFmpeg】开始执行 invoke 调用')
         try {
           logInfo('【FFmpeg】准备调用 invoke，path:', playPath, 'start_time:', start_position)
-          console.log('【FFmpeg】准备调用 invoke，path:', playPath, 'start_time:', start_position)
           // 解析歌曲时长（如果有的话）
           let durationSeconds = 300; // 默认值
           if (currentSong.value && currentSong.value.duration) {
@@ -2154,42 +2101,26 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             start_time: start_position,
             duration: durationSeconds
           }) as FFplayResult | string
-          console.log('【FFmpeg】invoke 调用成功，result:', JSON.stringify(result))
-          // 确保 logInfo 是函数后再调用
-          if (typeof logInfo === 'function') {
-            logInfo('【FFmpeg】invoke 调用成功，result:', JSON.stringify(result))
-            logInfo('result类型:', typeof result)
-            if (typeof result === 'object' && result !== null) {
-              logInfo('result.duration:', (result as FFplayResult).duration)
-            }
-          } else {
-            console.error('【FFplay】logInfo is not a function:', typeof logInfo)
+          logInfo('【FFmpeg】invoke 调用成功，result:', JSON.stringify(result))
+          logInfo('result类型:', typeof result)
+          if (typeof result === 'object' && result !== null) {
+            logInfo('result.duration:', (result as FFplayResult).duration)
           }
         } catch (invokeError) {
-          console.error('FFplay播放失败:', invokeError)
-          if (typeof logError === 'function') {
-            logError('FFplay播放失败:', invokeError)
-          }
+          logError('FFplay播放失败:', invokeError)
           const errorMsg = String(invokeError)
           if (errorMsg.includes('未找到') || errorMsg.includes('not found') || errorMsg.includes('FFplay')) {
-            console.error('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
-            if (typeof logError === 'function') {
-              logError('错误原因：FFplay可执行文件未找到，请下载FFmpeg并放置到项目bin目录或添加到系统PATH')
-            }
-          }
-          console.error('【FFplay】catch 块捕获到错误，准备返回')
-          if (typeof logError === 'function') {
-            logError('【FFplay】catch 块捕获到错误，准备返回')
+            errorMessage = 'FFplay 可执行文件未找到，无法播放此格式。请下载 FFmpeg 并放置到 bin 目录或添加到系统 PATH。'
+          } else {
+            errorMessage = `播放失败：${errorMsg}`
           }
           return
         }
-        
+
         // 检查是否返回错误（ffplay未找到）
         if (result && typeof result === 'string' && result.includes('未找到')) {
-          console.error('FFplay未找到，无法播放此格式:', result)
-          if (typeof logError === 'function') {
-            logError('FFplay未找到，无法播放此格式:', result)
-          }
+          logError('FFplay未找到，无法播放此格式:', result)
+          errorMessage = 'FFplay 未找到，无法播放此格式'
           return
         }
         
@@ -2228,13 +2159,6 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
               progress.value = Math.min((start_position / totalSeconds) * 100, 100)
             }
             
-            console.log('【FFplay】音频文件信息:', {
-              format: ffResult.format,
-              sample_rate: ffResult.sample_rate,
-              channels: ffResult.channels,
-              bit_rate: ffResult.bit_rate,
-              bit_depth: ffResult.bit_depth
-            })
             logInfo('音频文件信息:', {
               format: ffResult.format,
               sample_rate: ffResult.sample_rate,
@@ -2254,92 +2178,65 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         currentPosition.value = start_position
         
         // 启动FFplay状态监控
-        console.log('【FFplay】启动FFplay状态监控定时器')
         logInfo('启动FFplay状态监控定时器')
         // 清除可能存在的旧定时器
         if (ffplayStatusInterval) {
           clearInterval(ffplayStatusInterval)
           ffplayStatusInterval = null
-          console.log('【FFplay】已清除旧的FFplay状态监控定时器')
           logInfo('已清除旧的FFplay状态监控定时器')
         }
         
         // 重置进度变量，避免累计上一首歌曲的进度
-        if (typeof logInfo === 'function') {
-          logInfo('【FFplay】重置进度变量，start_position:', start_position)
-        }
+        logInfo('【FFplay】重置进度变量，start_position:', start_position)
         currentPosition.value = start_position
         progress.value = 0
         frontendPosition = start_position
-        
+
         // 确保isFFplayPlaying.value为true
         isFFplayPlaying.value = true
-        console.log('【FFplay】设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
-        if (typeof logInfo === 'function') {
-          logInfo('设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
-        }
-        
+        logInfo('设置isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value);
+
         // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
         (async () => {
           try {
-            console.log('【FFplay】立即执行FFplay状态更新')
-            if (typeof logInfo === 'function') {
-              logInfo('立即执行FFplay状态更新')
-            }
+            logInfo('立即执行FFplay状态更新')
             const status = await invoke('get_ffplay_status') as any
-            console.log('【FFplay】立即获取FFplay状态成功:', JSON.stringify(status))
-            if (typeof logInfo === 'function') {
-              logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
-            }
+            logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
 
             if (status) {
-              console.log('【FFplay】立即处理FFplay状态:', {
+              logInfo('立即处理FFplay状态:', {
                 duration: status.duration,
                 position: status.position,
                 volume: status.volume,
                 is_playing: status.is_playing
               })
-              if (typeof logInfo === 'function') {
-                logInfo('立即处理FFplay状态:', {
-                  duration: status.duration,
-                  position: status.position,
-                  volume: status.volume,
-                  is_playing: status.is_playing
-                })
-              }
-              
+
               ffplayDuration.value = status.duration || ffplayDuration.value
               ffplayPosition.value = status.position || ffplayPosition.value
               ffplayVolume.value = status.volume || ffplayVolume.value
 
               // 更新播放状态
               isPlaying.value = status.is_playing || false
-              console.log('【FFplay】isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
               logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
               // 只有当status.position有效时才更新currentPosition
               if (status.position !== undefined && status.position !== null) {
-                console.log('【FFplay】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                 logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                 currentPosition.value = status.position
                 // 更新前端计算的播放位置
                 frontendPosition = status.position
-                console.log('【FFplay】立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                 logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
               }
-              
+
               // 计算进度百分比
               if (ffplayDuration.value > 0) {
                 const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
-                console.log('【FFplay】立即更新进度百分比前:', progress.value, '更新后:', newProgress)
                 logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
                 progress.value = newProgress
-                console.log('【FFplay】立即更新进度百分比:', progress.value, '%')
                 logInfo('立即更新进度百分比:', progress.value, '%')
               }
             }
           } catch (error) {
-            console.error('【FFplay】立即获取FFplay状态失败:', error)
             logError('立即获取FFplay状态失败:', error)
           }
         })()
@@ -2347,87 +2244,55 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         ffplayStatusInterval = window.setInterval(() => {
           // 检查是否应该继续运行定时器
           if (!isFFplayPlaying.value) {
-            console.log('【FFplay】isFFplayPlaying为false，停止监控定时器')
-            if (typeof logInfo === 'function') {
-              logInfo('isFFplayPlaying为false，停止监控定时器')
-            }
+            logInfo('isFFplayPlaying为false，停止监控定时器')
             if (ffplayStatusInterval) {
               clearInterval(ffplayStatusInterval)
               ffplayStatusInterval = null
             }
             return
           }
-          
-          console.log('【FFplay】FFplay状态监控定时器触发')
-          if (typeof logInfo === 'function') {
-            logInfo('FFplay状态监控定时器触发')
-          }
+
+          logInfo('FFplay状态监控定时器触发');
           // 使用IIFE包装async函数
           (async () => {
             try {
-              console.log('【FFplay】准备调用get_ffplay_status')
-              if (typeof logInfo === 'function') {
-                logInfo('准备调用get_ffplay_status')
-              }
+              logInfo('准备调用get_ffplay_status')
               const status = await invoke('get_ffplay_status') as any
-              console.log('【FFplay】获取FFplay状态成功:', JSON.stringify(status))
-              if (typeof logInfo === 'function') {
-                logInfo('获取FFplay状态成功:', JSON.stringify(status))
-              }
+              logInfo('获取FFplay状态成功:', JSON.stringify(status))
 
               if (status) {
-                console.log('【FFplay】处理FFplay状态:', {
+                logInfo('处理FFplay状态:', {
                   duration: status.duration,
                   position: status.position,
                   volume: status.volume,
                   is_playing: status.is_playing
                 })
-                if (typeof logInfo === 'function') {
-                  logInfo('处理FFplay状态:', {
-                    duration: status.duration,
-                    position: status.position,
-                    volume: status.volume,
-                    is_playing: status.is_playing
-                  })
-                }
-                
+
                 ffplayDuration.value = status.duration || ffplayDuration.value
                 ffplayPosition.value = status.position || ffplayPosition.value
                 ffplayVolume.value = status.volume || ffplayVolume.value
 
                 // 更新播放状态
                 isPlaying.value = status.is_playing || false
-                console.log('【FFplay】isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                if (typeof logInfo === 'function') {
-                  logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                }
+                logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
                 // 只有当status.position有效且Seek未在进行中时才更新currentPosition
                 // 防止状态轮询覆盖Seek后的位置
                 if (status.position !== undefined && status.position !== null && !seekInProgress) {
-                  console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  if (typeof logInfo === 'function') {
-                    logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  }
+                  logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   currentPosition.value = status.position
                   // 更新前端计算的播放位置
                   frontendPosition = status.position
-                  console.log('【FFplay】更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                   logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                 } else if (seekInProgress) {
-                  console.log('【FFplay】Seek进行中，跳过位置更新，保持当前位置:', currentPosition.value)
-                  if (typeof logInfo === 'function') {
-                    logInfo('Seek进行中，跳过位置更新')
-                  }
+                  logInfo('Seek进行中，跳过位置更新')
                 }
                 
                 // 计算进度百分比（Seek进行中时也更新，因为currentPosition已被保护）
                 if (ffplayDuration.value > 0) {
                   const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
-                  console.log('【FFplay】更新进度百分比前:', progress.value, '更新后:', newProgress)
                   logInfo('更新进度百分比前:', progress.value, '更新后:', newProgress)
                   progress.value = newProgress
-                  console.log('【FFplay】更新进度百分比:', progress.value, '%')
                   logInfo('更新进度百分比:', progress.value, '%')
                 }
               
@@ -2445,11 +2310,9 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                   ffplayDuration.value > 0 &&
                   isFFplayPlaying.value
 
-                console.log('【FFplay】播放完成检测: is_playing=', status.is_playing, 'position=', status.position.toFixed(2), 'duration=', status.duration.toFixed(2), 'ffplayDuration=', ffplayDuration.value, 'isFFplayPlaying=', isFFplayPlaying.value, 'isPlaybackComplete=', isPlaybackComplete)
                 logInfo('播放完成检测: is_playing=', status.is_playing, 'position=', status.position.toFixed(2), 'duration=', status.duration.toFixed(2), 'ffplayDuration=', ffplayDuration.value, 'isFFplayPlaying=', isFFplayPlaying.value, 'isPlaybackComplete=', isPlaybackComplete)
 
                 if (isPlaybackComplete) {
-                  console.log('【FFplay】FFplay播放完成, position:', status.position, 'duration:', status.duration)
                   logInfo('FFplay播放完成, position:', status.position, 'duration:', status.duration)
                   isPlaybackFinished = true
 
@@ -2464,29 +2327,24 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
 
                   if (autoPlayNext.value) {
                     // 延迟执行 playNext()，确保当前播放状态已经完全更新
-                    console.log('【FFplay】准备播放下一首歌曲');
                     logInfo('准备播放下一首歌曲');
                     setTimeout(() => {
-                      console.log('【FFplay】执行playNext()');
                       logInfo('执行playNext()');
                       playNext();
                     }, 1000)
                   } else if (autoPlay) {
                     isPlaying.value = false
-                    console.log('【FFplay】播放完成，停止播放');
                     logInfo('播放完成，停止播放');
                   }
                 }
-                
+
 
               }
             } catch (error) {
-              console.error('【FFplay】获取FFplay状态失败:', error)
               logError('获取FFplay状态失败:', error)
               // 即使在获取状态失败的情况下，也保持isFFplayPlaying.value为true
               // 确保即使在状态获取失败的情况下，前端也能正确检测到FFplay播放状态
               isFFplayPlaying.value = true
-              console.log('【FFplay】获取FFplay状态失败，确保isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
               logInfo('获取FFplay状态失败，确保isFFplayPlaying.value为true，当前值:', isFFplayPlaying.value)
             }
           })()
@@ -2599,8 +2457,8 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             }, 'auto', false)
             
             if (result.success && result.bestScore && result.bestScore.lyricLines) {
-              // 直接使用解析后的歌词行
-              lyrics.value = result.bestScore.lyricLines
+              // 转换为界面滚动使用的 { time(秒), text } 格式
+              lyrics.value = toSimpleLyricLines(result.bestScore.lyricLines)
               if (result.bestScore.yrcData) {
                 yrcData.value = result.bestScore.yrcData
               }
@@ -2629,7 +2487,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           lyrics.value = []
           coverLyricLineRefs.value = []
         }
-        
+
         // 自动滚动到当前播放歌曲
         scrollToCurrentSong()
         
@@ -3081,8 +2939,8 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
           }, 'auto', false)
           
           if (result.success && result.bestScore && result.bestScore.lyricLines) {
-            // 直接使用解析后的歌词行
-            lyrics.value = result.bestScore.lyricLines
+            // 转换为界面滚动使用的 { time(秒), text } 格式
+            lyrics.value = toSimpleLyricLines(result.bestScore.lyricLines)
             if (result.bestScore.yrcData) {
               yrcData.value = result.bestScore.yrcData
             }
@@ -4064,86 +3922,8 @@ const changePlaybackMode = () => {
   playbackMode.value = modes[(currentIndex + 1) % modes.length]
 }
 
-// 从文件路径中提取文件名并移除后缀名
-const getFileNameWithoutExtension = (path: string): string => {
-  // 提取文件名
-  const fileName = path.split('\\').pop()?.split('/').pop() || ''
-  // 移除后缀名
-  const lastDotIndex = fileName.lastIndexOf('.')
-  if (lastDotIndex > 0) {
-    return fileName.substring(0, lastDotIndex)
-  }
-  return fileName
-}
-
-// 从文件名中提取艺术家和专辑信息
-const extractInfoFromFileName = (fileName: string): { artist: string; album: string } => {
-  // 尝试从文件名中提取艺术家和专辑信息
-  // 常见格式：艺术家 - 歌曲名
-  // 或者：艺术家 - 专辑 - 歌曲名
-  const parts = fileName.split('-').map(part => part.trim())
-
-  if (parts.length >= 2) {
-    return {
-      artist: parts[0],
-      album: parts.length >= 3 ? parts[1] : ''
-    }
-  }
-
-  return {
-    artist: '',
-    album: ''
-  }
-}
-
-
-// 获取显示的歌曲标题
-const getDisplayTitle = (song: Song): string => {
-  // 定义常见的音频文件扩展名
-  const audioExtensions = ['mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a', 'ape', 'dsd', 'dts', 'wma', 'opus']
-
-  // 检查标题是否只是一个文件扩展名
-  if (song.title && audioExtensions.includes(song.title.toLowerCase())) {
-    // 如果标题只是扩展名，使用文件名（不含后缀）
-    return getFileNameWithoutExtension(song.path)
-  }
-
-  // 去掉标题后面的时间信息（格式：::开始时间::结束时间）
-  let displayTitle = song.title || getFileNameWithoutExtension(song.path)
-  const parts = displayTitle.split('::')
-  if (parts.length >= 3) {
-    // 如果有至少3个部分，说明包含时间信息，只保留第一部分
-    displayTitle = parts[0]
-  }
-
-  return displayTitle
-}
-
-// 获取显示的艺术家名称
-const getDisplayArtist = (song: Song): string => {
-  if (song.artist && song.artist !== '未知艺术家') {
-    return song.artist
-  }
-  
-  // 尝试从文件名中提取艺术家信息
-  const fileName = getFileNameWithoutExtension(song.path)
-  const info = extractInfoFromFileName(fileName)
-  
-  return info.artist || '未知艺术家'
-}
-
-// 获取显示的专辑名称
-const getDisplayAlbum = (song: Song): string => {
-  if (song.album && song.album !== '未知专辑') {
-    return song.album
-  }
-  
-  // 尝试从文件名中提取专辑信息
-  const fileName = getFileNameWithoutExtension(song.path)
-  const info = extractInfoFromFileName(fileName)
-  
-  return info.album || '未知专辑'
-}
+// 歌曲显示相关纯函数（getFileNameWithoutExtension / extractInfoFromFileName /
+// getDisplayTitle / getDisplayArtist / getDisplayAlbum）已移至 utils/songDisplay.ts
 
 // toggleRepeat 函数已移除，播放模式切换通过 changePlaybackMode 函数实现
 
@@ -4214,10 +3994,11 @@ const seek = async () => {
   console.log('【SEEK】audioElement.value:', audioElement.value)
   logInfo('【SEEK】seek函数被调用, progress.value:', progress.value, '%, isPlaying:', isPlaying.value)
 
-  // 检查是否需要使用FFplay播放（基于文件格式）
-  const unsupportedFormats = ['.dsf', '.dff', '.dsd', '.mqa', '.wv', '.tta', '.ape', '.wma', '.m4a', '.aac']
-  const currentSongPath = currentSong.value?.path ?? ''
-  const shouldUseFFplay = currentSong.value && currentSongPath && unsupportedFormats.some(ext => currentSongPath.toLowerCase().endsWith(ext))
+  // 通道判断必须以“当前实际播放通道”为准（isFFplayPlaying），
+  // 不能再按文件扩展名重新猜测：m4a/aac 由 HTML5 Audio 播放，
+  // 误判为 FFplay 会导致去 invoke 不存在的 ffplay 进程，且跳过
+  // audioElement.currentTime 设置，表现为拖动进度条无效。
+  const shouldUseFFplay = isFFplayPlaying.value
   console.log('【SEEK】shouldUseFFplay:', shouldUseFFplay)
 
   // 如果应该使用FFplay播放，使用FFplay的seek功能（带防抖）
@@ -4266,173 +4047,119 @@ const seek = async () => {
           frontendPosition = actualPosition // 更新前端计算的播放位置
           progress.value = clampedProgress
           ffplayPosition.value = actualPosition
-          
+
           // 确保isFFplayPlaying.value为true
           isFFplayPlaying.value = true
-          if (typeof logInfo === 'function') {
-            logInfo('【SEEK】FFplay seek完成: currentPosition=', actualPosition, 's, progress=', progress.value, '%')
-          }
-          
+          logInfo('【SEEK】FFplay seek完成: currentPosition=', actualPosition, 's, progress=', progress.value, '%');
+
           // 立即执行一次状态更新，确保前端能够立即获取到FFplay的状态
           (async () => {
             try {
-              console.log('【SEEK】立即执行FFplay状态更新')
-              if (typeof logInfo === 'function') {
-                logInfo('立即执行FFplay状态更新')
-              }
+              logInfo('立即执行FFplay状态更新')
               const status = await invoke('get_ffplay_status') as any
-              console.log('【SEEK】立即获取FFplay状态成功:', JSON.stringify(status))
-              if (typeof logInfo === 'function') {
-                logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
-              }
+              logInfo('立即获取FFplay状态成功:', JSON.stringify(status))
 
               if (status) {
-                console.log('【SEEK】立即处理FFplay状态:', {
+                logInfo('立即处理FFplay状态:', {
                   duration: status.duration,
                   position: status.position,
                   volume: status.volume,
                   is_playing: status.is_playing
                 })
-                if (typeof logInfo === 'function') {
-                  logInfo('立即处理FFplay状态:', {
-                    duration: status.duration,
-                    position: status.position,
-                    volume: status.volume,
-                    is_playing: status.is_playing
-                  })
-                }
-                
+
                 ffplayDuration.value = status.duration || ffplayDuration.value
                 ffplayPosition.value = status.position || ffplayPosition.value
                 ffplayVolume.value = status.volume || ffplayVolume.value
 
                 // 更新播放状态
                 isPlaying.value = status.is_playing || false
-                console.log('【SEEK】isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                if (typeof logInfo === 'function') {
-                  logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
-                }
+                logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
                 // Seek进行中时，不允许状态轮询覆盖Seek位置
                 if (!seekInProgress && status.position !== undefined && status.position !== null) {
-                  console.log('【SEEK】立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  if (typeof logInfo === 'function') {
-                    logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
-                  }
+                  logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   currentPosition.value = status.position
-                  frontendPosition = status.position // 更新前端计算的播放位置
-                  console.log('【SEEK】立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
-                  if (typeof logInfo === 'function') {
-                    logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
-                  }
+                  frontendPosition = status.position
+                  logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                 } else if (seekInProgress) {
-                  console.log('【SEEK】立即更新被跳过（Seek进行中），保持位置:', currentPosition.value)
+                  logInfo('立即更新被跳过（Seek进行中），保持位置:', currentPosition.value)
                 }
-                
+
                 // 计算进度百分比
                 if (ffplayDuration.value > 0) {
                   const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
-                  console.log('【SEEK】立即更新进度百分比前:', progress.value, '更新后:', newProgress)
-                  if (typeof logInfo === 'function') {
-                    logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
-                  }
+                  logInfo('立即更新进度百分比前:', progress.value, '更新后:', newProgress)
                   progress.value = newProgress
-                  console.log('【SEEK】立即更新进度百分比:', progress.value, '%')
-                  if (typeof logInfo === 'function') {
-                    logInfo('立即更新进度百分比:', progress.value, '%')
-                  }
+                  logInfo('立即更新进度百分比:', progress.value, '%')
                 }
               }
             } catch (error) {
-              console.error('【SEEK】立即获取FFplay状态失败:', error)
               logError('立即获取FFplay状态失败:', error)
             }
           })()
-          
+
           // 确保FFplay状态监控定时器正在运行
           if (!ffplayStatusInterval) {
-            console.log('【SEEK】FFplay状态监控定时器未运行，启动一个新的')
-            if (typeof logInfo === 'function') {
-              logInfo('FFplay状态监控定时器未运行，启动一个新的')
-            }
+            logInfo('FFplay状态监控定时器未运行，启动一个新的')
             // 启动FFplay状态监控定时器
             ffplayStatusInterval = window.setInterval(() => {
-              console.log('【FFplay】状态监控定时器触发')
-              if (typeof logInfo === 'function') {
-                logInfo('FFplay状态监控定时器触发')
-              }
+              logInfo('FFplay状态监控定时器触发');
               // 使用IIFE包装async函数
               (async () => {
                 try {
-                  console.log('【FFplay】准备调用get_ffplay_status')
                   logInfo('准备调用get_ffplay_status')
                   const status = await invoke('get_ffplay_status') as any
-                  console.log('【FFplay】获取FFplay状态成功:', JSON.stringify(status))
                   logInfo('获取FFplay状态成功:', JSON.stringify(status))
 
                   if (status) {
-                    console.log('【FFplay】处理FFplay状态:', {
-                      duration: status.duration,
-                      position: status.position,
-                      volume: status.volume,
-                      is_playing: status.is_playing
-                    })
                     logInfo('处理FFplay状态:', {
                       duration: status.duration,
                       position: status.position,
                       volume: status.volume,
                       is_playing: status.is_playing
                     })
-                    
+
                     ffplayDuration.value = status.duration || ffplayDuration.value
                     ffplayPosition.value = status.position || ffplayPosition.value
                     ffplayVolume.value = status.volume || ffplayVolume.value
 
                     // 更新播放状态
                     isPlaying.value = status.is_playing || false
-                    console.log('【FFplay】isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
                     logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
                     // 只有当status.position有效时才更新currentPosition
                     if (status.position !== undefined && status.position !== null) {
-                      console.log('【FFplay】更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                       logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                       currentPosition.value = status.position
                       // 更新前端计算的播放位置
                       frontendPosition = status.position
-                      console.log('【FFplay】更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                       logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
                     }
-                    
+
                     // 计算进度百分比
                     if (ffplayDuration.value > 0) {
                       const newProgress = Math.min((currentPosition.value / ffplayDuration.value) * 100, 100)
-                      console.log('【FFplay】更新进度百分比前:', progress.value, '更新后:', newProgress)
                       logInfo('更新进度百分比前:', progress.value, '更新后:', newProgress)
                       progress.value = newProgress
-                      console.log('【FFplay】更新进度百分比:', progress.value, '%')
                       logInfo('更新进度百分比:', progress.value, '%')
                     }
                   }
                 } catch (error) {
-                  console.error('【FFplay】获取FFplay状态失败:', error)
                   logError('获取FFplay状态失败:', error)
                 }
               })()
             }, 500) // 每500毫秒更新一次状态，提高响应速度
           } else {
-            console.log('【SEEK】FFplay状态监控定时器已经在运行，不需要重新启动')
             logInfo('FFplay状态监控定时器已经在运行，不需要重新启动')
           }
         }
       }
-      
+
       isSeeking.value = false
       wasPlayingBeforeSeek = false
-      console.log('【SEEK】========== seek 函数结束（FFplay） ==========')
+      logInfo('========== seek 函数结束（FFplay） ==========')
       return
     } catch (error) {
-      console.log('【SEEK】❌ FFplay seek失败:', error)
       logError('【SEEK】FFplay seek失败:', error)
       isSeeking.value = false
       wasPlayingBeforeSeek = false
@@ -4443,7 +4170,6 @@ const seek = async () => {
   // 保存对 audioElement 的引用，防止在 seek 过程中被清理
   const audioElementRef = audioElement.value
   if (!audioElementRef) {
-    console.log('【SEEK】❌ 没有音频元素，无法定位')
     logInfo('【SEEK】没有音频元素，无法定位')
     
     // 即使没有音频元素，也要更新播放状态和进度
@@ -4719,22 +4445,16 @@ const toggleEqualizer = () => {
   equalizerVisible.value = !equalizerVisible.value
 }
 
-const getBandLabel = (index: number) => {
-  const bands = ['31Hz', '62Hz', '125Hz', '250Hz', '500Hz', '1kHz', '2kHz', '4kHz', '8kHz', '16kHz']
-  return bands[index]
-}
+// 均衡器频段标签与预设数据已移至 utils/equalizer.ts
 
 const applyPreset = async () => {
   try {
-    const presets = {
-      flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      rock: [6, 5, 4, 3, 2, -1, -2, -3, -2, 0],
-      pop: [-2, -1, 0, 2, 4, 4, 3, 2, 1, 0],
-      jazz: [4, 3, 2, 1, -1, -2, -1, 0, 2, 4],
-      classical: [7, 5, 3, 1, -1, -2, -1, 1, 3, 5],
-      electronic: [4, 3, 2, -1, -3, -2, 0, 2, 3, 4]
+    const preset = getEqPreset(currentPreset.value)
+    if (preset) {
+      equalizerBands.value = preset
+    } else {
+      logError('未知的均衡器预设:', currentPreset.value)
     }
-    equalizerBands.value = [...presets[currentPreset.value as keyof typeof presets]]
   } catch (error) {
     logError('应用均衡器预设失败:', error)
   }
@@ -4750,94 +4470,39 @@ const handleSearch = () => {
   // 这里可以添加额外的搜索相关逻辑
 }
 
-const openSongMenu = (song: Song, event: MouseEvent) => {
-  selectedSong.value = song
-  menuPosition.value = {
-    left: `${event.clientX}px`,
-    top: `${event.clientY}px`
-  }
-  showSongMenu.value = true
-  
-  // 点击其他地方关闭菜单
-  setTimeout(() => {
-    document.addEventListener('click', closeSongMenu)
-  }, 10)
-}
+// 歌曲右键菜单（由 useSongContextMenu composable 管理）
+const {
+  showSongMenu,
+  menuPosition,
+  selectedSong,
+  openSongMenu,
+  closeSongMenu
+} = useSongContextMenu()
 
-const closeSongMenu = () => {
-  showSongMenu.value = false
-  document.removeEventListener('click', closeSongMenu)
-}
-
-// 编辑歌曲标签
-const editSongTags = async (song: Song) => {
-  songToEdit.value = song
-  // 提取文件名
-  const fileName = getFileNameWithoutExtension(song.path)
-  
-  // 尝试动态读取歌词
-  let lyric = song.lyric || ''
-  if (!lyric) {
-    logInfo('【编辑标签】歌曲对象中没有歌词，尝试动态读取')
-    try {
-      const { readTextFile } = await import('@tauri-apps/plugin-fs')
-      const lyricPath = song.path.replace(/\.[^/.]+$/, '.lrc')
-      logInfo('【编辑标签】尝试读取歌词文件:', lyricPath)
-      lyric = await readTextFile(lyricPath)
-      logInfo('【编辑标签】成功读取歌词文件，长度:', lyric.length)
-    } catch (e) {
-      logInfo('【编辑标签】读取歌词文件失败:', e)
-    }
-  }
-  
-  editTagsForm.value = {
-    title: song.title || '',
-    artist: song.artist || '',
-    album: song.album || '',
-    year: song.year || '',
-    genre: song.genre || '',
-    fileName: fileName,
-    albumArtist: '',
-    trackNumber: song.isCueTrack ? (song.trackNumber || (song as any).track_number || '').toString() : '',
-    discNumber: '',
-    alia: '',
-    lyric: lyric,
-    cover: song.cover || ''
-  }
-  
-  // 如果是CUE track，添加开始和结束时间信息到备注或其他字段
-  if (song.isCueTrack) {
-    logInfo('CUE track信息:', {
-      trackNumber: song.trackNumber || (song as any).track_number,
-      startTime: song.startTime,
-      endTime: song.endTime
-    })
-  }
-  logInfo('编辑歌曲标签:', song.title, '封面:', song.cover ? '有' : '无', '歌词:', lyric ? '有' : '无')
-  showEditTagsModal.value = true
-  closeSongMenu()
-}
-
-// 关闭编辑标签模态框
-const closeEditTagsModal = () => {
-  showEditTagsModal.value = false
-  songToEdit.value = null
-}
-
-// 打开封面模态框
-const openCoverModal = () => {
-  if (currentSong.value) {
-    showCoverModal.value = true
-    logInfo('打开封面模态框')
-    
-    // 打开后等待模态框完全渲染，然后滚动到当前歌词
-    setTimeout(() => {
-      nextTick(() => {
-        scrollToCurrentLyric()
-      })
-    }, 100)
-  }
-}
+// 歌曲标签编辑（状态与动作由 useSongTagsEditor composable 管理）
+const {
+  showEditTagsModal,
+  showOnlineMatchModal,
+  editTagsForm,
+  songToEdit,
+  editSongTags,
+  closeEditTagsModal,
+  copyPath,
+  readLocalMetadata,
+  fetchLyric,
+  fetchCover,
+  openOnlineMatch,
+  handleOnlineMatchApply,
+  autoMatchTags,
+  changeCover,
+  saveSongTags
+} = useSongTagsEditor({
+  songs,
+  currentSong,
+  closeSongMenu,
+  logInfo,
+  logError
+})
 
 // 滚动到当前歌词（封面模态框）
 const scrollToCurrentLyric = () => {
@@ -4884,653 +4549,71 @@ const scrollToCurrentLyric = () => {
   }
 }
 
-// 关闭封面模态框
-const closeCoverModal = () => {
-  showCoverModal.value = false
-  isCoverModalFullscreen.value = false
-  coverModalPosition.value = { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
-  logInfo('关闭封面模态框')
-}
+// 封面模态框窗口行为（开关/全屏/拖拽由 useCoverModal composable 管理）
+const {
+  showCoverModal,
+  isCoverModalFullscreen,
+  coverModalPosition,
+  coverModalContent,
+  openCoverModal,
+  closeCoverModal,
+  toggleCoverModalFullscreen,
+  startDragCoverModal
+} = useCoverModal({
+  currentSong,
+  onOpened: scrollToCurrentLyric,
+  logInfo
+})
 
-// 切换封面模态框全屏状态
-const toggleCoverModalFullscreen = () => {
-  isCoverModalFullscreen.value = !isCoverModalFullscreen.value
-  if (isCoverModalFullscreen.value) {
-    // 全屏时重置位置
-    coverModalPosition.value = { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
-  } else {
-    // 退出全屏时恢复居中
-    coverModalPosition.value = { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
-  }
-  logInfo('封面模态框全屏状态:', isCoverModalFullscreen.value)
-}
+// 歌曲库管理动作（收藏/加歌单/删除/建歌单由 useLibraryActions composable 管理）
+const {
+  toggleFavorite,
+  showAddToPlaylistMenu,
+  addMenuPosition,
+  openAddToPlaylistMenu,
+  addToPlaylist,
+  createPlaylistAndAdd,
+  removeSongFromLibrary,
+  deleteSong,
+  createPlaylist
+} = useLibraryActions({
+  songs,
+  favorites,
+  playlists,
+  closeSongMenu,
+  logError
+})
 
-// 开始拖动封面模态框
-const startDragCoverModal = (e: MouseEvent) => {
-  if (isCoverModalFullscreen.value) return // 全屏时不允许拖动
-  
-  isDraggingCoverModal = true
-  dragStartX = e.clientX
-  dragStartY = e.clientY
-  
-  // 获取当前位置
-  const rect = coverModalContent.value?.getBoundingClientRect()
-  if (rect) {
-    modalStartX = rect.left
-    modalStartY = rect.top
-  }
-  
-  // 添加全局鼠标事件监听
-  document.addEventListener('mousemove', onDragCoverModal)
-  document.addEventListener('mouseup', stopDragCoverModal)
-  
-  logInfo('开始拖动封面模态框')
-}
-
-// 拖动中
-const onDragCoverModal = (e: MouseEvent) => {
-  if (!isDraggingCoverModal) return
-  
-  const deltaX = e.clientX - dragStartX
-  const deltaY = e.clientY - dragStartY
-  
-  const newX = modalStartX + deltaX
-  const newY = modalStartY + deltaY
-  
-  coverModalPosition.value = {
-    left: `${newX}px`,
-    top: `${newY}px`,
-    transform: 'none'
+// 侧边栏"创建歌单"：创建后自动进入新歌单
+const handleCreatePlaylist = async () => {
+  const newPlaylist = await createPlaylist()
+  if (newPlaylist) {
+    openPlaylist(newPlaylist.id)
   }
 }
 
-// 停止拖动
-const stopDragCoverModal = () => {
-  isDraggingCoverModal = false
-  document.removeEventListener('mousemove', onDragCoverModal)
-  document.removeEventListener('mouseup', stopDragCoverModal)
-  logInfo('停止拖动封面模态框')
-}
+// 多选操作（勾选、Ctrl/点击行、批量播放/加歌单/删除由 useSongSelection 管理）
+const {
+  selectedSongIds,
+  isSelectionMode,
+  handleSongRowClick,
+  toggleSongSelection,
+  isSongSelected,
+  clearSelection,
+  addSelectedToPlaylist,
+  playSelectedSongs,
+  deleteSelectedSongs
+} = useSongSelection({
+  visibleSongs: filteredSongs,
+  playSong,
+  openAddToPlaylistMenu,
+  // 批量删除注入无确认版本：批删本身已有一次总确认，不再逐首弹框
+  deleteSong: removeSongFromLibrary,
+  logInfo,
+  logError
+})
 
-// 复制路径
-const copyPath = () => {
-  if (songToEdit.value?.path) {
-    navigator.clipboard.writeText(songToEdit.value.path)
-      .then(() => {
-        alert('路径已复制到剪贴板')
-      })
-      .catch(err => {
-        logError('复制失败:', err)
-        alert('复制失败，请手动复制')
-      })
-  }
-}
-
-// 从本地文件读取元数据
-const readLocalMetadata = async () => {
-  try {
-    if (!songToEdit.value?.path) return
-    
-    logInfo('【本地元数据】开始读取本地音频文件元数据')
-    logInfo('【本地元数据】文件路径:', songToEdit.value.path)
-    
-    // 使用music-metadata读取文件
-    const metadata = await mm.parseFile(songToEdit.value.path)
-    
-    logInfo('【本地元数据】读取成功，格式:', metadata.format.container)
-    logInfo('【本地元数据】音频编码:', metadata.format.codec)
-    logInfo('【本地元数据】时长:', metadata.format.duration?.toFixed(2), '秒')
-    
-    // 更新表单数据
-    if (metadata.common.title && !editTagsForm.value.title) {
-      editTagsForm.value.title = metadata.common.title
-      logInfo('【本地元数据】更新标题:', metadata.common.title)
-    }
-    
-    if (metadata.common.artist && !editTagsForm.value.artist) {
-      editTagsForm.value.artist = metadata.common.artist
-      logInfo('【本地元数据】更新艺术家:', metadata.common.artist)
-    }
-    
-    if (metadata.common.album && !editTagsForm.value.album) {
-      editTagsForm.value.album = metadata.common.album
-      logInfo('【本地元数据】更新专辑:', metadata.common.album)
-    }
-    
-    if (metadata.common.year && !editTagsForm.value.year) {
-      editTagsForm.value.year = metadata.common.year.toString()
-      logInfo('【本地元数据】更新年份:', metadata.common.year)
-    }
-    
-    if (metadata.common.genre && metadata.common.genre.length > 0 && !editTagsForm.value.genre) {
-      editTagsForm.value.genre = metadata.common.genre.join(', ')
-      logInfo('【本地元数据】更新流派:', editTagsForm.value.genre)
-    }
-    
-    alert('从本地文件读取元数据成功')
-  } catch (error) {
-    logError('【本地元数据】读取失败:', error)
-    alert('读取本地元数据失败，请检查文件格式是否支持')
-  }
-}
-
-// 在线查找歌词
-const fetchLyric = async () => {
-  try {
-    if (!songToEdit.value) {
-      logInfo('【在线歌词】没有歌曲可编辑')
-      alert('没有歌曲可编辑')
-      return
-    }
-    
-    logInfo('【在线歌词】开始在线查找歌词')
-    
-    const title = editTagsForm.value.title || songToEdit.value.title
-    const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const album = editTagsForm.value.album || songToEdit.value.album
-    
-    if (!title || !artist) {
-      logInfo('【在线歌词】歌曲标题或艺术家为空')
-      alert('请先填写歌曲标题和艺术家信息')
-      return
-    }
-    
-    logInfo('【在线歌词】搜索:', { title, artist, album })
-    
-    // 使用多源歌词服务获取歌词
-    let result
-    try {
-      result = await multiSourceLyricService.getLyric({
-        id: songToEdit.value.id,
-        title,
-        artist,
-        album,
-        filePath: songToEdit.value.path
-      }, 'manual', true)
-    } catch (apiError) {
-      logError('【在线歌词】API调用失败:', apiError)
-      alert('网络请求失败，请检查网络连接')
-      return
-    }
-    
-    logInfo('【在线歌词】多源服务返回结果:', result)
-    
-    if (!result.success || !result.bestScore) {
-      logInfo('【在线歌词】未找到歌词')
-      alert('未找到歌词，请尝试修改搜索信息后重试')
-      return
-    }
-    
-    // 将歌词转换为LRC格式
-    let lrcContent = ''
-    if (result.bestScore.lyricLines && result.bestScore.lyricLines.length > 0) {
-      lrcContent = result.bestScore.lyricLines.map(line => {
-        // 适配不同的歌词行格式
-        const time = line.time !== undefined ? line.time : (line.startTime !== undefined ? line.startTime : 0)
-        let text = ''
-        if (line.text) {
-          text = line.text
-        } else if (line.words && Array.isArray(line.words)) {
-          text = line.words.map((w: any) => w.word).join('')
-        }
-        return `[${formatTime(time)}]${text}`
-      }).join('\n')
-    } else if (result.bestScore.lyricText) {
-      // 如果有原始的lyricText，直接使用
-      lrcContent = result.bestScore.lyricText
-    }
-    
-    if (!lrcContent) {
-      logInfo('【在线歌词】歌词内容为空')
-      alert('找到歌词但内容为空，请尝试其他来源')
-      return
-    }
-    
-    editTagsForm.value.lyric = lrcContent
-    
-    logInfo('【在线歌词】获取成功，来源:', result.bestSource, '歌词行数:', result.bestScore.lyricLines?.length || 0)
-    
-    alert('获取歌词成功')
-  } catch (error) {
-    logError('【在线歌词】获取歌词失败:', error)
-    alert('获取歌词失败，请检查网络连接后重试')
-  }
-}
-
-// 获取封面
-const fetchCover = async () => {
-  try {
-    if (!songToEdit.value) {
-      logInfo('【在线封面】没有歌曲可编辑')
-      alert('没有歌曲可编辑')
-      return
-    }
-    
-    logInfo('【在线封面】开始在线查找封面')
-    
-    const title = editTagsForm.value.title || songToEdit.value.title
-    const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`.trim()
-    
-    if (!keyword) {
-      logInfo('【在线封面】关键词为空')
-      alert('请先填写歌曲标题和艺术家信息')
-      return
-    }
-    
-    logInfo('【在线封面】搜索关键词:', keyword)
-    
-    // 使用新的音乐数据服务获取封面
-    let result
-    try {
-      result = await musicDataService.getSongInfoWithLyric(keyword)
-    } catch (apiError) {
-      logError('【在线封面】API调用失败:', apiError)
-      alert('网络请求失败，请检查网络连接')
-      return
-    }
-    
-    logInfo('【在线封面】API返回结果:', result)
-    
-    if (!result || !result.song) {
-      logInfo('【在线封面】未找到匹配的歌曲')
-      alert('未找到匹配的歌曲，请修改歌曲信息后重试')
-      return
-    }
-    
-    if (!result.song.coverUrl) {
-      logInfo('【在线封面】找到歌曲但没有封面')
-      alert('找到歌曲但未找到封面')
-      return
-    }
-    
-    logInfo('【在线封面】获取封面成功:', result.song.coverUrl)
-    
-    // 下载封面并转换为Base64
-    try {
-      const coverBase64 = await musicDataService.getCoverAsBase64(result.song.coverUrl)
-      
-      if (coverBase64) {
-        editTagsForm.value.cover = coverBase64
-        logInfo('【在线封面】封面已转换为Base64，长度:', coverBase64.length)
-      } else {
-        editTagsForm.value.cover = result.song.coverUrl
-        logInfo('【在线封面】使用原始封面URL')
-      }
-    } catch (coverError) {
-      logError('【在线封面】下载封面失败:', coverError)
-      // 即使下载失败，也尝试使用URL
-      editTagsForm.value.cover = result.song.coverUrl
-      logInfo('【在线封面】使用原始封面URL作为备选')
-    }
-    
-    // 保存动态封面URL
-    if (result.song.dynamicCoverUrl) {
-      songToEdit.value.dynamicCoverUrl = result.song.dynamicCoverUrl
-      logInfo('【在线封面】获取动态封面成功:', result.song.dynamicCoverUrl)
-    }
-    
-    alert('获取封面成功')
-  } catch (error) {
-    logError('【在线封面】获取封面失败:', error)
-    alert('获取封面失败，请检查网络连接后重试')
-  }
-}
-
-// 格式化时间为 LRC 格式
-const formatTimeForLrc = (ms: number): string => {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  const centiseconds = Math.floor((ms % 1000) / 10)
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`
-}
-
-// 打开在线匹配对话框
-const openOnlineMatch = () => {
-  if (!songToEdit.value) return
-  showOnlineMatchModal.value = true
-}
-
-// 处理在线匹配结果
-const handleOnlineMatchApply = (data: { 
-  title?: string
-  artist?: string
-  album?: string
-  lyric?: string
-  coverUrl?: string
-}) => {
-  if (!songToEdit.value) return
-  
-  if (data.title) editTagsForm.value.title = data.title
-  if (data.artist) editTagsForm.value.artist = data.artist
-  if (data.album) editTagsForm.value.album = data.album
-  if (data.lyric) {
-    try {
-      const lyricData = JSON.parse(data.lyric)
-      if (lyricData.lrcData && Array.isArray(lyricData.lrcData)) {
-        const lrcLines = lyricData.lrcData.map((line: any) => {
-          const time = formatTimeForLrc(line.startTime)
-          const text = line.words?.map((w: any) => w.word).join('') || ''
-          return `[${time}]${text}`
-        }).join('\n')
-        editTagsForm.value.lyric = lrcLines
-      } else {
-        editTagsForm.value.lyric = data.lyric
-      }
-    } catch {
-      editTagsForm.value.lyric = data.lyric
-    }
-  }
-  if (data.coverUrl) {
-    editTagsForm.value.cover = data.coverUrl
-  }
-  
-  showOnlineMatchModal.value = false
-}
-
-// 自动匹配标签
-const autoMatchTags = async () => {
-  try {
-    if (!songToEdit.value) {
-      logInfo('【自动匹配】没有歌曲可编辑')
-      alert('没有歌曲可编辑')
-      return
-    }
-    
-    logInfo('【自动匹配】开始自动匹配标签')
-    
-    const title = editTagsForm.value.title || songToEdit.value.title
-    const artist = editTagsForm.value.artist || songToEdit.value.artist
-    const keyword = `${title} ${artist}`.trim()
-    
-    if (!keyword) {
-      logInfo('【自动匹配】关键词为空')
-      alert('请先填写歌曲标题和艺术家信息')
-      return
-    }
-    
-    logInfo('【自动匹配】搜索关键词:', keyword)
-    
-    // 使用新的音乐数据服务获取歌曲信息
-    let result
-    try {
-      result = await musicDataService.getSongInfoWithLyric(keyword)
-    } catch (apiError) {
-      logError('【自动匹配】API调用失败:', apiError)
-      alert('网络请求失败，请检查网络连接')
-      return
-    }
-    
-    logInfo('【自动匹配】API返回结果:', result)
-    
-    if (!result || !result.song) {
-      logInfo('【自动匹配】未找到匹配的歌曲')
-      alert('未找到匹配的歌曲，请修改歌曲信息后重试')
-      return
-    }
-    
-    logInfo('【自动匹配】找到歌曲:', result.song.title, '-', result.song.artist)
-    
-    let matchedCount = 0
-    
-    // 更新元数据
-    if (result.song.title && !editTagsForm.value.title) {
-      editTagsForm.value.title = result.song.title
-      matchedCount++
-      logInfo('【自动匹配】更新标题:', result.song.title)
-    }
-    
-    if (result.song.artist && !editTagsForm.value.artist) {
-      editTagsForm.value.artist = result.song.artist
-      matchedCount++
-      logInfo('【自动匹配】更新艺术家:', result.song.artist)
-    }
-    
-    if (result.song.album && !editTagsForm.value.album) {
-      editTagsForm.value.album = result.song.album
-      matchedCount++
-      logInfo('【自动匹配】更新专辑:', result.song.album)
-    }
-    
-    // 获取封面
-    if (result.song.coverUrl && !editTagsForm.value.cover) {
-      try {
-        // 下载封面并转换为Base64
-        const coverBase64 = await musicDataService.getCoverAsBase64(result.song.coverUrl)
-        if (coverBase64) {
-          editTagsForm.value.cover = coverBase64
-          matchedCount++
-          logInfo('【自动匹配】更新封面成功')
-        }
-      } catch (coverError) {
-        logError('【自动匹配】下载封面失败:', coverError)
-      }
-    }
-    
-    // 保存动态封面URL
-    if (result.song.dynamicCoverUrl) {
-      songToEdit.value.dynamicCoverUrl = result.song.dynamicCoverUrl
-      logInfo('【自动匹配】获取动态封面:', result.song.dynamicCoverUrl)
-    }
-    
-    // 获取歌词
-    const lyricData = result.lyricData
-    if (lyricData && (lyricData.lrcData.length > 0 || lyricData.yrcData.length > 0) && !editTagsForm.value.lyric) {
-      try {
-        const lyricLines = lyricData.lrcData.length > 0 ? lyricData.lrcData : lyricData.yrcData
-        
-        // 转换为LRC格式
-        const lrcContent = lyricLines.map(line => {
-          const text = line.words.map(w => w.word).join('')
-          return `[${formatTime(line.startTime)}]${text}`
-        }).join('\n')
-        
-        editTagsForm.value.lyric = lrcContent
-        matchedCount++
-        logInfo('【自动匹配】更新歌词，行数:', lyricLines.length)
-      } catch (lyricError) {
-        logError('【自动匹配】处理歌词失败:', lyricError)
-      }
-    }
-    
-    logInfo('【自动匹配】自动匹配完成，共匹配', matchedCount, '项')
-    
-    if (matchedCount > 0) {
-      alert(`自动匹配完成，共匹配 ${matchedCount} 项`)
-    } else {
-      alert('已找到歌曲，但没有新的信息可以匹配（可能已有完整信息）')
-    }
-  } catch (error) {
-    logError('【自动匹配】自动匹配失败:', error)
-    alert('自动匹配失败，请检查网络连接后重试')
-  }
-}
-
-// 更换封面
-const changeCover = async () => {
-  try {
-    // 这里可以实现文件选择功能
-    // 由于是Tauri应用，可以使用dialog插件
-    const { open } = await import('@tauri-apps/plugin-dialog')
-    const { readFile } = await import('@tauri-apps/plugin-fs')
-    
-    const selected = await open({
-      multiple: false,
-      filters: [
-        {
-          name: 'Image files',
-          extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp']
-        }
-      ]
-    })
-    
-    logInfo('选择的文件:', selected)
-    
-    // 处理返回值（可能是字符串或数组）
-    let filePath: string | null = null
-    if (typeof selected === 'string') {
-      filePath = selected
-    } else if (Array.isArray(selected) && (selected as any[]).length > 0) {
-      filePath = (selected as any[])[0]
-    }
-    
-    if (filePath) {
-      logInfo('读取文件:', filePath)
-      // 读取文件并转换为base64
-      const content = await readFile(filePath)
-      logInfo('文件内容长度:', content.length)
-      // 使用更安全的方式转换为base64，避免栈溢出
-      const bytes = new Uint8Array(content)
-      let binary = ''
-      const len = bytes.byteLength
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i])
-      }
-      const base64 = btoa(binary)
-      // 根据文件扩展名确定 MIME 类型
-      const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
-      const mimeType = ext === 'png' ? 'image/png' : 
-                      ext === 'gif' ? 'image/gif' :
-                      ext === 'bmp' ? 'image/bmp' : 'image/jpeg'
-      editTagsForm.value.cover = `data:${mimeType};base64,${base64}`
-      logInfo('封面已设置，长度:', editTagsForm.value.cover.length)
-    } else {
-      logInfo('未选择文件')
-    }
-  } catch (error) {
-    logError('选择封面失败:', error)
-    alert('选择封面失败，请重试')
-  }
-}
-
-// 保存歌曲标签
-const saveSongTags = async () => {
-  if (!songToEdit.value) return
-  
-  try {
-    // 验证歌词内容
-    if (editTagsForm.value.lyric && editTagsForm.value.lyric.length > 100000) {
-      alert('歌词内容过长，请精简后重试')
-      return
-    }
-    
-    // 更新歌曲信息
-    const updatedSong: Song = {
-      ...songToEdit.value,
-      ...editTagsForm.value
-    } as Song
-    
-    // 找到并更新歌曲列表中的歌曲
-    const index = songs.value.findIndex(s => s.id === songToEdit.value?.id)
-    if (index !== -1) {
-      songs.value[index] = updatedSong as Song
-    }
-    
-    // 如果是当前播放的歌曲，也更新当前歌曲信息
-    if (currentSong.value?.id === songToEdit.value?.id) {
-      currentSong.value = updatedSong as Song
-    }
-    
-    // 保存到本地存储（确保类型兼容）
-    const songsToSave = songs.value.map(song => ({
-      ...song,
-      startTime: song.startTime ? String(song.startTime) : undefined,
-      endTime: song.endTime ? String(song.endTime) : undefined
-    })) as import('./stores/local').Song[]
-    await localStorageService.saveSongs(songsToSave)
-    
-    alert('标签编辑成功')
-    closeEditTagsModal()
-  } catch (error) {
-    logError('保存标签失败:', error)
-    // 提供更详细的错误信息
-    if (error instanceof Error) {
-      alert(`保存标签失败: ${error.message}\n请检查歌词内容是否过大或包含特殊字符`)
-    } else {
-      alert('保存标签失败，请重试')
-    }
-  }
-}
-
-const toggleFavorite = async (song: Song) => {
-  try {
-    const newStatus = !song.isFavorite
-    song.isFavorite = newStatus
-
-    if (newStatus) {
-      await localStorageService.addToFavorites(song.id)
-    } else {
-      await localStorageService.removeFromFavorites(song.id)
-    }
-
-    // 更新收藏列表
-    favorites.value = await localStorageService.getFavorites()
-  } catch (error) {
-    logError('更新收藏状态失败:', error)
-    // 回滚状态
-    song.isFavorite = !song.isFavorite
-    alert('收藏操作失败,请重试')
-  }
-}
-
-const addSongToPlaylist = async (song: Song) => {
-  const playlistList = await localStorageService.getPlaylists()
-  if (playlistList.length === 0) {
-    alert('请先创建歌单')
-    closeSongMenu()
-    return
-  }
-  
-  let options = playlistList.map((p, index) => `${index + 1}. ${p.name}`).join('\n')
-  const choice = prompt(`选择歌单:\n${options}\n\n请输入序号:`)
-  
-  if (choice) {
-    const index = parseInt(choice) - 1
-    if (index >= 0 && index < playlistList.length) {
-      const playlist = playlistList[index]
-      if (!playlist.songs.includes(song.id)) {
-        playlist.songs.push(song.id)
-        await localStorageService.updatePlaylist(playlist.id, { songs: playlist.songs })
-        alert(`已添加到歌单 "${playlist.name}"`)
-      } else {
-        alert(`歌曲已在歌单 "${playlist.name}" 中`)
-      }
-    }
-  }
-  
-  closeSongMenu()
-}
-
-const deleteSong = (song: Song) => {
-  if (confirm('确定要删除这首歌吗？')) {
-    const index = songs.value.findIndex(s => s.id === song.id)
-    if (index !== -1) {
-      songs.value.splice(index, 1)
-    }
-  }
-  closeSongMenu()
-}
-
-const createPlaylist = async () => {
-  const name = prompt('请输入歌单名称:')
-  if (name && name.trim()) {
-    try {
-      await localStorageService.createPlaylist(name.trim())
-      playlists.value = await localStorageService.getPlaylists()
-      alert(`歌单 "${name}" 创建成功`)
-    } catch (error) {
-      logError('创建歌单失败:', error)
-      alert('创建歌单失败')
-    }
-  }
-}
-
-const formatTime = (seconds: number): string => {
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.floor(seconds % 60)
-  return `${mins}:${secs.toString().padStart(2, '0')}`
-}
+// formatTime 已移至 utils/format.ts；toSimpleLyricLines 已移至 utils/lyrics.ts
 
 // 解析歌词
 const parseLyrics = (lyricContent: string): LyricLine[] => {
@@ -5540,11 +4623,7 @@ const parseLyrics = (lyricContent: string): LyricLine[] => {
     const parsed = parseSmartLrc(lyricContent)
     logInfo('歌词解析完成，格式:', parsed.format, '行数:', parsed.lines.length)
     
-    // 转换为现有的LyricLine格式
-    return parsed.lines.map(line => ({
-      time: line.startTime / 1000, // 转换为秒
-      text: line.words.map(w => w.word).join('')
-    }))
+    return toSimpleLyricLines(parsed.lines)
   } catch (error) {
     logError('歌词解析失败，使用简单解析:', error)
     
@@ -5625,36 +4704,11 @@ const syncLyrics = () => {
   }
 }
 
-const minimizeWindow = async () => {
-  try {
-    if (!isBrowser.value) {
-      await invoke('minimize_window')
-    }
-  } catch (error) {
-    logError('最小化窗口失败:', error)
-  }
-}
-
-const toggleMaximizeWindow = async () => {
-  try {
-    if (!isBrowser.value) {
-      await invoke('toggle_maximize_window')
-    }
-  } catch (error) {
-    logError('切换最大化状态失败:', error)
-  }
-}
-
-const closeWindow = async () => {
-  try {
-    // 隐藏窗口到托盘，而不是退出应用
-    const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    const currentWindow = getCurrentWindow()
-    await currentWindow.hide()
-  } catch (error) {
-    logError('隐藏窗口失败:', error)
-  }
-}
+// 标题栏窗口控制（由 useWindowControls composable 管理）
+const { minimizeWindow, toggleMaximizeWindow, closeWindow } = useWindowControls({
+  isBrowser,
+  logError
+})
 
 // 预转码标志，防止重复预转码
 let hasPretranscodedNextSong = false
@@ -6152,6 +5206,12 @@ watch(language, async (newLanguage) => {
   }
 })
 
+// 检查更新回调（由 Settings 触发，携带后端返回的更新信息）
+const handleCheckUpdate = (info: any, version: string) => {
+  showSettingsModal.value = false
+  openUpdateModal(info, version)
+}
+
 // 浏览音乐目录（仅浏览器）
 const browseMusicDirectory = () => {
   if (isBrowser.value) {
@@ -6262,6 +5322,10 @@ onUnmounted(() => {
     seekDebounceTimer = null
     logInfo('前端 seek 防抖定时器已清理')
   }
+  if (seekCompleteTimer) {
+    clearTimeout(seekCompleteTimer)
+    seekCompleteTimer = null
+  }
   
   // 4. 清理播放定时器
   if (playbackTimerId) {
@@ -6281,10 +5345,7 @@ onUnmounted(() => {
   }
   
   // 6. 清理全局 document 事件监听器
-  // 移除可能残留的全局事件监听器
-  document.removeEventListener('click', closeSongMenu)
-  document.removeEventListener('mousemove', onDragCoverModal)
-  document.removeEventListener('mouseup', stopDragCoverModal)
+  // 右键菜单与封面模态框的 document 监听由各自 composable 的 onUnmounted 自行清理
   
   // 7. 移除滚动事件监听器
   if (songListContainer.value) {
@@ -6300,3453 +5361,4 @@ onUnmounted(() => {
 })
 </script>
 
-<style scoped>
-/* 加载页面样式 */
-.loading-page {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: #1a1a1a;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  z-index: 9999;
-}
-
-.loading-spinner {
-  width: 60px;
-  height: 60px;
-  border: 5px solid rgba(255, 255, 255, 0.3);
-  border-radius: 50%;
-  border-top-color: #5cb85c;
-  animation: spin 1s ease-in-out infinite;
-  margin-bottom: 20px;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.loading-page h2 {
-  color: #ffffff;
-  font-size: 18px;
-  font-weight: 500;
-}
-
-/* 全局样式 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body, html {
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden !important;
-  background-color: #1a1a1a;
-}
-
-.tplayer-container {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100vh;
-  max-width: 100%;
-  max-height: 100vh;
-  overflow: hidden;
-  background-color: #1a1a1a;
-  color: #ffffff;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  border: none;
-  outline: none;
-  --text-primary: #ffffff;
-  --text-secondary: #cccccc;
-  --bg-secondary: #2a2a2a;
-  --bg-hover: rgba(255, 255, 255, 0.15);
-  --border-color: rgba(255, 255, 255, 0.2);
-  --btn-secondary-bg: rgba(255, 255, 255, 0.1);
-  --btn-secondary-hover: rgba(255, 255, 255, 0.15);
-
-  /* 按钮主题颜色 */
-  --btn-primary: #5cb85c;
-  --btn-primary-hover: #4aa34a;
-  --btn-secondary: #3a3a3a;
-  --btn-secondary-hover-light: #4a4a4a;
-  --btn-danger: #d9534f;
-  --btn-danger-hover: #c9302c;
-  --btn-success: #5cb85c;
-  --btn-success-hover: #4aa34a;
-  --btn-info: #5bc0de;
-  --btn-info-hover: #46b8da;
-}
-
-.tplayer-container.light {
-  --text-primary: #333333;
-  --text-secondary: #666666;
-  --bg-secondary: #ffffff;
-  --bg-hover: #e0e0e0;
-  --border-color: rgba(0, 0, 0, 0.2);
-  --btn-secondary-bg: #e0e0e0;
-  --btn-secondary-hover: #d0d0d0;
-
-  /* 按钮主题颜色 - 浅色 */
-  --btn-primary: #5cb85c;
-  --btn-primary-hover: #4aa34a;
-  --btn-secondary: #e0e0e0;
-  --btn-secondary-hover-light: #d0d0d0;
-  --btn-danger: #d9534f;
-  --btn-danger-hover: #c9302c;
-  --btn-success: #5cb85c;
-  --btn-success-hover: #4aa34a;
-  --btn-info: #5cb85c;
-  --btn-info-hover: #4aa34a;
-}
-
-/* 顶部信息栏 */
-.top-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 20px;
-  background-color: #2a2a2a;
-  border-bottom: 1px solid #3a3a3a;
-  /* Tauri 窗口拖动区域属性 */
-  -webkit-app-region: drag;
-  app-region: drag;
-}
-
-.app-logo {
-  /* Tauri 窗口拖动排除区域属性 */
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.window-controls {
-  /* Tauri 窗口拖动排除区域属性 */
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-  display: flex;
-  gap: 10px;
-}
-
-.app-logo h1 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: bold;
-  color: var(--btn-success);
-}
-
-.logo-image {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  object-fit: cover;
-}
-
-.window-controls {
-  display: flex;
-  gap: 10px;
-}
-
-.control-btn {
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: 6px;
-  background-color: transparent;
-  color: var(--text-primary, #ffffff);
-  font-size: 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-}
-
-.control-btn:hover {
-  background-color: var(--bg-hover);
-  transform: translateY(-1px);
-}
-
-.control-btn.close:hover {
-  background-color: var(--btn-danger);
-  transform: translateY(-1px);
-}
-
-.tplayer-container.light .control-btn.close:hover {
-  background-color: #ff4757;
-}
-
-/* 主内容区 */
-.main-content {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-  min-height: 0; /* 确保flex子元素可以正确收缩 */
-}
-
-/* 左侧边栏 */
-.sidebar {
-  width: 250px;
-  min-width: 60px;
-  max-width: 350px;
-  background-color: #2a2a2a;
-  border-right: 1px solid #3a3a3a;
-  transition: width 0.3s ease;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  flex-shrink: 0; /* 防止边栏被压缩 */
-}
-
-.sidebar.collapsed {
-  width: 60px;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  padding: 20px;
-  border-bottom: 1px solid #3a3a3a;
-}
-
-.toggle-btn {
-  background: none;
-  border: none;
-  color: var(--text-primary, #ffffff);
-  font-size: 16px;
-  cursor: pointer;
-  margin-right: 10px;
-  padding: 6px;
-  border-radius: 6px;
-  transition: all 0.2s ease;
-}
-
-.toggle-btn:hover {
-  background-color: var(--bg-hover);
-  transform: translateY(-1px);
-}
-
-.sidebar-header h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 500;
-  transition: opacity 0.3s ease;
-}
-
-.sidebar.collapsed .sidebar-header h2 {
-  opacity: 0;
-  width: 0;
-  overflow: hidden;
-}
-
-.sidebar-nav {
-  flex: 1;
-  padding: 20px 0;
-  overflow-y: auto;
-  /* 隐藏滚动条但保留滚动功能 */
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* IE and Edge */
-}
-
-/* 隐藏滚动条但保留滚动功能 for Chrome, Safari and Opera */
-.sidebar-nav::-webkit-scrollbar {
-  display: none;
-}
-
-.sidebar-nav ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  padding: 10px 20px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.nav-item:hover {
-  background-color: rgba(255, 255, 255, 0.1);
-}
-
-.nav-item.active {
-  background-color: rgba(92, 184, 92, 0.2);
-  border-left: 3px solid var(--btn-success);
-}
-
-.nav-icon {
-  font-size: 18px;
-  margin-right: 10px;
-}
-
-.nav-text {
-  transition: opacity 0.3s ease;
-}
-
-.sidebar.collapsed .nav-text {
-  opacity: 0;
-  width: 0;
-  overflow: hidden;
-}
-
-.sidebar-footer {
-  padding: 20px;
-  border-top: 1px solid #3a3a3a;
-}
-
-/* ========== 统一按钮样式系统 ========== */
-
-.btn {
-  padding: 10px 16px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s ease;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  user-select: none;
-}
-
-.btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-}
-
-.btn:active {
-  transform: translateY(0);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none !important;
-  box-shadow: none !important;
-}
-
-/* 主要按钮 (绿色主题) */
-.btn.primary {
-  background-color: var(--btn-primary);
-  color: #ffffff;
-}
-
-.btn.primary:hover {
-  background-color: var(--btn-primary-hover);
-}
-
-/* 次要按钮 */
-.btn.secondary {
-  background-color: var(--btn-secondary-bg);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-}
-
-.btn.secondary:hover {
-  background-color: var(--btn-secondary-hover);
-}
-
-/* 危险按钮 (红色) */
-.btn.danger {
-  background-color: var(--btn-danger);
-  color: #ffffff;
-}
-
-.btn.danger:hover {
-  background-color: var(--btn-danger-hover);
-}
-
-/* 成功按钮 */
-.btn.success {
-  background-color: var(--btn-success);
-  color: #ffffff;
-}
-
-.btn.success:hover {
-  background-color: var(--btn-success-hover);
-}
-
-/* 信息按钮 */
-.btn.info {
-  background-color: var(--btn-info);
-  color: #ffffff;
-}
-
-.btn.info:hover {
-  background-color: var(--btn-info-hover);
-}
-
-/* 右侧内容区 */
-.content-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 20px;
-  min-width: 0; /* 确保flex子元素可以正确收缩 */
-  overflow: hidden;
-  transition: margin-left 0.3s ease;
-  max-width: 100%;
-}
-
-/* 隐藏滚动条但保留滚动功能 for Chrome, Safari and Opera */
-.content-area::-webkit-scrollbar {
-  display: none;
-}
-
-.sidebar-collapsed .content-area {
-  margin-left: -190px;
-}
-
-/* 过滤控制区 */
-/* 选择工具栏样式 */
-.selection-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 12px;
-  margin-bottom: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: all 0.3s ease;
-}
-
-.selection-toolbar.selection-mode-active {
-  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
-  border-color: rgba(76, 175, 80, 0.2);
-}
-
-.selection-toolbar.has-selection {
-  background: linear-gradient(135deg, rgba(76, 175, 80, 0.25) 0%, rgba(76, 175, 80, 0.1) 100%);
-  border-color: rgba(76, 175, 80, 0.4);
-  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.15);
-}
-
-.selection-toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.select-all-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.select-all-checkbox input[type="checkbox"] {
-  width: 20px;
-  height: 20px;
-  cursor: pointer;
-  accent-color: #4CAF50;
-  border-radius: 4px;
-}
-
-.checkbox-label {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary, #ffffff);
-}
-
-.selection-count {
-  font-size: 13px;
-  color: #4CAF50;
-  font-weight: 600;
-  padding: 4px 12px;
-  background: rgba(76, 175, 80, 0.2);
-  border-radius: 20px;
-}
-
-.selection-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.selection-action-btn,
-.selection-mode-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-primary, #ffffff);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-}
-
-.selection-action-btn:hover,
-.selection-mode-btn:hover {
-  background: rgba(76, 175, 80, 0.2);
-  border-color: rgba(76, 175, 80, 0.4);
-  transform: translateY(-1px);
-}
-
-.selection-action-btn.danger:hover {
-  background: rgba(244, 67, 54, 0.2);
-  border-color: rgba(244, 67, 54, 0.4);
-}
-
-.selection-action-btn .btn-icon,
-.selection-mode-btn .btn-icon {
-  font-size: 14px;
-}
-
-.selection-action-btn .btn-text,
-.selection-mode-btn .btn-text {
-  white-space: nowrap;
-}
-
-/* 歌曲行选中样式 */
-.song-row.selected {
-  background: rgba(76, 175, 80, 0.15) !important;
-}
-
-/* 复选框列样式 */
-.col-checkbox {
-  width: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.col-checkbox input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-  accent-color: #4CAF50;
-  border-radius: 4px;
-}
-
-/* 浅色主题适配 */
-.tplayer-container.light .selection-toolbar {
-  background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(76, 175, 80, 0.03) 100%);
-  border-color: rgba(76, 175, 80, 0.2);
-}
-
-.tplayer-container.light .selection-toolbar.has-selection {
-  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
-}
-
-.tplayer-container.light .selection-action-btn,
-.tplayer-container.light .selection-mode-btn {
-  background: rgba(0, 0, 0, 0.05);
-  border-color: rgba(0, 0, 0, 0.1);
-}
-
-.tplayer-container.light .selection-action-btn:hover,
-.tplayer-container.light .selection-mode-btn:hover {
-  background: rgba(76, 175, 80, 0.15);
-}
-
-.tplayer-container.light .song-row.selected {
-  background: rgba(76, 175, 80, 0.1) !important;
-}
-
-.filter-controls {
-  margin-bottom: 20px;
-}
-
-.filter-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 15px;
-  padding: 16px;
-  background-color: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.filter-header-left {
-  flex: 0 0 auto;
-  min-width: 200px;
-}
-
-.filter-header-center {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 0 20px;
-  min-width: 300px;
-}
-
-.filter-header-right {
-  flex: 0 0 auto;
-  min-width: 120px;
-  display: flex;
-  justify-content: flex-end;
-}
-
-.filter-header h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 500;
-}
-
-.playlist-info {
-  font-size: 12px;
-  color: #888;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.current-lyric-display {
-  padding: 4px 12px;
-  background-color: rgba(92, 184, 92, 0.1);
-  border-radius: 16px;
-  border: 1px solid rgba(92, 184, 92, 0.3);
-  max-width: 400px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: center;
-}
-
-.current-lyric {
-  color: #5cb85c;
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.no-lyric {
-  color: #888;
-  font-size: 14px;
-}
-
-.filter-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.search-box {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.search-box input {
-  width: 100%;
-  padding: 10px 40px 10px 15px;
-  border: 1px solid #3a3a3a;
-  border-radius: 20px;
-  background-color: #2a2a2a;
-  color: #ffffff;
-  font-size: 14px;
-}
-
-.search-box input::placeholder {
-  color: #888;
-}
-
-.search-btn {
-  position: absolute;
-  right: 10px;
-  background: none;
-  border: none;
-  color: #888;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 6px;
-  border-radius: 6px;
-  transition: all 0.2s ease;
-}
-
-.search-btn:hover {
-  background-color: var(--bg-hover);
-  color: var(--text-primary, #ffffff);
-  transform: translateY(-1px);
-}
-
-/* 歌曲列表 */
-.song-list-container {
-  flex: 1;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  min-height: 0; /* 确保flex子元素可以正确收缩 */
-  max-width: 100%;
-  position: relative; /* 为悬浮按钮提供定位上下文 */
-}
-
-/* 悬浮控制按钮 */
-.playlist-float-buttons {
-  position: absolute;
-  bottom: 20px;
-  right: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  z-index: 1000;
-}
-
-.float-button {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: var(--btn-success);
-  color: #ffffff;
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 12px rgba(92, 184, 92, 0.3);
-  transition: all 0.3s ease;
-  border: none;
-}
-
-.float-button:hover {
-  background: var(--btn-success-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(92, 184, 92, 0.4);
-}
-
-.float-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  background: var(--btn-secondary-bg);
-  color: var(--text-secondary);
-  box-shadow: none;
-}
-
-/* 操作按钮 */
-.action-btn {
-  background: none;
-  border: none;
-  color: var(--text-secondary, #888);
-  cursor: pointer;
-  font-size: 16px;
-  padding: 6px;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.action-btn:hover {
-  background-color: var(--bg-hover);
-  color: var(--text-primary, #ffffff);
-  transform: translateY(-1px);
-}
-
-.action-btn.favorite.active {
-  color: var(--btn-danger);
-}
-
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 300px;
-  color: #888;
-}
-
-.empty-icon {
-  font-size: 64px;
-  margin-bottom: 20px;
-}
-
-.empty-state p {
-  margin: 5px 0;
-}
-
-.empty-hint {
-  font-size: 14px;
-  color: #666;
-}
-
-.song-list {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto; /* 允许垂直滚动 */
-  overflow-x: hidden; /* 隐藏水平滚动条 */
-}
-
-.table-header {
-  flex-shrink: 0;
-}
-
-.songs-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.songs-table thead tr {
-  display: flex;
-  align-items: center;
-  padding: 12px 15px;
-  background-color: var(--bg-secondary, #2a2a2a);
-  border-bottom: 1px solid var(--border-color, #3a3a3a);
-}
-
-.songs-table th {
-  text-align: left;
-  font-weight: 500;
-  font-size: 14px;
-  color: var(--text-secondary, #888);
-  padding: 0;
-}
-
-.songs-table th.col-index {
-  width: 50px;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.songs-table th.col-title {
-  flex: 3;
-  min-width: 300px;
-  margin-right: 15px;
-  text-align: left;
-}
-
-.songs-table th.col-artist {
-  width: 150px;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.songs-table th.col-album {
-  width: 150px;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.songs-table th.col-duration {
-  width: 80px;
-  text-align: right;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.songs-table th.col-actions {
-  width: 50px;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.virtual-scroller, .song-list {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  /* 隐藏滚动条但保留滚动功能 */
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* IE and Edge */
-}
-
-/* 艺术家视图 - 双栏布局 */
-.artists-view {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
-.artists-sidebar {
-  width: 200px;
-  background-color: #252525;
-  border-right: 1px solid #3a3a3a;
-  overflow-y: auto;
-  padding: 10px;
-  flex-shrink: 0;
-}
-
-.artist-item {
-  padding: 12px 15px;
-  margin-bottom: 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  background-color: #333;
-}
-
-.artist-item:hover {
-  background-color: #3a3a3a;
-}
-
-.artist-item.active {
-  background-color: #4a4a4a;
-  border: 1px solid #666;
-}
-
-.artist-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #fff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.artist-count {
-  font-size: 12px;
-  color: #888;
-  margin-top: 4px;
-}
-
-.artists-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-/* 专辑视图 - 双栏布局 */
-.albums-view {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
-.albums-sidebar {
-  width: 200px;
-  background-color: #252525;
-  border-right: 1px solid #3a3a3a;
-  overflow-y: auto;
-  padding: 10px;
-  flex-shrink: 0;
-}
-
-.album-item {
-  padding: 12px 15px;
-  margin-bottom: 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  background-color: #333;
-}
-
-.album-item:hover {
-  background-color: #3a3a3a;
-}
-
-.album-item.active {
-  background-color: #4a4a4a;
-  border: 1px solid #666;
-}
-
-.album-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #fff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.album-artist {
-  font-size: 12px;
-  color: #aaa;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.album-count {
-  font-size: 12px;
-  color: #888;
-  margin-top: 4px;
-}
-
-/* CUE专辑视图样式已合并到普通专辑视图样式 */
-.cue-badge {
-  display: inline-block;
-  background-color: #5cb85c;
-  color: #fff;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  margin-top: 4px;
-}
-
-
-.nav-badge {
-  background-color: #5cb85c;
-  color: #fff;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  margin-left: auto;
-}
-
-.albums-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.empty-selection {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #888;
-  font-size: 16px;
-}
-
-/* 隐藏滚动条但保留滚动功能 for Chrome, Safari and Opera */
-.virtual-scroller::-webkit-scrollbar, .song-list::-webkit-scrollbar {
-  width: 0px;
-  height: 0px;
-  display: none;
-}
-
-.song-row {
-  display: flex;
-  align-items: center;
-  padding: 12px 15px;
-  border-bottom: 1px solid #3a3a3a;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.song-row:hover {
-  background-color: rgba(255, 255, 255, 0.05);
-}
-
-.song-row.active {
-  background-color: rgba(92, 184, 92, 0.1);
-}
-
-.col-index {
-  width: 50px;
-  text-align: center;
-  color: #888;
-  flex-shrink: 0;
-}
-
-.col-title {
-  flex: 3;
-  min-width: 300px;
-  margin-right: 15px;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.song-title {
-  font-weight: 500;
-  margin-bottom: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.song-info {
-  font-size: 12px;
-  color: #888;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.col-artist {
-  width: 150px;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.col-album {
-  width: 150px;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.col-duration {
-  width: 80px;
-  text-align: right;
-  color: #888;
-  flex-shrink: 0;
-  margin-right: 15px;
-}
-
-.col-actions {
-  width: 50px;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.action-btn {
-  background: none;
-  border: none;
-  color: var(--text-secondary, #888);
-  cursor: pointer;
-  font-size: 16px;
-  margin-left: 10px;
-  transition: color 0.2s;
-}
-
-.action-btn:hover {
-  color: var(--text-primary, #ffffff);
-}
-
-.action-btn.favorite {
-  background-color: var(--btn-secondary-bg, rgba(255, 255, 255, 0.1));
-  border-radius: 4px;
-  padding: 4px 8px;
-  margin-left: 0;
-}
-
-.action-btn.favorite:hover {
-  background-color: var(--btn-secondary-hover, rgba(255, 255, 255, 0.15));
-}
-
-.action-btn.favorite.active {
-  color: var(--btn-danger);
-}
-
-/* 均衡器面板 */
-.equalizer-panel {
-  position: fixed;
-  top: 0;
-  right: -400px;
-  width: 400px;
-  height: 100vh;
-  background-color: #2a2a2a;
-  border-left: 1px solid #3a3a3a;
-  transition: right 0.3s ease;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-}
-
-.equalizer-panel.visible {
-  right: 0;
-}
-
-.equalizer-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 20px;
-  border-bottom: 1px solid #3a3a3a;
-}
-
-.equalizer-header h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 500;
-}
-
-.equalizer-header .close-btn {
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  font-size: 20px;
-  cursor: pointer;
-}
-
-.equalizer-content {
-  flex: 1;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.presets select {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid #3a3a3a;
-  border-radius: 4px;
-  background-color: #1a1a1a;
-  color: #ffffff;
-  font-size: 14px;
-}
-
-.bands {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
-  justify-content: center;
-}
-
-.band {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.band label {
-  width: 60px;
-  font-size: 12px;
-  color: #888;
-}
-
-.band input[type="range"] {
-  flex: 1;
-  height: 4px;
-  background: #3a3a3a;
-  border-radius: 2px;
-  outline: none;
-  appearance: none;
-      -webkit-appearance: none;
-}
-
-.band input[type="range"]::-webkit-slider-thumb {
-  appearance: none;
-      -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.band input[type="range"]::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-  border: none;
-}
-
-.band span {
-  width: 50px;
-  font-size: 12px;
-  text-align: right;
-  color: #888;
-}
-
-/* 底部播放控制栏 */
-.player-controls {
-  background-color: #2a2a2a;
-  border-top: 1px solid #3a3a3a;
-  padding: 10px 20px;
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  transition: all 0.3s ease;
-  min-height: 140px;
-  height: auto;
-}
-
-.player-controls.expanded {
-  min-height: 180px;
-}
-
-.player-left {
-  width: 30%;
-  flex: 0 0 30%;
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  overflow: hidden;
-}
-
-.current-song {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-}
-
-.song-cover {
-  width: 120px;
-  height: 120px;
-  border-radius: 8px;
-  overflow: hidden;
-  background-color: #3a3a3a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: transform 0.3s ease;
-}
-
-.song-cover:hover {
-  transform: scale(1.05);
-}
-
-.song-cover img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-/* 动态封面样式 */
-.song-cover .dynamic-cover {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.cover-placeholder {
-  font-size: 24px;
-}
-
-.song-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-}
-
-.song-info h3 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #fff;
-  position: relative;
-}
-
-.song-info p {
-  margin: 0;
-  font-size: 14px;
-  color: #aaa;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  position: relative;
-}
-
-/* 自动滚屏动画 */
-.ellipsis-text {
-  display: inline-block;
-  animation: scroll 10s linear infinite;
-  white-space: nowrap;
-}
-
-@keyframes scroll {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-100%);
-  }
-}
-
-/* 为长文本添加滚动容器 */
-.song-info h3.long-text {
-  position: relative;
-  overflow: hidden;
-}
-
-.song-info p.long-text {
-  position: relative;
-  overflow: hidden;
-}
-
-/* 为滚动文本添加一些空间，确保滚动时不会完全消失 */
-.song-info h3.long-text .ellipsis-text {
-  padding-right: 100%;
-}
-
-.song-info p.long-text .ellipsis-text {
-  padding-right: 100%;
-}
-
-/* 当文本过长时显示滚动动画 */
-.song-info h3.long-text .ellipsis-text {
-  animation-play-state: running;
-}
-
-.song-info p.long-text .ellipsis-text {
-  animation-play-state: running;
-}
-
-/* 当文本不太长时不显示滚动动画 */
-.song-info h3:not(.long-text) .ellipsis-text {
-  animation: none;
-  transform: translateX(0);
-}
-
-.song-info p:not(.long-text) .ellipsis-text {
-  animation: none;
-  transform: translateX(0);
-}
-
-.no-song {
-  color: #666;
-}
-
-.player-center {
-  width: 40%;
-  flex: 0 0 40%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  overflow: hidden;
-  justify-content: center;
-  min-height: 120px;
-}
-
-.playback-controls {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-}
-
-/* 播放控制按钮 - 统一风格 */
-.playback-controls .control-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 6px;
-  background-color: var(--btn-secondary-bg, #f0f0f0);
-  color: var(--text-primary, #333333);
-  transition: all 0.2s ease;
-  border: 1px solid var(--border-color, #e0e0e0);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  user-select: none;
-  padding: 6px;
-}
-
-/* 控制按钮图标样式 */
-.control-icon {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.tplayer-container.light .playback-controls .control-btn {
-  background-color: #f0f0f0;
-  color: #333333;
-  border: 1px solid #e0e0e0;
-}
-
-.tplayer-container .playback-controls .control-btn {
-  background-color: rgba(255, 255, 255, 0.1);
-  color: #ffffff;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.playback-controls .control-btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-}
-
-.tplayer-container.light .playback-controls .control-btn:hover {
-  background-color: #e0e0e0;
-  border-color: #d0d0d0;
-}
-
-.tplayer-container .playback-controls .control-btn:hover {
-  background-color: rgba(255, 255, 255, 0.2);
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-.playback-controls .control-btn:active {
-  transform: translateY(0);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-/* 播放按钮特殊样式 - 绿色主题 */
-.playback-controls .control-btn.play {
-  width: 40px;
-  height: 40px;
-  font-size: 20px;
-  background-color: var(--btn-success);
-  color: #ffffff;
-  border: none;
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.3);
-}
-
-.playback-controls .control-btn.play:hover {
-  background-color: var(--btn-success-hover);
-  box-shadow: 0 4px 12px rgba(92, 184, 92, 0.4);
-}
-
-.playback-controls .control-btn.play:active {
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.3);
-}
-
-.progress-bar {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.progress-info {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  color: #888;
-}
-
-.progress-bar input[type="range"] {
-  width: 100%;
-  height: 4px;
-  background: #3a3a3a;
-  border-radius: 2px;
-  outline: none;
-  appearance: none;
-      -webkit-appearance: none;
-}
-
-.progress-bar input[type="range"]::-webkit-slider-thumb {
-  appearance: none;
-      -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.progress-bar input[type="range"]::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-  border: none;
-}
-
-.player-right {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 8px;
-  overflow: hidden;
-  min-width: 200px;
-}
-
-.player-right-top {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 15px;
-  width: 100%;
-}
-
-/* 下一首歌曲信息 */
-.next-song-info {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 8px 12px;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.next-song-label {
-  font-size: 10px;
-  color: #999;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 2px;
-}
-
-.next-song-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #ffffff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  line-height: 1.3;
-}
-
-.next-song-artist {
-  font-size: 10px;
-  color: #aaa;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  line-height: 1.2;
-}
-
-.skip-next-btn {
-  background-color: var(--btn-success);
-  color: #ffffff;
-  padding: 3px 8px;
-  font-size: 10px;
-  font-weight: 500;
-  margin-top: 4px;
-  border: none;
-  outline: none;
-}
-
-.skip-next-btn:hover {
-  background-color: var(--btn-success-hover);
-}
-
-.skip-next-btn:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-.volume-control {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 150px;
-}
-
-.crossfade-control {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #ffffff;
-}
-
-.crossfade-label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-}
-
-.crossfade-duration {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.crossfade-duration input[type="range"] {
-  width: 80px;
-  height: 4px;
-  background: #3a3a3a;
-  border-radius: 2px;
-  outline: none;
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.crossfade-duration input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.crossfade-duration input[type="range"]::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-  border: none;
-}
-
-.volume-control input[type="range"] {
-  flex: 1;
-  height: 4px;
-  background: #3a3a3a;
-  border-radius: 2px;
-  outline: none;
-  appearance: none;
-      -webkit-appearance: none;
-}
-
-.volume-control input[type="range"]::-webkit-slider-thumb {
-  appearance: none;
-      -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.volume-control input[type="range"]::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  background: #5cb85c;
-  border-radius: 50%;
-  cursor: pointer;
-  border: none;
-}
-
-/* 歌曲菜单 */
-.song-menu {
-  position: fixed;
-  background-color: var(--bg-secondary, #2a2a2a);
-  border: 1px solid var(--border-color, #3a3a3a);
-  border-radius: 4px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-  z-index: 1000;
-  min-width: 150px;
-}
-
-.song-menu ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.song-menu li {
-  padding: 10px 15px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  color: var(--text-primary, #ffffff);
-}
-
-.song-menu li:hover {
-  background-color: var(--bg-hover, rgba(255, 255, 255, 0.1));
-}
-
-.song-menu li.danger {
-  color: #ff4757;
-}
-
-.song-menu li.danger:hover {
-  background-color: rgba(255, 71, 87, 0.2);
-}
-
-/* 编辑歌曲标签模态框 */
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2000;
-}
-
-.modal-content {
-  background-color: #2a2a2a;
-  border: 1px solid #3a3a3a;
-  border-radius: 8px;
-  width: 400px;
-  max-width: 90%;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
-}
-
-.settings-modal {
-  width: 900px;
-  max-width: 95%;
-  max-height: 70vh;
-  overflow-y: auto;
-}
-
-.edit-tags-modal {
-  width: 800px;
-  max-width: 90%;
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-}
-
-/* CUE信息区域 */
-.cue-info-section {
-  margin-top: 20px;
-  padding: 15px;
-  background-color: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  border-left: 4px solid #5cb85c;
-}
-
-.cue-info-section h4 {
-  margin-top: 0;
-  color: #5cb85c;
-  font-size: 16px;
-  margin-bottom: 15px;
-}
-
-.cue-info-text {
-  margin-top: 15px;
-  padding: 10px;
-  background-color: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-  font-family: monospace;
-  font-size: 14px;
-  line-height: 1.4;
-  white-space: pre-wrap;
-}
-
-.cue-info-text pre {
-  margin: 0;
-  color: #f0f0f0;
-}
-
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid #3a3a3a;
-}
-
-.modal-header h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 500;
-}
-
-.modal-header .close-btn {
-  background: none;
-  border: none;
-  color: #ffffff;
-  font-size: 20px;
-  cursor: pointer;
-  padding: 0;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  transition: background-color 0.2s;
-}
-
-.modal-header .close-btn:hover {
-  background-color: #3a3a3a;
-}
-
-.modal-body {
-  padding: 12px;
-  flex: 1;
-  overflow-y: auto;
-}
-
-/* 设置窗口的特殊样式 */
-.settings-modal .modal-body {
-  max-height: calc(70vh - 80px);
-  overflow-y: auto;
-}
-
-/* 匹配区域 */
-.match-section {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background-color: rgba(74, 144, 226, 0.1);
-  border: 1px solid rgba(74, 144, 226, 0.3);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-}
-
-.match-btn {
-  background-color: var(--btn-success);
-  color: #ffffff;
-  border: none;
-  outline: none;
-}
-
-.match-btn:hover {
-  background-color: var(--btn-success-hover);
-}
-
-.match-btn:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-/* 标签页 */
-.tabs {
-  display: flex;
-  flex-direction: column;
-}
-
-.tab-buttons {
-  display: flex;
-  border-bottom: 1px solid #3a3a3a;
-  margin-bottom: 20px;
-}
-
-.tab-button {
-  padding: 10px 20px;
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-  border-bottom: 2px solid transparent;
-}
-
-.tab-button:hover {
-  color: var(--text-primary);
-}
-
-.tab-button.active {
-  color: var(--btn-success);
-  border-bottom-color: var(--btn-success);
-}
-
-.tab-content {
-  flex: 1;
-}
-
-/* 表单样式 */
-.form-row {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.form-row.three-col {
-  gap: 12px;
-}
-
-.form-row.three-col .form-group {
-  flex: 1;
-}
-
-.form-group {
-  flex: 1;
-  margin-bottom: 0;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 14px;
-  color: #cccccc;
-}
-
-.form-group input,
-.form-group textarea {
-  width: 100%;
-  padding: 8px 12px;
-  background-color: #1a1a1a;
-  border: 1px solid #3a3a3a;
-  border-radius: 4px;
-  color: #ffffff;
-  font-size: 14px;
-  transition: border-color 0.2s;
-}
-
-.form-group input:focus,
-.form-group textarea:focus {
-  outline: none;
-  border-color: #4a90e2;
-}
-
-.form-group textarea {
-  resize: vertical;
-  min-height: 200px;
-}
-
-.input-with-button {
-  display: flex;
-  gap: 8px;
-}
-
-.input-with-button input {
-  flex: 1;
-}
-
-.copy-btn {
-  padding: 6px 12px;
-  background-color: var(--btn-secondary-bg);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-  white-space: nowrap;
-}
-
-.copy-btn:hover {
-  background-color: var(--btn-secondary-hover);
-}
-
-/* 歌词操作 */
-.lyric-actions {
-  margin-top: 12px;
-  display: flex;
-  gap: 10px;
-}
-
-/* 歌词显示区域 */
-.lyrics-display {
-  width: 100%;
-  min-height: 60px;
-  max-height: 80px;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: rgba(0, 0, 0, 0.3);
-  border: none;
-  border-radius: 8px;
-  margin-top: 10px;
-  position: relative;
-  z-index: 100;
-  padding: 8px;
-}
-
-.lyrics-display.has-lyrics {
-  background-color: rgba(0, 0, 0, 0.2);
-  border: none;
-}
-
-.lyrics-placeholder {
-  color: #888;
-  font-size: 14px;
-  text-align: center;
-  padding: 10px;
-}
-
-.lyrics-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 0;
-  overflow-y: auto;
-  max-height: 100%;
-}
-
-.lyric-line {
-  font-size: 14px;
-  color: #ccc;
-  text-align: center;
-  transition: all 0.3s ease;
-  opacity: 0.7;
-  padding: 3px 10px;
-  word-wrap: break-word;
-  max-width: 100%;
-  line-height: 1.4;
-}
-
-.lyric-line.active {
-  font-size: 16px;
-  color: #5cb85c;
-  font-weight: bold;
-  opacity: 1;
-  transform: scale(1.08);
-  text-shadow: 0 0 8px rgba(92, 184, 92, 0.5);
-}
-
-/* 淡色主题 */
-.tplayer-container.light {
-  background-color: #f8f9fa;
-  color: #333333;
-}
-
-.tplayer-container.light body,
-.tplayer-container.light html {
-  background-color: #f8f9fa;
-}
-
-.tplayer-container.light .top-bar {
-  background-color: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.tplayer-container.light .app-logo h1 {
-  color: #5cb85c;
-}
-
-.tplayer-container.light .control-btn {
-  color: #333333;
-}
-
-.tplayer-container.light .control-btn:hover {
-  background-color: rgba(0, 0, 0, 0.08);
-}
-
-.tplayer-container.light .sidebar {
-  background-color: #ffffff;
-  border-right: 1px solid #e0e0e0;
-  box-shadow: 1px 0 3px rgba(0, 0, 0, 0.05);
-}
-
-.tplayer-container.light .sidebar-header {
-  border-bottom: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .nav-item:hover {
-  background-color: rgba(0, 0, 0, 0.08);
-}
-
-.tplayer-container.light .nav-item.active {
-  background-color: rgba(92, 184, 92, 0.15);
-  border-left: 3px solid #5cb85c;
-  font-weight: 500;
-}
-
-.tplayer-container.light .sidebar-footer {
-  border-top: 1px solid #e0e0e0;
-}
-
-/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
-
-.tplayer-container.light .content-area {
-  background-color: #f8f9fa;
-}
-
-.tplayer-container.light .search-box input {
-  border: 1px solid #e0e0e0;
-  background-color: #ffffff;
-  color: #333333;
-}
-
-.tplayer-container.light .search-box input:focus {
-  border-color: #5cb85c;
-  outline: none;
-}
-
-.tplayer-container.light .search-box input::placeholder {
-  color: #999999;
-}
-
-.tplayer-container.light .search-btn {
-  color: #999999;
-  transition: color 0.2s ease;
-}
-
-.tplayer-container.light .search-btn:hover {
-  color: #5cb85c;
-}
-
-.tplayer-container.light .songs-table {
-  background-color: var(--bg-secondary);
-}
-
-.tplayer-container.light .songs-table th {
-  background-color: #f8f9fa;
-  border-bottom: 2px solid #e0e0e0;
-  color: #666666;
-}
-
-.tplayer-container.light .song-row {
-  border-bottom: 1px solid #f0f0f0;
-  padding: 12px 15px;
-}
-
-.tplayer-container.light .song-row:hover {
-  background-color: rgba(0, 0, 0, 0.03);
-}
-
-.tplayer-container.light .song-row.active {
-  background-color: rgba(92, 184, 92, 0.12);
-  border-left: 3px solid #5cb85c;
-}
-
-.tplayer-container.light .col-index,
-.tplayer-container.light .col-duration {
-  color: #999999;
-}
-
-.tplayer-container.light .song-info {
-  color: #666666;
-}
-
-.tplayer-container.light .action-btn {
-  color: #999999;
-}
-
-.tplayer-container.light .action-btn:hover {
-  color: #333333;
-  background-color: rgba(0, 0, 0, 0.05);
-}
-
-.tplayer-container.light .player-controls {
-  background-color: #ffffff;
-  border-top: 1px solid #e0e0e0;
-  padding: 10px 20px;
-}
-
-.tplayer-container.light .lyrics-display {
-  background-color: rgba(255, 255, 255, 0.8);
-  border: none;
-}
-
-.tplayer-container.light .lyrics-display.has-lyrics {
-  background-color: rgba(255, 255, 255, 0.9);
-  border: none;
-}
-
-.tplayer-container.light .lyrics-placeholder {
-  color: #999;
-  font-style: italic;
-}
-
-.tplayer-container.light .lyric-line {
-  color: #555;
-  opacity: 0.8;
-}
-
-.tplayer-container.light .lyric-line.active {
-  color: #2e7d32;
-  font-size: 16px;
-  font-weight: 500;
-  opacity: 1;
-}
-
-.tplayer-container.light .progress-info span {
-  color: #666666;
-  font-size: 12px;
-}
-
-.tplayer-container.light .progress-bar input[type="range"] {
-  background: #e0e0e0;
-  height: 6px;
-  border-radius: 3px;
-}
-
-.tplayer-container.light .progress-bar input[type="range"]::-webkit-slider-thumb {
-  background: #5cb85c;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .progress-bar input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .progress-bar input[type="range"]::-moz-range-thumb {
-  background: #5cb85c;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-  border: none;
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .progress-bar input[type="range"]::-moz-range-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .volume-control input[type="range"] {
-  background: #e0e0e0;
-  height: 4px;
-  border-radius: 2px;
-}
-
-.tplayer-container.light .volume-control input[type="range"]::-webkit-slider-thumb {
-  background: #5cb85c;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .volume-control input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .volume-control input[type="range"]::-moz-range-thumb {
-  background: #5cb85c;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  border: none;
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .volume-control input[type="range"]::-moz-range-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .equalizer-panel {
-  background-color: #ffffff;
-  border-left: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .equalizer-header {
-  border-bottom: 1px solid #e0e0e0;
-  background-color: #f8f9fa;
-  padding: 20px;
-}
-
-.tplayer-container.light .equalizer-header .close-btn {
-  color: #333333;
-}
-
-.tplayer-container.light .equalizer-header .close-btn:hover {
-  background-color: rgba(0, 0, 0, 0.05);
-}
-
-.tplayer-container.light .presets select {
-  border: 1px solid #e0e0e0;
-  background-color: #ffffff;
-  color: #333333;
-}
-
-.tplayer-container.light .presets select:focus {
-  border-color: #5cb85c;
-  outline: none;
-}
-
-.tplayer-container.light .band input[type="range"] {
-  background: #e0e0e0;
-  height: 4px;
-  border-radius: 2px;
-}
-
-.tplayer-container.light .band input[type="range"]::-webkit-slider-thumb {
-  background: #5cb85c;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .band input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .band input[type="range"]::-moz-range-thumb {
-  background: #5cb85c;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  border: none;
-  transition: all 0.2s ease;
-}
-
-.tplayer-container.light .band input[type="range"]::-moz-range-thumb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 2px 6px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .band span {
-  color: #666666;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.tplayer-container.light .lyric-line {
-  color: #666666;
-}
-
-.tplayer-container.light .lyric-line.active {
-  color: #333333;
-  font-weight: 500;
-}
-
-.tplayer-container.light .modal-content {
-  background-color: #ffffff;
-  color: #333333;
-  border: none;
-}
-
-.tplayer-container.light .modal-header {
-  border-bottom: 1px solid #e0e0e0;
-  background-color: #f8f9fa;
-  padding: 12px 16px;
-}
-
-.tplayer-container.light .form-group label {
-  color: #666666;
-  font-weight: 500;
-  margin-bottom: 8px;
-  display: block;
-}
-
-.tplayer-container.light .form-group input,
-.tplayer-container.light .form-group select,
-.tplayer-container.light .form-group textarea {
-  border: 1px solid #e0e0e0;
-  background-color: #ffffff;
-  color: #333333;
-}
-
-.tplayer-container.light .form-group input:focus,
-.tplayer-container.light .form-group select:focus,
-.tplayer-container.light .form-group textarea:focus {
-  border-color: #5cb85c;
-  outline: none;
-}
-
-.tplayer-container.light .form-group input::placeholder,
-.tplayer-container.light .form-group textarea::placeholder {
-  color: #999999;
-}
-
-.tplayer-container.light .form-actions button {
-  background-color: #e0e0e0;
-  color: #333333;
-  border: none;
-  cursor: pointer;
-}
-
-.tplayer-container.light .form-actions button:hover {
-  background-color: #d0d0d0;
-}
-
-.tplayer-container.light .form-actions button.primary {
-  background-color: #5cb85c;
-  color: #ffffff;
-  box-shadow: 0 2px 4px rgba(92, 184, 92, 0.3);
-}
-
-.tplayer-container.light .form-actions button.primary:hover {
-  background-color: #45a049;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(92, 184, 92, 0.4);
-}
-
-.tplayer-container.light .lyric-actions button {
-  border: 1px solid #e0e0e0;
-  background: #f8f9fa;
-  color: #333333;
-  border-radius: 8px;
-  padding: 8px 16px;
-  transition: all 0.2s ease;
-  margin-right: 8px;
-  font-weight: 500;
-}
-
-.tplayer-container.light .lyric-actions button:hover {
-  background: #e0e0e0;
-}
-
-/* 艺术家视图 - 浅色主题 */
-.tplayer-container.light .artists-sidebar {
-  background-color: #f8f9fa;
-  border-right: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .artist-item {
-  background-color: #ffffff;
-  border: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .artist-item:hover {
-  background-color: #f8f9fa;
-}
-
-.tplayer-container.light .artist-item.active {
-  background-color: #e8f5e9;
-  border: 2px solid #5cb85c;
-}
-
-.tplayer-container.light .artist-name {
-  color: #333333;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.tplayer-container.light .artist-count {
-  color: #666666;
-  font-size: 14px;
-}
-
-/* 专辑视图 - 浅色主题 */
-.tplayer-container.light .albums-sidebar {
-  background-color: #f8f9fa;
-  border-right: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .album-item {
-  background-color: #ffffff;
-  border: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .album-item:hover {
-  background-color: #f8f9fa;
-}
-
-.tplayer-container.light .album-item.active {
-  background-color: #e8f5e9;
-  border: 2px solid #5cb85c;
-}
-
-.tplayer-container.light .album-name {
-  color: #333333;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.tplayer-container.light .album-artist {
-  color: #666666;
-  font-size: 14px;
-  margin-bottom: 2px;
-}
-
-.tplayer-container.light .album-count {
-  color: #666666;
-  font-size: 14px;
-  font-style: italic;
-}
-
-.tplayer-container.light .empty-selection {
-  color: #666666;
-}
-
-/* 其他浅色主题样式 */
-.tplayer-container.light .toggle-btn {
-  color: #333333;
-}
-
-.tplayer-container.light .toggle-btn:hover {
-  background-color: rgba(0, 0, 0, 0.05);
-}
-
-.tplayer-container.light .nav-text {
-  color: #333333;
-  font-weight: 400;
-}
-
-.tplayer-container.light .empty-icon {
-  color: #999999;
-  font-size: 48px;
-  margin-bottom: 16px;
-}
-
-.tplayer-container.light .empty-hint {
-  color: #666666;
-  font-size: 16px;
-  text-align: center;
-  padding: 32px;
-}
-
-.tplayer-container.light .filter-header {
-  background-color: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-}
-
-.tplayer-container.light .filter-header h2 {
-  color: #333333;
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0;
-}
-
-.tplayer-container.light .song-title {
-  color: #333333;
-  font-weight: 500;
-  margin-bottom: 4px;
-}
-
-.tplayer-container.light .col-title {
-  color: #333333;
-  font-weight: 500;
-}
-
-.tplayer-container.light .col-artist {
-  color: #666666;
-}
-
-.tplayer-container.light .col-album {
-  color: #666666;
-}
-
-.tplayer-container.light .col-duration {
-  color: #666666;
-}
-
-.tplayer-container.light .action-btn {
-  color: #666666;
-}
-
-.tplayer-container.light .action-btn:hover {
-  color: #333333;
-}
-
-.tplayer-container.light .action-btn.active {
-  color: #e91e63;
-  font-weight: 500;
-}
-
-.tplayer-container.light .song-info {
-  color: #666666;
-}
-
-.tplayer-container.light .song-cover {
-  background-color: #f8f9fa;
-}
-
-.tplayer-container.light .cover-placeholder {
-  color: #999999;
-  font-size: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  background-color: #f0f0f0;
-}
-
-.tplayer-container.light .song-info h3 {
-  color: #333333;
-  font-size: 16px;
-  font-weight: 600;
-  margin: 0 0 8px 0;
-}
-
-.tplayer-container.light .song-info p {
-  color: #666666;
-  font-size: 14px;
-  margin: 0 0 4px 0;
-}
-
-/* 浅色主题播放控制按钮样式已在前面统一定义 */
-
-/* 浅色主题 - 下一首歌曲信息 */
-.tplayer-container.light .player-right {
-  align-items: stretch;
-}
-
-.tplayer-container.light .next-song-info {
-  background-color: rgba(0, 0, 0, 0.05);
-  border: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .next-song-label {
-  color: #666666;
-}
-
-.tplayer-container.light .next-song-title {
-  color: #333333;
-}
-
-.tplayer-container.light .next-song-artist {
-  color: #666666;
-}
-
-/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
-
-.tplayer-container.light .modal-header .close-btn {
-  color: var(--text-secondary);
-}
-
-.tplayer-container.light .modal-header .close-btn:hover {
-  color: var(--text-primary);
-  background-color: var(--bg-hover);
-}
-
-/* 浅色主题 - 标签页 */
-.tplayer-container.light .tab-buttons {
-  border-bottom: 1px solid #e0e0e0;
-}
-
-/* 浅色主题标签页会自动使用 CSS 变量，无需额外定义 */
-
-/* 浅色主题 - 表单 */
-.tplayer-container.light .form-group label {
-  color: #333333;
-}
-
-.tplayer-container.light .form-group input,
-.tplayer-container.light .form-group textarea {
-  background-color: #ffffff;
-  border: 1px solid #e0e0e0;
-  color: #333333;
-}
-
-.tplayer-container.light .form-group input:focus,
-.tplayer-container.light .form-group textarea:focus {
-  border-color: #5cb85c;
-  outline: none;
-}
-
-/* 浅色主题 - 匹配区域 */
-.tplayer-container.light .match-section {
-  background-color: rgba(92, 184, 92, 0.1);
-  border: 1px solid rgba(92, 184, 92, 0.3);
-}
-
-/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
-
-/* 浅色主题 - 按钮 */
-/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
-
-/* 浅色主题 - 封面预览 */
-.tplayer-container.light .cover-preview {
-  background-color: #f8f9fa;
-  border: 1px solid #e0e0e0;
-}
-
-.tplayer-container.light .cover-placeholder {
-  color: #999999;
-}
-
-/* 浅色主题 - 模态框底部 */
-.tplayer-container.light .modal-footer {
-  border-top: 1px solid #e0e0e0;
-}
-
-/* 浅色主题 - 播放器左侧 */
-.tplayer-container.light .player-left {
-  background-color: transparent;
-}
-
-/* 浅色主题 - 当前歌曲信息 */
-.tplayer-container.light .current-song .song-title {
-  color: #333333;
-}
-
-.tplayer-container.light .current-song .song-artist {
-  color: #666666;
-}
-
-/* 浅色主题 - 歌曲信息 */
-.tplayer-container.light .song-info .song-title {
-  color: #333333;
-}
-
-.tplayer-container.light .song-info .song-artist {
-  color: #666666;
-}
-
-/* 浅色主题 - 歌曲封面 */
-.tplayer-container.light .song-cover {
-  background-color: #f8f9fa;
-  border: 1px solid #e0e0e0;
-}
-
-/* 浅色主题 - 操作按钮 */
-.tplayer-container.light .action-btn {
-  color: var(--text-secondary);
-}
-
-.tplayer-container.light .action-btn:hover {
-  color: var(--text-primary);
-}
-
-.tplayer-container.light .action-btn.favorite {
-  color: var(--text-secondary);
-}
-
-.tplayer-container.light .action-btn.favorite:hover {
-  color: var(--text-primary);
-}
-
-.tplayer-container.light .action-btn.favorite.active {
-  color: var(--btn-danger);
-}
-
-/* 浅色主题 - 表头 */
-.tplayer-container.light .songs-table thead tr {
-  background-color: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
-}
-
-.tplayer-container.light .songs-table th {
-  color: var(--text-secondary);
-}
-
-/* 浅色主题 - 均衡器 */
-.tplayer-container.light .equalizer-header h3 {
-  color: #333333;
-}
-
-/* 浅色主题 - 播放列表信息 */
-.tplayer-container.light .playlist-info {
-  color: #666666;
-}
-
-/* 浅色主题 - 歌词状态 */
-.tplayer-container.light .lyric-status {
-  background-color: #e0e0e0;
-  color: #666666;
-}
-
-.tplayer-container.light .lyric-status.has-lyrics {
-  background-color: #5cb85c;
-  color: #ffffff;
-}
-
-/* 浅色主题 - 当前歌词显示 */
-.tplayer-container.light .current-lyric-display {
-  background-color: rgba(92, 184, 92, 0.1);
-  border: 1px solid rgba(92, 184, 92, 0.3);
-}
-
-.tplayer-container.light .current-lyric {
-  color: #5cb85c;
-}
-
-.tplayer-container.light .no-lyric {
-  color: #666666;
-}
-
-/* 浅色主题 - 侧边栏标题 */
-.tplayer-container.light .sidebar-header h2 {
-  color: #333333;
-}
-
-/* 浅色主题 - 设置模态框 */
-.tplayer-container.light .settings-modal .settings-section {
-  background-color: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-}
-
-.tplayer-container.light .settings-modal h3 {
-  color: var(--text-primary);
-  border-bottom: 2px solid rgba(92, 184, 92, 0.3);
-}
-
-.tplayer-container.light .settings-modal .setting-label {
-  color: var(--text-primary);
-}
-
-.tplayer-container.light .settings-modal .setting-value,
-.tplayer-container.light .settings-modal .setting-control span {
-  color: var(--text-secondary);
-}
-
-.tplayer-container.light .settings-modal .setting-item {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-}
-
-.tplayer-container.light .settings-modal .setting-control input[type="range"] {
-  background: #e0e0e0;
-}
-
-.tplayer-container.light .settings-modal .setting-control select {
-  background-color: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-}
-
-.tplayer-container.light .settings-modal .btn-secondary {
-  background-color: var(--btn-secondary-bg);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-}
-
-.tplayer-container.light .settings-modal .btn-secondary:hover {
-  background-color: var(--btn-secondary-hover);
-}
-
-.tplayer-container.light .settings-modal .settings-actions {
-  border-top: 1px solid rgba(0, 0, 0, 0.1);
-}
-
-/* 浅色主题 - 封面模态框 */
-.tplayer-container.light .cover-modal-content {
-  background-color: rgba(255, 255, 255, 0.95);
-}
-
-.tplayer-container.light .cover-modal-placeholder {
-  background: linear-gradient(135deg, #f0f0f0, #e0e0e0);
-  color: #999;
-}
-
-.tplayer-container.light .cover-modal-title {
-  color: #333;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.tplayer-container.light .cover-modal-artist {
-  color: #666;
-}
-
-.tplayer-container.light .cover-modal-album {
-  color: #999;
-}
-
-.tplayer-container.light .cover-lyric-line {
-  color: rgba(0, 0, 0, 0.4);
-}
-
-.tplayer-container.light .cover-lyric-line.active {
-  color: #000;
-  font-weight: 700;
-  text-shadow: 0 0 20px rgba(0, 0, 0, 0.2), 0 0 40px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.1);
-  transform: scale(1.05);
-}
-
-.tplayer-container.light .cover-modal-no-lyrics {
-  color: rgba(0, 0, 0, 0.5);
-}
-
-.tplayer-container.light .cover-modal-close {
-  background-color: rgba(0, 0, 0, 0.1);
-  color: #333;
-}
-
-.tplayer-container.light .cover-modal-close:hover {
-  background-color: rgba(0, 0, 0, 0.2);
-}
-
-.tplayer-container.light .cover-modal-header {
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.1), transparent);
-}
-
-.tplayer-container.light .cover-modal-drag-hint {
-  color: rgba(0, 0, 0, 0.5);
-}
-
-/* 浅色主题按钮会自动使用 CSS 变量，无需额外定义 */
-
-/* 封面部分 */
-.cover-section {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 20px;
-}
-
-.cover-preview {
-  width: 300px;
-  height: 300px;
-  border-radius: 8px;
-  overflow: hidden;
-  background-color: #1a1a1a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.cover-preview:hover {
-  transform: scale(1.02);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-}
-
-.cover-preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.cover-placeholder {
-  color: #888;
-  font-size: 14px;
-  text-align: center;
-  padding: 20px;
-}
-
-/* 封面模态框 */
-.cover-modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.9);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2000;
-  padding: 40px;
-}
-
-.cover-modal-content {
-  position: relative;
-  background-color: rgba(30, 30, 30, 0.95);
-  border-radius: 16px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-/* 窗口模式 */
-.cover-modal-content.windowed {
-  width: 100%;
-  max-width: 1200px;
-  height: 80vh;
-  position: fixed;
-}
-
-/* 全屏模式 */
-.cover-modal-content.fullscreen {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  width: 100vw;
-  height: 100vh;
-  border-radius: 0;
-  max-width: none;
-}
-
-/* 拖动标题栏 */
-.cover-modal-header {
-  position: relative;
-  z-index: 10;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.3), transparent);
-  cursor: move;
-  user-select: none;
-}
-
-.cover-modal-drag-hint {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.cover-modal-controls {
-  display: flex;
-  gap: 8px;
-}
-
-.cover-modal-btn {
-  width: 32px;
-  height: 32px;
-  border: none;
-  background-color: var(--btn-secondary-bg);
-  color: var(--text-primary);
-  font-size: 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-}
-
-.cover-modal-btn:hover {
-  background-color: var(--btn-secondary-hover);
-}
-
-/* 全屏模式下的调整 */
-.cover-modal-content.fullscreen .cover-modal-body {
-  padding: 60px 80px;
-}
-
-.cover-modal-content.fullscreen .cover-modal-image {
-  width: 500px;
-  height: 500px;
-}
-
-.cover-modal-content.fullscreen .cover-modal-lyrics {
-  font-size: 22px;
-}
-
-.cover-modal-content.fullscreen .cover-lyric-line {
-  font-size: 24px;
-  color: rgba(255, 255, 255, 0.35);
-}
-
-.cover-modal-content.fullscreen .cover-lyric-line.active {
-  font-size: 36px;
-  font-weight: 700;
-  color: #fff;
-  text-shadow: 0 0 30px rgba(255, 255, 255, 0.6), 0 0 60px rgba(255, 255, 255, 0.4), 0 2px 10px rgba(0, 0, 0, 0.5);
-  transform: scale(1.08);
-}
-
-.tplayer-container.light .cover-modal-content.fullscreen .cover-lyric-line {
-  color: rgba(0, 0, 0, 0.35);
-}
-
-.tplayer-container.light .cover-modal-content.fullscreen .cover-lyric-line.active {
-  color: #000;
-  text-shadow: 0 0 30px rgba(0, 0, 0, 0.3), 0 0 60px rgba(0, 0, 0, 0.2), 0 2px 10px rgba(0, 0, 0, 0.1);
-}
-
-.cover-modal-background {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-size: cover;
-  background-position: center;
-  filter: blur(60px) brightness(0.4);
-  z-index: 0;
-}
-
-.cover-modal-body {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex: 1;
-  padding: 40px;
-  gap: 60px;
-  overflow: hidden;
-}
-
-.cover-modal-left {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 30px;
-  flex-shrink: 0;
-}
-
-.cover-modal-image {
-  width: 400px;
-  height: 400px;
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-
-.cover-modal-image img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.cover-modal-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #2a2a2a, #1a1a1a);
-  color: #666;
-  font-size: 120px;
-}
-
-.cover-modal-info {
-  text-align: center;
-  color: #fff;
-}
-
-.cover-modal-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin: 0 0 12px 0;
-  color: #fff;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
-}
-
-.cover-modal-artist {
-  font-size: 18px;
-  margin: 0 0 8px 0;
-  color: rgba(255, 255, 255, 0.8);
-}
-
-.cover-modal-album {
-  font-size: 14px;
-  margin: 0;
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.cover-modal-right {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.cover-modal-lyrics {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-  padding-top: 40%;
-  padding-bottom: 40%;
-  text-align: center;
-  mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%);
-  scroll-behavior: smooth;
-}
-
-.cover-modal-lyrics::-webkit-scrollbar {
-  width: 4px;
-}
-
-.cover-modal-lyrics::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.cover-modal-lyrics::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 2px;
-}
-
-.cover-lyric-line {
-  font-size: 20px;
-  line-height: 2;
-  color: rgba(255, 255, 255, 0.4);
-  transition: all 0.3s ease;
-  padding: 8px 0;
-}
-
-.cover-lyric-line.active {
-  font-size: 28px;
-  font-weight: 700;
-  color: #fff;
-  text-shadow: 0 0 20px rgba(255, 255, 255, 0.5), 0 0 40px rgba(255, 255, 255, 0.3), 0 2px 8px rgba(0, 0, 0, 0.5);
-  transform: scale(1.05);
-}
-
-.cover-modal-no-lyrics {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.cover-modal-close {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  width: 40px;
-  height: 40px;
-  border: none;
-  background-color: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 20px;
-  border-radius: 50%;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-  z-index: 10;
-}
-
-.cover-modal-close:hover {
-  background-color: rgba(255, 255, 255, 0.2);
-  transform: scale(1.1);
-}
-
-.cover-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  padding: 16px;
-  border-top: 1px solid #3a3a3a;
-  gap: 10px;
-}
-
-/* 取消按钮 */
-.btn-cancel {
-  background-color: var(--btn-secondary-bg);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
-  outline: none;
-}
-
-.btn-cancel:hover {
-  background-color: var(--btn-secondary-hover);
-}
-
-.btn-cancel:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-/* 保存按钮 */
-.btn-save {
-  background-color: var(--btn-success);
-  color: #ffffff;
-  border: none;
-  outline: none;
-}
-
-.btn-save:hover {
-  background-color: var(--btn-success-hover);
-}
-
-.btn-save:focus {
-  outline: none;
-  box-shadow: none;
-}
-
-/* 启动画面 */
-.splash-screen {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 9999;
-  animation: fadeIn 0.5s ease-in-out;
-}
-
-.splash-content {
-  text-align: center;
-  color: white;
-  padding: 40px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  max-width: 400px;
-  width: 90%;
-  animation: slideUp 0.8s ease-out;
-}
-
-.splash-logo {
-  width: 100px;
-  height: 100px;
-  margin-bottom: 20px;
-  animation: pulse 2s infinite ease-in-out;
-}
-
-.splash-title {
-  font-size: 2.5rem;
-  font-weight: 700;
-  margin-bottom: 10px;
-  color: #ffffff;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-}
-
-.splash-slogan {
-  font-size: 1.2rem;
-  margin-bottom: 30px;
-  color: rgba(255, 255, 255, 0.8);
-  font-style: italic;
-}
-
-.splash-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 15px;
-}
-
-.loading-spinner {
-  width: 40px;
-  height: 40px;
-  border: 4px solid rgba(255, 255, 255, 0.3);
-  border-top: 4px solid #ffffff;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-.splash-loading span {
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 1rem;
-}
-
-/* 动画效果 */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes slideUp {
-  from {
-    opacity: 0;
-    transform: translateY(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes pulse {
-  0% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-
-@keyframes spin {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
-}
-
-/* 响应式设计 */
-@media (max-width: 768px) {
-  .splash-content {
-    padding: 30px;
-  }
-  
-  .splash-title {
-    font-size: 2rem;
-  }
-  
-  .splash-slogan {
-    font-size: 1rem;
-  }
-  
-  .splash-logo {
-    width: 80px;
-    height: 80px;
-  }
-}
-
-/* 滚动条样式 - 隐藏滚动条但保留滚动功能 */
-.tplayer-container ::-webkit-scrollbar,
-.tplayer-container ::-webkit-scrollbar-horizontal,
-.tplayer-container ::-webkit-scrollbar-vertical {
-  width: 0;
-  height: 0;
-  display: none;
-}
-
-.tplayer-container {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-/* 确保body和html不显示滚动条 */
-body, html {
-  overflow: hidden !important;
-}
-</style>
+<style scoped src="./App.css"></style>

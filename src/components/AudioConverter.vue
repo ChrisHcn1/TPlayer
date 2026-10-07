@@ -104,12 +104,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { t } from '../services/i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
-const props = defineProps<{
+defineProps<{
   visible: boolean
 }>()
 
@@ -117,7 +117,14 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const selectedFiles = ref<File[]>([])
+// 待转换文件：对话框选择带本机绝对路径（后端 ffmpeg 必需）；
+// 浏览器拖放的 File 对象拿不到路径，path 为空时转换前会被拦截
+interface ConverterFile {
+  name: string
+  path?: string
+}
+
+const selectedFiles = ref<ConverterFile[]>([])
 const selectedFormat = ref('mp3')
 const selectedQuality = ref('medium')
 const outputFolder = ref('')
@@ -169,9 +176,11 @@ const selectFiles = async () => {
 const handleDrop = (event: DragEvent) => {
   const files = event.dataTransfer?.files
   if (files) {
-    selectedFiles.value = Array.from(files).filter(f => 
-      /\.(mp3|flac|wav|aac|ogg|ape|dsd|dff|dsf|wma|m4a)$/i.test(f.name)
-    )
+    // WebView 拖放只能拿到 File 对象、没有本机路径，追加进列表；
+    // 真正转换依赖路径，缺少路径的文件会在开始转换时提示
+    selectedFiles.value = Array.from(files)
+      .filter(f => /\.(mp3|flac|wav|aac|ogg|ape|dsd|dff|dsf|wma|m4a)$/i.test(f.name))
+      .map(f => ({ name: f.name }))
   }
 }
 
@@ -242,6 +251,9 @@ const startConversion = async () => {
     currentFile.value = file.name
     
     try {
+      if (!file.path) {
+        throw new Error(`文件「${file.name}」缺少本机路径（拖放文件请改用“点击选择”），无法转换`)
+      }
       const settings = getQualitySettings(selectedFormat.value, selectedQuality.value)
       await invoke('convert_audio', {
         inputPath: file.path,

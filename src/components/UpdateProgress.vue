@@ -28,7 +28,7 @@
         </div>
         <h3>{{ statusText }}</h3>
       </div>
-      
+
       <div class="progress-bar-container">
         <div class="progress-bar">
           <div class="progress-fill" :style="{ width: progress + '%' }"></div>
@@ -39,7 +39,7 @@
           <span class="progress-size">{{ downloadedSize }} / {{ totalSize }}</span>
         </div>
       </div>
-      
+
       <div class="progress-details" v-if="currentStatus === 'downloading'">
         <div class="download-speed">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -55,18 +55,22 @@
           <span>{{ remainingTime }}</span>
         </div>
       </div>
-      
+
+      <div class="error-message" v-if="currentStatus === 'error'">
+        {{ errorMessage }}
+      </div>
+
       <div class="progress-actions">
-        <button 
-          v-if="currentStatus !== 'completed'" 
-          class="btn btn-secondary" 
+        <button
+          v-if="currentStatus !== 'completed'"
+          class="btn btn-secondary"
           @click="handleCancel"
         >
           {{ t('update.cancel') }}
         </button>
-        <button 
-          v-if="currentStatus === 'completed'" 
-          class="btn btn-primary" 
+        <button
+          v-if="currentStatus === 'completed'"
+          class="btn btn-primary"
           @click="handleRestart"
         >
           {{ t('update.restart') }}
@@ -78,16 +82,10 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { t } from '../services/i18n'
-
-interface UpdateInfo {
-  version: string
-  release_notes: string
-  download_url: string
-  sha256_hash: string
-  size: number
-  release_date: string
-}
+import type { UpdateInfo } from '../composables/useUpdater'
 
 const props = defineProps<{
   updateInfo: UpdateInfo | null
@@ -104,6 +102,7 @@ const downloadedBytes = ref(0)
 const totalBytes = ref(props.updateInfo?.size || 0)
 const downloadSpeed = ref('0 KB/s')
 const remainingTime = ref('--')
+const errorMessage = ref('')
 
 const statusText = computed(() => {
   switch (currentStatus.value) {
@@ -133,27 +132,16 @@ const formatSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-const handleProgress = (downloaded: number, total: number) => {
-  downloadedBytes.value = downloaded
-  totalBytes.value = total
-  progress.value = total > 0 ? Math.round((downloaded / total) * 100) : 0
-  
-  const now = Date.now()
-  const speed = calculateSpeed(downloaded, now)
-  downloadSpeed.value = speed
-  
-  if (speed !== '0 KB/s' && progress.value < 100) {
-    const remaining = total - downloaded
-    const speedBytes = parseSpeed(speed)
-    if (speedBytes > 0) {
-      const seconds = Math.ceil(remaining / speedBytes)
-      remainingTime.value = formatTime(seconds)
-    }
-  }
+const formatTime = (seconds: number): string => {
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
+// 下载速度计算
 let lastDownloaded = 0
 let lastTime = 0
+let speedTimer: number | null = null
 
 const calculateSpeed = (downloaded: number, now: number): string => {
   if (lastTime === 0) {
@@ -161,83 +149,116 @@ const calculateSpeed = (downloaded: number, now: number): string => {
     lastTime = now
     return '0 KB/s'
   }
-  
+
   const timeDiff = (now - lastTime) / 1000
   const bytesDiff = downloaded - lastDownloaded
-  
+
   if (timeDiff >= 1) {
     const speedBps = bytesDiff / timeDiff
     const speedKbps = speedBps / 1024
-    
+
     lastDownloaded = downloaded
     lastTime = now
-    
+
     if (speedKbps >= 1024) {
       return (speedKbps / 1024).toFixed(2) + ' MB/s'
     }
     return speedKbps.toFixed(2) + ' KB/s'
   }
-  
+
   return downloadSpeed.value
 }
 
 const parseSpeed = (speed: string): number => {
   const match = speed.match(/([\d.]+)\s*(KB|MB)/)
   if (!match) return 0
-  
+
   const value = parseFloat(match[1])
   const unit = match[2]
-  
+
   if (unit === 'MB') {
     return value * 1024 * 1024
   }
   return value * 1024
 }
 
-const formatTime = (seconds: number): string => {
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${mins}:${secs.toString().padStart(2, '0')}`
-}
+let unlistenProgress: UnlistenFn | null = null
+let cancelled = false
 
-const simulateProgress = async () => {
+const startRealUpdate = async () => {
   if (!props.updateInfo) return
-  
+
   try {
-    currentStatus.value = 'downloading'
-    progress.value = 0
-    
-    const steps = 100
-    const stepDuration = 300
-    
-    for (let i = 0; i <= steps; i++) {
-      await new Promise(resolve => setTimeout(resolve, stepDuration))
-      progress.value = i
-      downloadedBytes.value = Math.round((i / steps) * props.updateInfo!.size)
-      
-      const speed = (Math.random() * 10 + 5).toFixed(1) + ' MB/s'
+    // 监听后端下载进度事件
+    unlistenProgress = await listen<[number, number]>('update-progress', (event) => {
+      const [downloaded, total] = event.payload
+      downloadedBytes.value = downloaded
+      totalBytes.value = total
+      progress.value = total > 0 ? Math.round((downloaded / total) * 100) : 0
+
+      const now = Date.now()
+      const speed = calculateSpeed(downloaded, now)
       downloadSpeed.value = speed
-      
-      const remaining = Math.ceil(((100 - i) * stepDuration) / 1000)
-      remainingTime.value = formatTime(remaining)
-    }
-    
+
+      if (speed !== '0 KB/s' && progress.value < 100) {
+        const remaining = total - downloaded
+        const speedBytes = parseSpeed(speed)
+        if (speedBytes > 0) {
+          const seconds = Math.ceil(remaining / speedBytes)
+          remainingTime.value = formatTime(seconds)
+        }
+      }
+    })
+
+    // 启动速度刷新定时器（每秒更新一次剩余时间显示）
+    speedTimer = window.setInterval(() => {
+      if (currentStatus.value === 'downloading' && lastTime > 0) {
+        const now = Date.now()
+        calculateSpeed(downloadedBytes.value, now)
+      }
+    }, 1000)
+
+    // 1. 下载
+    currentStatus.value = 'downloading'
+    const filePath = await invoke<string>('download_update_command', {
+      updateInfo: props.updateInfo
+    })
+
+    if (cancelled) return
+
+    // 2. 校验
     currentStatus.value = 'verifying'
     progress.value = 100
-    
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    
+    const verified = await invoke<boolean>('verify_update_command', {
+      filePath: filePath,
+      expectedHash: props.updateInfo.sha256_hash
+    })
+
+    if (!verified) {
+      throw new Error('安装包校验失败，文件可能已损坏')
+    }
+
+    if (cancelled) return
+
+    // 3. 安装
     currentStatus.value = 'installing'
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    
+    await invoke('install_update_command', {
+      filePath: filePath
+    })
+
+    if (cancelled) return
+
+    // 4. 完成
     currentStatus.value = 'completed'
   } catch (error) {
     currentStatus.value = 'error'
-    console.error('Update failed:', error)
+    errorMessage.value = error instanceof Error ? error.message : String(error)
+    console.error('更新失败:', error)
   }
 }
 
 const handleCancel = () => {
+  cancelled = true
   emit('cancel')
 }
 
@@ -247,7 +268,17 @@ const handleRestart = () => {
 }
 
 onMounted(() => {
-  simulateProgress()
+  startRealUpdate()
+})
+
+onUnmounted(() => {
+  cancelled = true
+  if (unlistenProgress) {
+    unlistenProgress()
+  }
+  if (speedTimer) {
+    clearInterval(speedTimer)
+  }
 })
 </script>
 
@@ -404,6 +435,16 @@ onMounted(() => {
   width: 16px;
   height: 16px;
   color: #4CAF50;
+}
+
+.error-message {
+  color: #F44336;
+  font-size: 14px;
+  text-align: center;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: rgba(244, 67, 54, 0.1);
+  border-radius: 8px;
 }
 
 .progress-actions {

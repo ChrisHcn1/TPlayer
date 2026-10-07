@@ -79,6 +79,9 @@
     "selectAlbum": "请选择一个专辑",
     "selectCueAlbum": "请选择一个CUE专辑",
     "createPlaylist": "创建歌单",
+    "myPlaylists": "我的歌单",
+    "noPlaylists": "还没有歌单，点击下方新建",
+    "emptyPlaylistHint": "歌单还是空的，在歌曲上右键即可添加",
     "searchPlaceholder": "搜索歌曲、艺术家或专辑...",
     "titleHeader": "标题",
     "artistHeader": "艺术家",
@@ -119,7 +122,8 @@
     "addToFavorites": "添加到收藏",
     "removeFromFavorites": "取消收藏",
     "editTags": "编辑歌曲标签",
-    "delete": "删除"
+    "delete": "删除",
+    "newPlaylist": "新建歌单"
   },
   "modal": {
     "editTagsTitle": "编辑歌曲标签",

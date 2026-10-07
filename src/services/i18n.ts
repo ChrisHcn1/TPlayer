@@ -24,8 +24,24 @@ export const supportedLocales: Locale[] = [
   { code: 'de-DE', name: 'Deutsch' }
 ]
 
+// 翻译插值参数：模板中的 {name} 占位符会被替换为对应值
+export type TranslateParams = Record<string, string | number>
+
 // 翻译函数类型
-export type TranslateFunction = (key: string, fallback?: string) => string
+// 第二参数既可以是兜底文案（历史用法），也可以是插值参数对象
+export type TranslateFunction = (
+  key: string,
+  fallbackOrParams?: string | TranslateParams,
+  params?: TranslateParams
+) => string
+
+// 将文本中的 {name} 占位符替换为参数值
+function interpolate(text: string, params?: TranslateParams): string {
+  if (!params) return text
+  return text.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in params ? String(params[name]) : match
+  )
+}
 
 // 语言服务类
 class I18nService {
@@ -83,9 +99,17 @@ class I18nService {
   }
 
   // 翻译函数
-  t(key: string, fallback: string = key): string {
+  // 用法：t('a.b')、t('a.b', '兜底文案')、t('converter.title', { count: 3 })
+  t(
+    key: string,
+    fallbackOrParams: string | TranslateParams = key,
+    maybeParams?: TranslateParams
+  ): string {
+    const fallback = typeof fallbackOrParams === 'string' ? fallbackOrParams : key
+    const params = typeof fallbackOrParams === 'object' ? fallbackOrParams : maybeParams
+
     if (!this.initialized.value) {
-      return fallback
+      return interpolate(fallback, params)
     }
 
     // 解析嵌套键，如 'common.appName'
@@ -96,11 +120,12 @@ class I18nService {
       if (result && typeof result === 'object' && k in result) {
         result = result[k]
       } else {
-        return fallback
+        return interpolate(fallback, params)
       }
     }
 
-    return typeof result === 'string' ? result : fallback
+    const resolved = typeof result === 'string' ? result : fallback
+    return interpolate(resolved, params)
   }
 
   // 获取当前语言的响应式引用

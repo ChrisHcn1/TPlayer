@@ -365,34 +365,32 @@ fn parse_audio_file(path: &Path) -> Option<Song> {
         if !got_metadata || title.is_empty() || artist == "未知艺术家" || album == "未知专辑" {
             for tag in tagged_file.tags() {
                 // 标题:只有当当前标题是文件名时才覆盖
-                if tag.title().is_some() {
-                    let t = tag.title().unwrap();
+                if let Some(t) = tag.title() {
                     if !t.is_empty() && (title.is_empty() || title == path.file_name()?.to_str()?) {
                         title = t.to_string();
                     }
                 }
                 // 艺术家
-                if tag.artist().is_some() && artist == "未知艺术家" {
-                    let a = tag.artist().unwrap();
-                    if !a.is_empty() {
+                if let Some(a) = tag.artist() {
+                    if !a.is_empty() && artist == "未知艺术家" {
                         artist = a.to_string();
                     }
                 }
                 // 专辑
-                if tag.album().is_some() && album == "未知专辑" {
-                    let a = tag.album().unwrap();
-                    if !a.is_empty() {
+                if let Some(a) = tag.album() {
+                    if !a.is_empty() && album == "未知专辑" {
                         album = a.to_string();
                     }
                 }
                 // 年份
-                if tag.year().is_some() && year.is_empty() {
-                    year = tag.year().unwrap().to_string();
+                if let Some(y) = tag.year() {
+                    if year.is_empty() {
+                        year = y.to_string();
+                    }
                 }
                 // 流派
-                if tag.genre().is_some() && genre.is_empty() {
-                    let g = tag.genre().unwrap();
-                    if !g.is_empty() {
+                if let Some(g) = tag.genre() {
+                    if !g.is_empty() && genre.is_empty() {
                         genre = g.to_string();
                     }
                 }
@@ -1688,22 +1686,24 @@ pub async fn open_readme() -> Result<(), String> {
         #[cfg(windows)]
         {
             let mut cmd = Command::new("cmd");
-            cmd.args(["/c", "start", "", cwd_readme_path.to_str().unwrap()]);
-            
+            let cwd_str = cwd_readme_path.to_str().ok_or_else(|| format!("路径包含非UTF8字符: {:?}", cwd_readme_path))?;
+            cmd.args(["/c", "start", "", cwd_str]);
+
             // 设置进程创建标志
             // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口
             // CREATE_NEW_PROCESS_GROUP (0x00000200): 创建新进程组，解决MSIX沙箱环境限制
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000 | 0x00000200);
-            
+
             cmd.spawn()
                 .map_err(|e| format!("打开README.md文件失败: {}", e))?;
         }
-        
+
         #[cfg(not(windows))]
         {
+            let cwd_str = cwd_readme_path.to_str().ok_or_else(|| format!("路径包含非UTF8字符: {:?}", cwd_readme_path))?;
             Command::new("open")
-                .arg(cwd_readme_path.to_str().unwrap())
+                .arg(cwd_str)
                 .spawn()
                 .map_err(|e| format!("打开README.md文件失败: {}", e))?;
         }
@@ -1711,8 +1711,9 @@ pub async fn open_readme() -> Result<(), String> {
         // 打开README.md文件
         #[cfg(windows)]
         {
+            let readme_str = readme_path.to_str().ok_or_else(|| format!("路径包含非UTF8字符: {:?}", readme_path))?;
             let mut cmd = Command::new("cmd");
-            cmd.args(["/c", "start", "", readme_path.to_str().unwrap()]);
+            cmd.args(["/c", "start", "", readme_str]);
             
             // 设置进程创建标志
             // CREATE_NO_WINDOW (0x08000000): 隐藏控制台窗口

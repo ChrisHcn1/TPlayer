@@ -86,18 +86,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { t } from '../services/i18n'
 import UpdateProgress from './UpdateProgress.vue'
-
-interface UpdateInfo {
-  version: string
-  release_notes: string
-  download_url: string
-  sha256_hash: string
-  size: number
-  release_date: string
-}
+import type { UpdateInfo } from '../composables/useUpdater'
 
 const props = defineProps<{
   visible: boolean

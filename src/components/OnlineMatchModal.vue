@@ -155,12 +155,19 @@ function getSourceText(source: string): string {
 
 async function handleGetLyrics() {
   if (!selectedResult.value) return
-  
+
+  // AMLL 来源暂不支持歌词/封面接口，提前拦截避免传入非法 source
+  const source = selectedResult.value.source
+  if (source !== 'qq' && source !== 'netease') {
+    alert(t('modal.sourceNotSupported', '该来源暂不支持歌词获取'))
+    return
+  }
+
   gettingLyric.value = true
   try {
     lyricData.value = await onlineMusicService.getLyric(
       selectedResult.value.id,
-      selectedResult.value.source
+      source
     )
     
     // 预览第一句歌词
@@ -177,12 +184,18 @@ async function handleGetLyrics() {
 
 async function handleGetCover() {
   if (!selectedResult.value) return
-  
+
+  const source = selectedResult.value.source
+  if (source !== 'qq' && source !== 'netease') {
+    alert(t('modal.sourceNotSupported', '该来源暂不支持封面获取'))
+    return
+  }
+
   gettingCover.value = true
   try {
     const coverUrl = await onlineMusicService.getCover(
       selectedResult.value.id,
-      selectedResult.value.source,
+      source,
       'l'
     )
     
