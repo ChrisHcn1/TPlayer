@@ -46,22 +46,18 @@ enum SeekStrategy {
 }
 
 // Seek策略选择器
-fn decide_seek_strategy(current_pos: f64, target_pos: f64, is_playing: bool) -> SeekStrategy {
+fn decide_seek_strategy(current_pos: f64, target_pos: f64, _is_playing: bool) -> SeekStrategy {
     let diff = target_pos - current_pos;
     let abs_diff = if diff > 0.0 { diff } else { -diff };
-    
-    // 差值小于5秒，无需seek
-    if abs_diff < 5.0 {
+
+    // 差值小于0.5秒，无需seek（避免微小抖动触发进程重启）
+    if abs_diff < 0.5 {
         return SeekStrategy::NoSeek;
     }
-    
-    // 暂停状态或差值大于等于10秒，使用进程重启
-    if !is_playing || abs_diff >= 10.0 {
-        return SeekStrategy::ProcessRestartSeek;
-    }
-    
-    // 播放状态且差值在5-10秒之间，使用stdin方向键
-    SeekStrategy::StdinSeek
+
+    // 统一使用进程重启：FFplay在-nodisp模式下忽略stdin方向键（FFmpeg bug #9578），
+    // StdinSeek无效，所有实际seek都走ProcessRestartSeek
+    SeekStrategy::ProcessRestartSeek
 }
 
 // 用户自定义FFmpeg路径存储
@@ -1682,19 +1678,12 @@ fn start_window_monitor(process_id: u32, main_hwnd_opt: Option<isize>) {
             iteration += 1;
         }
 
-        // 退出前确保主窗口置顶
-        if main_hwnd != 0 {
-            let main_handle = HWND(main_hwnd as *mut _);
-            unsafe {
-                let _ = SetWindowPos(
-                    main_handle,
-                    HWND_TOPMOST,
-                    0, 0, 0, 0,
-                    SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
-        }
-
+        // 注：此处原有一段 SetWindowPos(HWND_TOPMOST) 重新置顶主窗口的代码，已移除。
+        // 原因：stop_ffplay 是同步命令，运行在 Tauri 主线程上；切歌时主线程在
+        // stop_window_monitor()->h.join() 中阻塞等待本线程退出，而本线程又在此处
+        // 同步调用 SetWindowPos 给主窗口发消息，主线程无法抽空处理消息 → 消息泵死锁
+        // → 程序未响应。初始置顶已在监控启动时完成（见上方 SetWindowPos），无需重复。
+        // 见 project_memory Lessons Learned 关于同步命令阻塞主线程的教训。
         println!("[窗口监控] 监控线程退出");
     });
 
@@ -1888,125 +1877,55 @@ pub fn stop_ffplay() -> Result<String, String> {
     Ok("FFplay已停止".to_string())
 }
 
-// 暂停FFplay播放（通过发送空格键）
+// 暂停FFplay播放（进程重启机制：FFplay在-nodisp模式下忽略stdin的p键，FFmpeg bug #9578）
+// 改为停止进程并保存位置，恢复时从保存位置重新启动
 #[tauri::command]
 pub fn pause_ffplay() -> Result<String, String> {
-    // 步骤1: 发送暂停命令（持有PROCESS锁，仅操作进程）
+    // 步骤1: 停止前先读取当前位置（stop_ffplay会重置position=0）
     let paused_position = {
-        let mut process = FFPLAY_PROCESS.lock().unwrap();
-        
-        if let Some(ref mut child) = *process {
-            // 向FFplay发送暂停命令（p键）
-            if let Some(ref mut stdin) = child.stdin {
-                use std::io::Write;
-                if let Err(e) = stdin.write_all(b"p") {
-                    println!("[FFplay] 发送暂停命令失败: {}", e);
-                    return Err(format!("发送暂停命令失败: {}", e));
-                }
-                if let Err(e) = stdin.flush() {
-                    println!("[FFplay] 刷新stdin失败: {}", e);
-                    return Err(format!("刷新stdin失败: {}", e));
-                }
-                println!("[FFplay] 已发送暂停命令");
-            }
-        } else {
-            return Err("FFplay未在播放".to_string());
-        }
-        
-        // 在释放PROCESS锁之前读取当前位置
         let status = FFPLAY_STATUS.lock().unwrap();
-        let pos = status.position;
-        pos
-    }; // 此处PROCESS锁已释放
+        status.position
+    };
 
-    // 步骤2: 更新状态（不持有PROCESS锁，避免死锁）
-    {
-        let mut status = FFPLAY_STATUS.lock().unwrap();
-        status.is_playing = false;
-    }
-    
-    // 步骤3: 清除起始时刻
-    {
-        let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-        *instant = None;
-    }
-    
-    // 步骤4: 保存暂停位置
+    // 步骤2: 保存暂停位置（在stop之前，避免被重置）
     {
         let mut paused_pos = PAUSED_POSITION.lock().unwrap();
         *paused_pos = Some(paused_position);
     }
-    
-    println!("[FFplay] 暂停播放，保存位置: {:.2}秒", paused_position);
-    Ok("FFplay已暂停".to_string())
+
+    // 步骤3: 停止FFplay进程（音频停止，position会被重置为0，但PAUSED_POSITION已保存）
+    stop_ffplay()?;
+
+    println!("[FFplay] 暂停播放（进程已停止），保存位置: {:.2}秒", paused_position);
+    Ok(format!("FFplay已暂停，位置: {:.2}秒", paused_position))
 }
 
-// 恢复FFplay播放
+// 恢复FFplay播放（进程重启机制：从保存的暂停位置重新启动FFplay）
+// FFplay在-nodisp模式下忽略stdin的p键，无法通过stdin恢复播放
 #[tauri::command]
-pub fn resume_ffplay() -> Result<String, String> {
-    // 步骤1: 读取暂停位置（独立锁获取，避免嵌套）
-    let paused_position = {
+pub async fn resume_ffplay(path: String, window: tauri::WebviewWindow) -> Result<String, String> {
+    // 步骤1: 读取暂停位置
+    let start_time = {
         let paused_pos = PAUSED_POSITION.lock().unwrap();
         *paused_pos
     };
-    
-    // 步骤2: 发送恢复命令（持有PROCESS锁，仅操作进程）
+
+    // 提取主窗口HWND，用于遮盖CLI窗口
+    #[cfg(windows)]
+    let main_hwnd = window.hwnd().map(|h| h.0 as isize).ok();
+    #[cfg(not(windows))]
+    let main_hwnd: Option<isize> = None;
+
+    // 步骤2: 从暂停位置重新启动FFplay（play_with_ffplay内部会先stop_ffplay再启动新进程）
+    let _ = play_with_ffplay(path, start_time, None, main_hwnd).await?;
+
+    // 步骤3: 清除暂停位置
     {
-        let mut process = FFPLAY_PROCESS.lock().unwrap();
-        
-        if let Some(ref mut child) = *process {
-            // 向FFplay发送恢复命令（p键）
-            if let Some(ref mut stdin) = child.stdin {
-                use std::io::Write;
-                if let Err(e) = stdin.write_all(b"p") {
-                    println!("[FFplay] 发送恢复命令失败: {}", e);
-                    return Err(format!("发送恢复命令失败: {}", e));
-                }
-                if let Err(e) = stdin.flush() {
-                    println!("[FFplay] 刷新stdin失败: {}", e);
-                    return Err(format!("刷新stdin失败: {}", e));
-                }
-                println!("[FFplay] 已发送恢复命令");
-            }
-        } else {
-            return Err("FFplay未在播放".to_string());
-        }
-    } // 此处PROCESS锁已释放
-    
-    // 步骤3: 更新状态（不持有PROCESS锁，避免死锁）
-    // 顺序：START_OFFSET → START_INSTANT → STATUS
-    if let Some(pos) = paused_position {
-        // 先更新 START_OFFSET
-        {
-            let mut offset = FFPLAY_START_OFFSET.lock().unwrap();
-            *offset = pos;
-        }
-        
-        // 重置起始时刻为当前时刻
-        {
-            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-            *instant = Some(std::time::Instant::now());
-        }
-        
-        // 更新播放状态
-        {
-            let mut status = FFPLAY_STATUS.lock().unwrap();
-            status.is_playing = true;
-            status.position = pos;
-        }
-    } else {
-        // 没有暂停位置，直接设置播放状态
-        {
-            let mut instant = FFPLAY_START_INSTANT.lock().unwrap();
-            *instant = Some(std::time::Instant::now());
-        }
-        {
-            let mut status = FFPLAY_STATUS.lock().unwrap();
-            status.is_playing = true;
-        }
+        let mut paused_pos = PAUSED_POSITION.lock().unwrap();
+        *paused_pos = None;
     }
-    
-    println!("[FFplay] 恢复播放");
+
+    println!("[FFplay] 恢复播放，从位置: {:.2}秒", start_time.unwrap_or(0.0));
     Ok("FFplay已恢复播放".to_string())
 }
 
@@ -2087,10 +2006,16 @@ pub async fn seek_ffplay(path: String, position: f64, window: tauri::WebviewWind
     // 执行对应的seek操作
     match strategy {
         SeekStrategy::NoSeek => {
+            // 即使不实际seek，也同步更新后端status.position为目标位置，
+            // 防止状态轮询用旧位置覆盖前端已更新的目标位置导致进度回弹
+            {
+                let mut status = FFPLAY_STATUS.lock().unwrap();
+                status.position = target_pos;
+            }
             Ok(serde_json::json!({
                 "success": true,
                 "message": "差值太小，无需seek",
-                "position": current_pos,
+                "position": target_pos,
                 "method": "none"
             }))
         },
@@ -2542,6 +2467,62 @@ pub fn needs_ffplay_playback(path: &str) -> bool {
             return true;
         }
     }
-    
+
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decide_seek_strategy微小差值返回noseek() {
+        // 差值 < 0.5 秒，应返回 NoSeek
+        assert_eq!(decide_seek_strategy(10.0, 10.3, true), SeekStrategy::NoSeek);
+        assert_eq!(decide_seek_strategy(10.0, 9.8, true), SeekStrategy::NoSeek);
+        assert_eq!(decide_seek_strategy(10.0, 10.0, true), SeekStrategy::NoSeek);
+    }
+
+    #[test]
+    fn decide_seek_strategy边界0_5秒返回processrestart() {
+        // 差值恰好 0.5 秒（边界），应返回 ProcessRestartSeek
+        assert_eq!(decide_seek_strategy(10.0, 10.5, true), SeekStrategy::ProcessRestartSeek);
+        assert_eq!(decide_seek_strategy(10.5, 10.0, true), SeekStrategy::ProcessRestartSeek);
+    }
+
+    #[test]
+    fn decide_seek_strategy中等差值返回processrestart() {
+        // 差值 1-10 秒（原 NoSeek/StdinSeek 区间），现在统一走 ProcessRestartSeek
+        assert_eq!(decide_seek_strategy(10.0, 12.0, true), SeekStrategy::ProcessRestartSeek);
+        assert_eq!(decide_seek_strategy(10.0, 15.0, true), SeekStrategy::ProcessRestartSeek);
+        assert_eq!(decide_seek_strategy(10.0, 7.0, true), SeekStrategy::ProcessRestartSeek);
+    }
+
+    #[test]
+    fn decide_seek_strategy大差值返回processrestart() {
+        // 差值 >= 10 秒，应返回 ProcessRestartSeek
+        assert_eq!(decide_seek_strategy(10.0, 25.0, true), SeekStrategy::ProcessRestartSeek);
+        assert_eq!(decide_seek_strategy(25.0, 5.0, true), SeekStrategy::ProcessRestartSeek);
+    }
+
+    #[test]
+    fn decide_seek_strategy暂停状态也走processrestart() {
+        // 暂停状态下，除 NoSeek 外都走 ProcessRestartSeek
+        assert_eq!(decide_seek_strategy(10.0, 10.3, false), SeekStrategy::NoSeek);
+        assert_eq!(decide_seek_strategy(10.0, 12.0, false), SeekStrategy::ProcessRestartSeek);
+        assert_eq!(decide_seek_strategy(10.0, 25.0, false), SeekStrategy::ProcessRestartSeek);
+    }
+
+    #[test]
+    fn decide_seek_strategy不再返回stdinseek() {
+        // 验证 5-10 秒区间（原 StdinSeek）现在返回 ProcessRestartSeek
+        // FFplay 在 -nodisp 模式下忽略 stdin 方向键（FFmpeg bug #9578）
+        for diff in [5.0, 6.0, 7.0, 8.0, 9.0, 9.9] {
+            assert_eq!(
+                decide_seek_strategy(10.0, 10.0 + diff, true),
+                SeekStrategy::ProcessRestartSeek,
+                "差值 {} 秒应返回 ProcessRestartSeek", diff
+            );
+        }
+    }
 }

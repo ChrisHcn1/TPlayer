@@ -924,7 +924,6 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '@tauri-apps/api/core'
 import { localStorageService, type Playlist } from './stores/local'
-import { parseSmartLrc } from './services/lyricParser'
 import { multiSourceLyricService } from './services/multiSourceLyricService'
 import { useSongTagsEditor } from './composables/useSongTagsEditor'
 import { useCoverModal } from './composables/useCoverModal'
@@ -948,49 +947,19 @@ import {
 } from './composables/useCue'
 import { useUpdater } from './composables/useUpdater'
 import { getDisplayTitle, getDisplayArtist, getDisplayAlbum } from './utils/songDisplay'
-import { toSimpleLyricLines } from './utils/lyrics'
+import { toSimpleLyricLines, parseLyrics, type SimpleLyricLine } from './utils/lyrics'
 import { getBandLabel, getEqPreset } from './utils/equalizer'
 import { isBrowserScannableAudio } from './utils/fileTypes'
 import { needsFFplayEngine } from './constants/playbackFormats'
 import { exists } from '@tauri-apps/plugin-fs'
+import { logInfo, logError, logDebug } from './utils/logger'
 // RecycleScroller组件通过VueVirtualScroller插件注册
 
-// 日志开关：设置为 false 可禁用所有日志输出
-const ENABLE_LOGS = true
-
-// 调试日志级别：0=无日志，1=仅错误，2=基本信息，3=详细信息
-const LOG_LEVEL = 2
-
-// 日志函数 - 使用const声明避免作用域问题
-const logInfo = (...args: any[]) => {
-  // 输出所有日志
-  if (ENABLE_LOGS) {
-    console.log(...args)
-  }
-}
-
-const logError = (...args: any[]) => {
-  // 输出错误日志
-  if (ENABLE_LOGS) {
-    console.error(...args)
-  }
-}
-
-// 详细日志函数（仅在LOG_LEVEL=3时输出）
-const logDebug = (...args: any[]) => {
-  // 禁用详细日志
-  if (ENABLE_LOGS && LOG_LEVEL >= 3) {
-    console.log(...args)
-  }
-}
+// 日志函数已移至 utils/logger.ts
 
 // Song 类型已移至 types/song.ts
 
-// 歌词行类型
-interface LyricLine {
-  time: number // 时间戳（秒）
-  text: string // 歌词内容
-}
+// 歌词行类型已统一为 utils/lyrics.ts 的 SimpleLyricLine
 
 // FFplay 调用结果类型
 interface FFplayResult {
@@ -1015,7 +984,7 @@ const activeTab = ref('info')
 const isLoading = ref(true)
 
 // 歌词相关状态
-const lyrics = ref<LyricLine[]>([])
+const lyrics = ref<SimpleLyricLine[]>([])
 const currentLyricIndex = ref(-1)
 const showLyrics = ref(true)
 const lyricsPosition = ref<'top' | 'bottom'>('bottom')
@@ -2276,16 +2245,16 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
                 isPlaying.value = status.is_playing || false
                 logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
-                // 只有当status.position有效且Seek未在进行中时才更新currentPosition
-                // 防止状态轮询覆盖Seek后的位置
-                if (status.position !== undefined && status.position !== null && !seekInProgress) {
+                // 只有当status.position有效且Seek未在进行中、用户未在拖动时才更新currentPosition
+                // 防止状态轮询覆盖拖动和Seek后的位置
+                if (status.position !== undefined && status.position !== null && !seekInProgress && !isSeeking.value) {
                   logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   currentPosition.value = status.position
                   // 更新前端计算的播放位置
                   frontendPosition = status.position
                   logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
-                } else if (seekInProgress) {
-                  logInfo('Seek进行中，跳过位置更新')
+                } else if (seekInProgress || isSeeking.value) {
+                  logInfo('Seek进行中或正在拖动，跳过位置更新:', seekInProgress, isSeeking.value)
                 }
                 
                 // 计算进度百分比（Seek进行中时也更新，因为currentPosition已被保护）
@@ -3664,7 +3633,7 @@ const togglePlayback = async () => {
       } else {
         logInfo('恢复FFplay播放')
         try {
-          const result = await invoke('resume_ffplay') as any
+          const result = await invoke('resume_ffplay', { path: currentSong.value.path }) as any
           logInfo('FFplay播放已恢复:', result)
           isPlaying.value = true
           // isFFplayPlaying.value 应该保持 true
@@ -4075,14 +4044,14 @@ const seek = async () => {
                 isPlaying.value = status.is_playing || false
                 logInfo('isPlaying 立即更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
-                // Seek进行中时，不允许状态轮询覆盖Seek位置
-                if (!seekInProgress && status.position !== undefined && status.position !== null) {
+                // Seek进行中或正在拖动时，不允许状态轮询覆盖位置
+                if (!seekInProgress && !isSeeking.value && status.position !== undefined && status.position !== null) {
                   logInfo('立即更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                   currentPosition.value = status.position
                   frontendPosition = status.position
                   logInfo('立即更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
-                } else if (seekInProgress) {
-                  logInfo('立即更新被跳过（Seek进行中），保持位置:', currentPosition.value)
+                } else if (seekInProgress || isSeeking.value) {
+                  logInfo('立即更新被跳过（Seek进行中或拖动中），保持位置:', currentPosition.value)
                 }
 
                 // 计算进度百分比
@@ -4127,13 +4096,16 @@ const seek = async () => {
                     isPlaying.value = status.is_playing || false
                     logInfo('isPlaying 更新为:', isPlaying.value, 'isFFplayPlaying:', isFFplayPlaying.value)
 
-                    // 只有当status.position有效时才更新currentPosition
-                    if (status.position !== undefined && status.position !== null) {
+                    // 只有当status.position有效且Seek未在进行中、用户未在拖动时才更新currentPosition
+                    // 防止状态轮询覆盖拖动和Seek后的位置
+                    if (!seekInProgress && !isSeeking.value && status.position !== undefined && status.position !== null) {
                       logInfo('更新currentPosition前:', currentPosition.value, '更新后:', status.position)
                       currentPosition.value = status.position
                       // 更新前端计算的播放位置
                       frontendPosition = status.position
                       logInfo('更新播放进度:', currentPosition.value, '秒, 时长:', ffplayDuration.value)
+                    } else if (seekInProgress || isSeeking.value) {
+                      logInfo('Seek进行中或拖动中，跳过位置更新:', seekInProgress, isSeeking.value)
                     }
 
                     // 计算进度百分比
@@ -4616,41 +4588,7 @@ const {
 // formatTime 已移至 utils/format.ts；toSimpleLyricLines 已移至 utils/lyrics.ts
 
 // 解析歌词
-const parseLyrics = (lyricContent: string): LyricLine[] => {
-  if (!lyricContent) return []
-  
-  try {
-    const parsed = parseSmartLrc(lyricContent)
-    logInfo('歌词解析完成，格式:', parsed.format, '行数:', parsed.lines.length)
-    
-    return toSimpleLyricLines(parsed.lines)
-  } catch (error) {
-    logError('歌词解析失败，使用简单解析:', error)
-    
-    // 回退到简单解析
-    const lines: LyricLine[] = []
-    const lyricLines = lyricContent.split('\n')
-    const timeRegex = /\[(\d+):(\d+\.\d+)\]/g
-    
-    for (const line of lyricLines) {
-      const matches = [...line.matchAll(timeRegex)]
-      if (matches.length > 0) {
-        const text = line.replace(timeRegex, '').trim()
-        if (text) {
-          for (const match of matches) {
-            const minutes = parseInt(match[1])
-            const seconds = parseFloat(match[2])
-            const time = minutes * 60 + seconds
-            lines.push({ time, text })
-          }
-        }
-      }
-    }
-    
-    lines.sort((a, b) => a.time - b.time)
-    return lines
-  }
-}
+// parseLyrics 已移至 utils/lyrics.ts
 
 // 同步歌词显示
 const syncLyrics = () => {
