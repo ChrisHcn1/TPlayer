@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.0.6"
+version = "1.0.7"
 description = "TPlayer - A modern music player with DSD support and advanced lyric features."
 authors = ["TPlayer Team <support@tplayer.app>"]
 license = "MIT"
