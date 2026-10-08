@@ -5,6 +5,7 @@ import { multiSourceLyricService } from '../services/multiSourceLyricService'
 import { localStorageService } from '../stores/local'
 import { getFileNameWithoutExtension } from '../utils/songDisplay'
 import { formatTime, formatTimeForLrc } from '../utils/format'
+import { useMessage } from './useMessage'
 import type { Song } from '../types/song'
 
 type LogFn = (...args: any[]) => void
@@ -49,6 +50,7 @@ interface OnlineMatchData {
 // 不创建第二份歌曲状态。
 export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
   const { songs, currentSong, closeSongMenu, logInfo, logError } = options
+  const { showSuccess, showError, showWarning, showInfo } = useMessage()
 
   const showEditTagsModal = ref(false)
   const showOnlineMatchModal = ref(false)
@@ -126,11 +128,11 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
     if (songToEdit.value?.path) {
       navigator.clipboard.writeText(songToEdit.value.path)
         .then(() => {
-          alert('路径已复制到剪贴板')
+          showSuccess('路径已复制到剪贴板')
         })
         .catch(err => {
           logError('复制失败:', err)
-          alert('复制失败，请手动复制')
+          showError('复制失败，请手动复制')
         })
     }
   }
@@ -176,10 +178,10 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
         logInfo('【本地元数据】更新流派:', editTagsForm.value.genre)
       }
 
-      alert('从本地文件读取元数据成功')
+      showSuccess('从本地文件读取元数据成功')
     } catch (error) {
       logError('【本地元数据】读取失败:', error)
-      alert('读取本地元数据失败，请检查文件格式是否支持')
+      showError('读取本地元数据失败，请检查文件格式是否支持')
     }
   }
 
@@ -188,7 +190,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
     try {
       if (!songToEdit.value) {
         logInfo('【在线歌词】没有歌曲可编辑')
-        alert('没有歌曲可编辑')
+        showWarning('没有歌曲可编辑')
         return
       }
 
@@ -200,7 +202,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!title || !artist) {
         logInfo('【在线歌词】歌曲标题或艺术家为空')
-        alert('请先填写歌曲标题和艺术家信息')
+        showWarning('请先填写歌曲标题和艺术家信息')
         return
       }
 
@@ -218,7 +220,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
         }, 'manual', true)
       } catch (apiError) {
         logError('【在线歌词】API调用失败:', apiError)
-        alert('网络请求失败，请检查网络连接')
+        showError('网络请求失败，请检查网络连接')
         return
       }
 
@@ -226,7 +228,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!result.success || !result.bestScore) {
         logInfo('【在线歌词】未找到歌词')
-        alert('未找到歌词，请尝试修改搜索信息后重试')
+        showInfo('未找到歌词，请尝试修改搜索信息后重试')
         return
       }
 
@@ -246,7 +248,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!lrcContent) {
         logInfo('【在线歌词】歌词内容为空')
-        alert('找到歌词但内容为空，请尝试其他来源')
+        showInfo('找到歌词但内容为空，请尝试其他来源')
         return
       }
 
@@ -254,10 +256,10 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       logInfo('【在线歌词】获取成功，来源:', result.bestSource, '歌词行数:', result.bestScore.lyricLines?.length || 0)
 
-      alert('获取歌词成功')
+      showSuccess('获取歌词成功')
     } catch (error) {
       logError('【在线歌词】获取失败:', error)
-      alert('获取歌词失败，请检查网络连接后重试')
+      showError('获取歌词失败，请检查网络连接后重试')
     }
   }
 
@@ -266,7 +268,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
     try {
       if (!songToEdit.value) {
         logInfo('【在线封面】没有歌曲可编辑')
-        alert('没有歌曲可编辑')
+        showWarning('没有歌曲可编辑')
         return
       }
 
@@ -278,7 +280,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!keyword) {
         logInfo('【在线封面】关键词为空')
-        alert('请先填写歌曲标题和艺术家信息')
+        showWarning('请先填写歌曲标题和艺术家信息')
         return
       }
 
@@ -290,7 +292,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
         result = await musicDataService.getSongInfoWithLyric(keyword)
       } catch (apiError) {
         logError('【在线封面】API调用失败:', apiError)
-        alert('网络请求失败，请检查网络连接')
+        showError('网络请求失败，请检查网络连接')
         return
       }
 
@@ -298,13 +300,13 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!result || !result.song) {
         logInfo('【在线封面】未找到匹配的歌曲')
-        alert('未找到匹配的歌曲，请修改歌曲信息后重试')
+        showInfo('未找到匹配的歌曲，请修改歌曲信息后重试')
         return
       }
 
       if (!result.song.coverUrl) {
         logInfo('【在线封面】找到歌曲但没有封面')
-        alert('找到歌曲但未找到封面')
+        showInfo('找到歌曲但未找到封面')
         return
       }
 
@@ -334,10 +336,10 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
         logInfo('【在线封面】获取动态封面成功:', result.song.dynamicCoverUrl)
       }
 
-      alert('获取封面成功')
+      showSuccess('获取封面成功')
     } catch (error) {
       logError('【在线封面】获取失败:', error)
-      alert('获取封面失败，请检查网络连接后重试')
+      showError('获取封面失败，请检查网络连接后重试')
     }
   }
 
@@ -383,7 +385,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
     try {
       if (!songToEdit.value) {
         logInfo('【自动匹配】没有歌曲可编辑')
-        alert('没有歌曲可编辑')
+        showWarning('没有歌曲可编辑')
         return
       }
 
@@ -395,7 +397,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!keyword) {
         logInfo('【自动匹配】关键词为空')
-        alert('请先填写歌曲标题和艺术家信息')
+        showWarning('请先填写歌曲标题和艺术家信息')
         return
       }
 
@@ -407,7 +409,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
         result = await musicDataService.getSongInfoWithLyric(keyword)
       } catch (apiError) {
         logError('【自动匹配】API调用失败:', apiError)
-        alert('网络请求失败，请检查网络连接')
+        showError('网络请求失败，请检查网络连接')
         return
       }
 
@@ -415,7 +417,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
 
       if (!result || !result.song) {
         logInfo('【自动匹配】未找到匹配的歌曲')
-        alert('未找到匹配的歌曲，请修改歌曲信息后重试')
+        showInfo('未找到匹配的歌曲，请修改歌曲信息后重试')
         return
       }
 
@@ -486,13 +488,13 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
       logInfo('【自动匹配】自动匹配完成，共匹配', matchedCount, '项')
 
       if (matchedCount > 0) {
-        alert(`自动匹配完成，共匹配 ${matchedCount} 项`)
+        showSuccess(`自动匹配完成，共匹配 ${matchedCount} 项`)
       } else {
-        alert('已找到歌曲，但没有新的信息可以匹配（可能已有完整信息）')
+        showInfo('已找到歌曲，但没有新的信息可以匹配（可能已有完整信息）')
       }
     } catch (error) {
       logError('【自动匹配】自动匹配失败:', error)
-      alert('自动匹配失败，请检查网络连接后重试')
+      showError('自动匹配失败，请检查网络连接后重试')
     }
   }
 
@@ -549,7 +551,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
       }
     } catch (error) {
       logError('选择封面失败:', error)
-      alert('选择封面失败，请重试')
+      showError('选择封面失败，请重试')
     }
   }
 
@@ -560,7 +562,7 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
     try {
       // 验证歌词内容
       if (editTagsForm.value.lyric && editTagsForm.value.lyric.length > 100000) {
-        alert('歌词内容过长，请精简后重试')
+        showWarning('歌词内容过长，请精简后重试')
         return
       }
 
@@ -589,15 +591,15 @@ export function useSongTagsEditor(options: UseSongTagsEditorOptions) {
       })) as import('../stores/local').Song[]
       await localStorageService.saveSongs(songsToSave)
 
-      alert('标签编辑成功')
+      showSuccess('标签编辑成功')
       closeEditTagsModal()
     } catch (error) {
       logError('保存标签失败:', error)
       // 提供更详细的错误信息
       if (error instanceof Error) {
-        alert(`保存标签失败: ${error.message}\n请检查歌词内容是否过大或包含特殊字符`)
+        showError(`保存标签失败: ${error.message}\n请检查歌词内容是否过大或包含特殊字符`)
       } else {
-        alert('保存标签失败，请重试')
+        showError('保存标签失败，请重试')
       }
     }
   }

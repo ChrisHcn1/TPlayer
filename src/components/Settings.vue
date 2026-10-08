@@ -214,7 +214,10 @@
 import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { t } from '../services/i18n'
+import { useMessage } from '../composables/useMessage'
 import AboutDialog from './AboutDialog.vue'
+
+const { showError, showWarning, showInfo } = useMessage()
 
 // 定义 props
 const props = defineProps({
@@ -444,18 +447,18 @@ const checkUpdate = async () => {
   isCheckingUpdate.value = true
   try {
     if (props.isBrowser) {
-      alert('浏览器环境不支持更新检查，请使用桌面版')
+      showWarning('浏览器环境不支持更新检查，请使用桌面版')
       return
     }
     const result = await invoke<{ has_update: boolean; update_info: any; current_version: string }>('check_update_manual')
     if (result.has_update && result.update_info) {
       emit('checkUpdate', result.update_info, result.current_version)
     } else {
-      alert(t('settings.noUpdate', '当前已是最新版本'))
+      showInfo(t('settings.noUpdate', '当前已是最新版本'))
     }
   } catch (error) {
     console.error('检查更新失败:', error)
-    alert(t('settings.checkUpdateFailed', '检查更新失败，请稍后重试'))
+    showError(t('settings.checkUpdateFailed', '检查更新失败，请稍后重试'))
   } finally {
     isCheckingUpdate.value = false
   }

@@ -1,4 +1,5 @@
 import { ref, type Ref } from 'vue'
+import { useMessage } from './useMessage'
 import type { Song } from '../types/song'
 
 type LogFn = (...args: any[]) => void
@@ -20,6 +21,7 @@ interface UseSongSelectionOptions {
 // 选择状态自包含；播放与持久化动作经注入回调委托给容器。
 export function useSongSelection(options: UseSongSelectionOptions) {
   const { visibleSongs, playSong, openAddToPlaylistMenu, deleteSong, logInfo, logError } = options
+  const { confirmAction } = useMessage()
 
   const selectedSongIds = ref<Set<string>>(new Set())
   const isSelectionMode = ref(false)
@@ -77,7 +79,7 @@ export function useSongSelection(options: UseSongSelectionOptions) {
     const selectedSongs = visibleSongs.value.filter((s: Song) => selectedSongIds.value.has(s.id))
     if (selectedSongs.length === 0) return
 
-    const confirmed = confirm(`确定要删除选中的 ${selectedSongs.length} 首歌曲吗？此操作不可撤销。`)
+    const confirmed = confirmAction(`确定要删除选中的 ${selectedSongs.length} 首歌曲吗？此操作不可撤销。`)
     if (!confirmed) return
 
     for (const song of selectedSongs) {

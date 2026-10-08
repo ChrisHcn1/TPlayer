@@ -915,6 +915,9 @@
       @close="closeUpdateModal"
       @update="closeUpdateModal"
     />
+
+    <!-- 全局 Toast 消息容器（右上方） -->
+    <ToastContainer />
   </div>
 </template>
 
@@ -931,10 +934,12 @@ import { useWindowControls } from './composables/useWindowControls'
 import { useSongContextMenu } from './composables/useSongContextMenu'
 import { useLibraryActions } from './composables/useLibraryActions'
 import { useSongSelection } from './composables/useSongSelection'
+import { useMessage } from './composables/useMessage'
 import Settings from './components/Settings.vue'
 import UpdateModal from './components/UpdateModal.vue'
 import OnlineMatchModal from './components/OnlineMatchModal.vue'
 import AudioConverter from './components/AudioConverter.vue'
+import ToastContainer from './components/ToastContainer.vue'
 import { i18nService, t } from './services/i18n'
 import type { Song } from './types/song'
 import {
@@ -950,6 +955,10 @@ import { getDisplayTitle, getDisplayArtist, getDisplayAlbum } from './utils/song
 import { toSimpleLyricLines, parseLyrics, type SimpleLyricLine } from './utils/lyrics'
 import { getBandLabel, getEqPreset } from './utils/equalizer'
 import { isBrowserScannableAudio } from './utils/fileTypes'
+import { formatTime, formatTimeWithHours, parseDurationToSeconds } from './utils/format'
+import { bytesToBase64DataUrl } from './utils/coverImage'
+import { COVER_EXTENSIONS, COMMON_COVER_NAMES } from './constants/coverImage'
+import { type PlaybackMode, PLAYBACK_MODES, getPlaybackModeImage } from './constants/playbackMode'
 import { needsFFplayEngine } from './constants/playbackFormats'
 import { exists } from '@tauri-apps/plugin-fs'
 import { logInfo, logError, logDebug } from './utils/logger'
@@ -1130,7 +1139,7 @@ const formattedCurrentPosition = computed(() => {
   const position = currentPosition.value
   const mins = Math.floor(position / 60)
   const secs = Math.floor(position % 60)
-  const result = `${mins}:${secs.toString().padStart(2, '0')}`
+  const result = formatTime(position)
 
   // 每5秒输出一次，确认computed被调用
   if (updateProgressCallCount % 25 === 0) {
@@ -1144,7 +1153,7 @@ const formattedCurrentPosition = computed(() => {
 
   return result
 })
-const playbackMode = ref<'order' | 'random' | 'repeat'>('order')
+const playbackMode = ref<PlaybackMode>('order')
 const isMuted = ref(false)
 const previousVolume = ref(80)
 const volume = ref(80)
@@ -1255,39 +1264,18 @@ const filteredSongs = computed(() => {
 })
 
 const playbackModeImage = computed(() => {
-  switch (playbackMode.value) {
-    case 'order': return '/play-button_25b6-fe0f.png'
-    case 'random': return '/shuffle-tracks-button_1f500.png'
-    case 'repeat': return '/repeat-button_1f501.png'
-    default: return '/play-button_25b6-fe0f.png'
-  }
+  return getPlaybackModeImage(playbackMode.value)
 })
 
 // 计算总时长
 const totalDurationText = computed(() => {
   let totalSeconds = 0
-  
+
   filteredSongs.value.forEach(song => {
-    if (song.duration && song.duration !== '未知') {
-      const parts = song.duration.split(':')
-      if (parts.length === 2) {
-        const minutes = parseInt(parts[0])
-        const seconds = parseInt(parts[1])
-        totalSeconds += minutes * 60 + seconds
-      }
-    }
+    totalSeconds += parseDurationToSeconds(song.duration)
   })
-  
-  // 转换为时分秒格式
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-  } else {
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`
-  }
+
+  return formatTimeWithHours(totalSeconds)
 })
 
 // 方法
@@ -1395,15 +1383,13 @@ const playCueTrackInApp = async (track: any) => {
     logError('CUE track缺少时间参数:', track)
     logError('startTime:', startTime, 'endTime:', endTime)
     // 不设置模拟数据，而是报错
-    alert('无法播放该音轨：缺少开始或结束时间参数')
+    showError('无法播放该音轨：缺少开始或结束时间参数')
     return
   }
 
   // 计算正确的时长（endTime - startTime）
   const durationSeconds = endTime - startTime
-  const durationMins = Math.floor(durationSeconds / 60)
-  const durationSecs = Math.floor(durationSeconds % 60)
-  const durationStr = `${durationMins}:${durationSecs.toString().padStart(2, '0')}`
+  const durationStr = formatTime(durationSeconds)
 
   // 将CUE Track转换为Song格式
   const song: Song = {
@@ -1439,7 +1425,7 @@ const scanMusic = async () => {
     if (!tauri) {
       // 浏览器环境处理
       if (!musicDirectory.value) {
-        alert('请先在设置中设置音乐目录')
+        showWarning('请先在设置中设置音乐目录')
         return
       }
       
@@ -1536,14 +1522,14 @@ const scanMusic = async () => {
               if (audioFiles.length > 0) {
                 songs.value = [...songs.value, ...audioFiles]
                 logInfo(`已添加 ${audioFiles.length} 首歌曲到播放列表`)
-                alert(`成功扫描到 ${audioFiles.length} 首歌曲`)
+                showSuccess(`成功扫描到 ${audioFiles.length} 首歌曲`)
               } else {
-                alert('未找到音频文件')
+                showInfo('未找到音频文件')
               }
             }
           } catch (error) {
             logError('处理文件时出错:', error)
-            alert(`扫描失败：${error}`)
+            showError(`扫描失败：${error}`)
           } finally {
             // 移除加载提示
             if (document.getElementById('loading-overlay')) {
@@ -1557,7 +1543,7 @@ const scanMusic = async () => {
         return
       } catch (error) {
         logError('扫描音乐失败:', error)
-        alert(`扫描失败：${error}`)
+        showError(`扫描失败：${error}`)
         // 移除加载提示
         if (document.getElementById('loading-overlay')) {
           document.body.removeChild(document.getElementById('loading-overlay')!)
@@ -1654,15 +1640,15 @@ const scanMusic = async () => {
             songs.value = [...filteredTracks, ...cueSongs]
             
             if (cueTrackCount > 0) {
-              alert(`扫描完成，共找到 ${trackCount} 首歌曲和 ${cueTrackCount} 个CUE Track`)
+              showSuccess(`扫描完成，共找到 ${trackCount} 首歌曲和 ${cueTrackCount} 个CUE Track`)
             } else {
-              alert(`扫描完成，共找到 ${trackCount} 首歌曲`)
+              showSuccess(`扫描完成，共找到 ${trackCount} 首歌曲`)
             }
           } else {
-            alert('未找到音频文件，请确认目录中包含支持的音频格式')
+            showInfo('未找到音频文件，请确认目录中包含支持的音频格式')
           }
         } else {
-          alert('扫描失败：未返回有效数据')
+          showError('扫描失败：未返回有效数据')
         }
       } finally {
         // 移除加载提示
@@ -1671,7 +1657,7 @@ const scanMusic = async () => {
     }
   } catch (error) {
     logError('扫描目录失败:', error)
-    alert(`扫描失败：${error}`)
+    showError(`扫描失败：${error}`)
   }
 }
 
@@ -1742,8 +1728,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
       try {
         const { readFile } = await import('@tauri-apps/plugin-fs')
         const songPath = song.path
-        const coverExtensions = ['jpg', 'jpeg', 'png', 'bmp', 'webp']
-        
+
         // 获取歌曲所在目录和文件名（不含扩展名）
         const lastSlashIndex = Math.max(songPath.lastIndexOf('/'), songPath.lastIndexOf('\\'))
         const songDir = songPath.substring(0, lastSlashIndex + 1)
@@ -1754,7 +1739,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         logInfo('【封面加载】歌曲文件名:', songFileName)
         logInfo('【封面加载】歌曲名(无扩展名):', songNameWithoutExt)
         
-        for (const ext of coverExtensions) {
+        for (const ext of COVER_EXTENSIONS) {
           const coverPath = songDir + songNameWithoutExt + '.' + ext
           logInfo('【封面加载】尝试读取:', coverPath)
           try {
@@ -1764,19 +1749,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             const imageData = await readFile(decodedPath)
             logInfo('【封面加载】文件存在，大小:', imageData.length)
             if (imageData && imageData.length > 0) {
-              // 使用更安全的方式转换为base64，避免栈溢出
-              const bytes = new Uint8Array(imageData)
-              let binary = ''
-              const len = bytes.byteLength
-              for (let i = 0; i < len; i++) {
-                binary += String.fromCharCode(bytes[i])
-              }
-              const base64Image = btoa(binary)
-              const mimeType = ext === 'png' ? 'image/png' : 
-                              ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' :
-                              ext === 'bmp' ? 'image/bmp' :
-                              ext === 'webp' ? 'image/webp' : 'image/jpeg'
-              song.cover = `data:${mimeType};base64,${base64Image}`
+              song.cover = bytesToBase64DataUrl(imageData, ext)
               logInfo('【封面加载】成功读取封面:', coverPath, '大小:', imageData.length)
               break
             }
@@ -1788,27 +1761,14 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         // 如果没有找到同名封面，尝试常见封面文件名
         if (!song.cover) {
           logInfo('【封面加载】未找到同名封面，尝试常见封面文件名')
-          const commonNames = ['cover', 'folder', 'album', 'front']
-          for (const name of commonNames) {
-            for (const ext of coverExtensions) {
+          for (const name of COMMON_COVER_NAMES) {
+            for (const ext of COVER_EXTENSIONS) {
               const coverPath = songDir + name + '.' + ext
               logInfo('【封面加载】尝试读取常见封面:', coverPath)
               try {
                 const imageData = await readFile(coverPath)
                 if (imageData && imageData.length > 0) {
-                  // 使用更安全的方式转换为base64，避免栈溢出
-                  const bytes = new Uint8Array(imageData)
-                  let binary = ''
-                  const len = bytes.byteLength
-                  for (let i = 0; i < len; i++) {
-                    binary += String.fromCharCode(bytes[i])
-                  }
-                  const base64Image = btoa(binary)
-                  const mimeType = ext === 'png' ? 'image/png' : 
-                                  ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' :
-                                  ext === 'bmp' ? 'image/bmp' :
-                                  ext === 'webp' ? 'image/webp' : 'image/jpeg'
-                  song.cover = `data:${mimeType};base64,${base64Image}`
+                  song.cover = bytesToBase64DataUrl(imageData, ext)
                   logInfo('【封面加载】成功读取常见封面:', coverPath)
                   break
                 }
@@ -2102,9 +2062,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             
             // 更新歌曲时长
             const totalSeconds = Math.round(ffResult.duration)
-            const minutes = Math.floor(totalSeconds / 60)
-            const seconds = totalSeconds % 60
-            song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+            song.duration = formatTime(totalSeconds)
             
             // 更新音频文件详细信息
             if (ffResult.format) {
@@ -2811,7 +2769,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         const totalSeconds = Math.round(durationFromBackend)
         const minutes = Math.floor(totalSeconds / 60)
         const seconds = totalSeconds % 60
-        song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+        song.duration = formatTime(totalSeconds)
         logDebug('设置音频时长:', song.duration)
         
         // 计算进度百分比
@@ -3013,9 +2971,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
               const duration = audioElement.value.duration
               if (duration && !isNaN(duration)) {
                 const totalSeconds = Math.round(duration)
-                const minutes = Math.floor(totalSeconds / 60)
-                const seconds = totalSeconds % 60
-                currentSong.value.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
+                currentSong.value.duration = formatTime(totalSeconds)
                 logInfo('浏览器环境，更新音频时长:', currentSong.value.duration)
               }
             }
@@ -3503,10 +3459,8 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
             ffplayPosition.value = start_position
             
             const totalSeconds = Math.round(ffResult.duration)
-            const minutes = Math.floor(totalSeconds / 60)
-            const seconds = totalSeconds % 60
-            song.duration = `${minutes}:${seconds.toString().padStart(2, '0')}`
-            
+            song.duration = formatTime(totalSeconds)
+
             if (ffResult.format) song.format = ffResult.format
             if (ffResult.sample_rate) song.sample_rate = ffResult.sample_rate
             if (ffResult.channels) song.channels = ffResult.channels
@@ -3574,7 +3528,7 @@ const playSong = async (song: Song, position: number = 0, cueStartTime?: number,
         }
       } else {
         if (autoPlay) {
-          alert(`播放失败：${errorMessage}\n请确认音频文件存在且格式受支持`)
+          showError(`播放失败：${errorMessage}\n请确认音频文件存在且格式受支持`)
         }
         if (autoPlayNext.value && songs.value.length > 1) {
           logInfo('播放失败，自动跳到下一首')
@@ -3725,7 +3679,7 @@ const togglePlayback = async () => {
       return
     }
     
-    alert(`播放控制失败：${errorMessage}`)
+    showError(`播放控制失败：${errorMessage}`)
   } finally {
     // 释放锁
     isToggling = false
@@ -3886,9 +3840,8 @@ const playNext = async () => {
 }
 
 const changePlaybackMode = () => {
-  const modes: Array<'order' | 'random' | 'repeat'> = ['order', 'random', 'repeat']
-  const currentIndex = modes.indexOf(playbackMode.value)
-  playbackMode.value = modes[(currentIndex + 1) % modes.length]
+  const currentIndex = PLAYBACK_MODES.indexOf(playbackMode.value)
+  playbackMode.value = PLAYBACK_MODES[(currentIndex + 1) % PLAYBACK_MODES.length]
 }
 
 // 歌曲显示相关纯函数（getFileNameWithoutExtension / extractInfoFromFileName /
@@ -4475,6 +4428,9 @@ const {
   logInfo,
   logError
 })
+
+// 全局消息系统（Toast）：错误/成功/警告/信息四类，挂载于模板根的 ToastContainer
+const { showError, showSuccess, showWarning, showInfo } = useMessage()
 
 // 滚动到当前歌词（封面模态框）
 const scrollToCurrentLyric = () => {

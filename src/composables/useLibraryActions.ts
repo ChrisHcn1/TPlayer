@@ -1,5 +1,6 @@
 import { ref, onUnmounted, type Ref } from 'vue'
 import { localStorageService, type Playlist } from '../stores/local'
+import { useMessage } from './useMessage'
 import type { Song } from '../types/song'
 
 type LogFn = (...args: any[]) => void
@@ -20,6 +21,7 @@ interface UseLibraryActionsOptions {
 // 均为 localStorage 持久化编排，不涉及播放时序；共享状态由容器注入并原地更新。
 export function useLibraryActions(options: UseLibraryActionsOptions) {
   const { songs, favorites, playlists, closeSongMenu, logError } = options
+  const { showError, showSuccess, showInfo, confirmAction } = useMessage()
 
   const toggleFavorite = async (song: Song) => {
     try {
@@ -38,7 +40,7 @@ export function useLibraryActions(options: UseLibraryActionsOptions) {
       logError('更新收藏状态失败:', error)
       // 回滚状态
       song.isFavorite = !song.isFavorite
-      alert('收藏操作失败,请重试')
+      showError('收藏操作失败,请重试')
     }
   }
 
@@ -79,12 +81,15 @@ export function useLibraryActions(options: UseLibraryActionsOptions) {
 
     const newIds = songsToAdd.map(s => s.id).filter(id => !playlist.songs.includes(id))
     if (newIds.length === 0) {
-      alert(`歌曲已全部在歌单 "${playlist.name}" 中`)
+      showInfo(`歌曲已全部在歌单 "${playlist.name}" 中`)
     } else {
-      playlist.songs.push(...newIds)
-      await localStorageService.updatePlaylist(playlist.id, { songs: playlist.songs })
+      // 创建新数组而非原地 push 响应式代理数组，避免响应式代理与 localforage 序列化交互的潜在陷阱
+      const newSongs = [...playlist.songs, ...newIds]
+      await localStorageService.updatePlaylist(playlist.id, { songs: newSongs })
+      // 重新同步 playlists.value，确保内存状态与 IndexedDB 一致（与 createPlaylistAndAdd/createPlaylist 保持一致）
+      playlists.value = await localStorageService.getPlaylists()
       const skipped = songsToAdd.length - newIds.length
-      alert(
+      showSuccess(
         skipped > 0
           ? `已添加 ${newIds.length} 首到歌单 "${playlist.name}"，跳过已存在的 ${skipped} 首`
           : `已添加 ${newIds.length} 首到歌单 "${playlist.name}"`
@@ -106,11 +111,11 @@ export function useLibraryActions(options: UseLibraryActionsOptions) {
       newPlaylist.songs.push(...songsToAdd.map(s => s.id))
       await localStorageService.updatePlaylist(newPlaylist.id, { songs: newPlaylist.songs })
       playlists.value = await localStorageService.getPlaylists()
-      alert(`已创建歌单 "${name.trim()}" 并添加 ${songsToAdd.length} 首歌曲`)
+      showSuccess(`已创建歌单 "${name.trim()}" 并添加 ${songsToAdd.length} 首歌曲`)
       closeAddToPlaylistMenu()
     } catch (error) {
       logError('创建歌单并添加歌曲失败:', error)
-      alert('创建歌单失败，请重试')
+      showError('创建歌单失败，请重试')
     }
   }
 
@@ -123,7 +128,7 @@ export function useLibraryActions(options: UseLibraryActionsOptions) {
   }
 
   const deleteSong = (song: Song) => {
-    if (confirm('确定要删除这首歌吗？')) {
+    if (confirmAction('确定要删除这首歌吗？')) {
       removeSongFromLibrary(song)
     }
     closeSongMenu()
@@ -136,11 +141,11 @@ export function useLibraryActions(options: UseLibraryActionsOptions) {
       try {
         const newPlaylist = await localStorageService.createPlaylist(name.trim())
         playlists.value = await localStorageService.getPlaylists()
-        alert(`歌单 "${name.trim()}" 创建成功`)
+        showSuccess(`歌单 "${name.trim()}" 创建成功`)
         return newPlaylist
       } catch (error) {
         logError('创建歌单失败:', error)
-        alert('创建歌单失败')
+        showError('创建歌单失败')
       }
     }
     return undefined

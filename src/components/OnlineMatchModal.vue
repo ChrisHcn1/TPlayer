@@ -82,6 +82,9 @@
 import { ref, computed } from 'vue'
 import { t } from '../services/i18n'
 import { onlineMusicService, type OnlineSong, type LyricResult } from '../services/onlineMusicService'
+import { useMessage } from '../composables/useMessage'
+
+const { showError, showWarning, showInfo } = useMessage()
 
 interface Props {
   currentTitle?: string
@@ -138,7 +141,7 @@ async function handleSearch() {
     }
   } catch (error) {
     console.error('搜索失败:', error)
-    alert(t('modal.searchFailed'))
+    showError(t('modal.searchFailed'))
   } finally {
     searching.value = false
   }
@@ -159,7 +162,7 @@ async function handleGetLyrics() {
   // AMLL 来源暂不支持歌词/封面接口，提前拦截避免传入非法 source
   const source = selectedResult.value.source
   if (source !== 'qq' && source !== 'netease') {
-    alert(t('modal.sourceNotSupported', '该来源暂不支持歌词获取'))
+    showWarning(t('modal.sourceNotSupported', '该来源暂不支持歌词获取'))
     return
   }
 
@@ -176,7 +179,7 @@ async function handleGetLyrics() {
     lyricPreview.value = firstLine ? `${firstLine}...` : t('modal.noLyricFound')
   } catch (error) {
     console.error('获取歌词失败:', error)
-    alert(t('modal.getLyricFailed'))
+    showError(t('modal.getLyricFailed'))
   } finally {
     gettingLyric.value = false
   }
@@ -187,7 +190,7 @@ async function handleGetCover() {
 
   const source = selectedResult.value.source
   if (source !== 'qq' && source !== 'netease') {
-    alert(t('modal.sourceNotSupported', '该来源暂不支持封面获取'))
+    showWarning(t('modal.sourceNotSupported', '该来源暂不支持封面获取'))
     return
   }
 
@@ -203,11 +206,11 @@ async function handleGetCover() {
       coverPreview.value = coverUrl
     } else {
       coverPreview.value = ''
-      alert(t('modal.noCoverFound'))
+      showInfo(t('modal.noCoverFound'))
     }
   } catch (error) {
     console.error('获取封面失败:', error)
-    alert(t('modal.getCoverFailed'))
+    showError(t('modal.getCoverFailed'))
   } finally {
     gettingCover.value = false
   }
