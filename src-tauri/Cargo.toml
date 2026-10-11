@@ -51,6 +51,8 @@ tokio = { version = "1", features = ["sync", "rt"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 随机播放模式
 rand = "0.8"
+# 目录自动监控：监听曲库目录文件变更（新增/删除/重命名/修改），增量同步进曲库
+notify = "6"
 # LRC 时间标签解析
 regex = "1"
 # 在线歌词抓取（默认关闭，受设置开关控制）

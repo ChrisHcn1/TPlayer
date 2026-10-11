@@ -1,152 +1,109 @@
 <script setup lang="ts">
 /**
- * 音频转换（/converter）—— M1 可交互 mock 闭环
+ * 音频转换（/converter，设置-工具页签内嵌）—— M3 接入 Rust 后端
  *
  * DESIGN §2.4 图 2-4-6 三卡片：待转文件 / 输出设置 / 任务队列。
- * 浏览器环境不接真实转换后端：文件来自系统文件选择（仅取文件名），
- * 转换进度由本地定时器模拟；M3 替换为 converter 服务命令与进度事件。
+ * Tauri 环境：文件经系统对话框选择（真实路径），转换由 Rust 侧 ffmpeg
+ * 执行，进度/完成/失败经 converter://event 事件驱动（store 持有状态）。
+ * 浏览器预览：文件选择降级为 <input>，任务由 Web mock 模拟，交互一致。
  */
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
+import { pickAudioFiles, pickDirectory } from '../services/dialog'
+import { useConverterStore } from '../stores/converter'
 import { useToastStore } from '../stores/toast'
+import type { ConvertFormat } from '../types'
 
-interface ConvertFile {
-  id: string
-  name: string
-  /** 文件大小（MB，mock） */
-  sizeMb: number
-}
-
-interface ConvertTask {
-  id: string
-  name: string
-  status: 'pending' | 'running' | 'done'
-  progress: number
-}
-
-const FORMATS = ['MP3 320k', 'FLAC', 'WAV', 'AAC 256k'] as const
-const SAMPLE_RATES = ['44.1 kHz', '48 kHz', '96 kHz'] as const
-const BIT_DEPTHS = ['16 bit', '24 bit'] as const
+const FORMAT_OPTIONS: { value: ConvertFormat; label: string }[] = [
+  { value: 'mp3-320', label: 'MP3 320k' },
+  { value: 'flac', label: 'FLAC' },
+  { value: 'wav', label: 'WAV' },
+  { value: 'aac-256', label: 'AAC 256k' },
+]
+const SAMPLE_RATE_OPTIONS = [
+  { value: 44100, label: '44.1 kHz' },
+  { value: 48000, label: '48 kHz' },
+  { value: 96000, label: '96 kHz' },
+]
+const BIT_DEPTH_OPTIONS = [16, 24] as const
 
 const toastStore = useToastStore()
+const converterStore = useConverterStore()
+const { files, settings, tasks, running, isTauri, finishedCount } = storeToRefs(converterStore)
 
-const files = ref<ConvertFile[]>([])
-const format = ref<(typeof FORMATS)[number]>('FLAC')
-const sampleRate = ref<(typeof SAMPLE_RATES)[number]>('48 kHz')
-const bitDepth = ref<(typeof BIT_DEPTHS)[number]>('16 bit')
-const outputDir = ref('~/Music/TPlayer Output')
-
-const tasks = ref<ConvertTask[]>([])
 const dragOver = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-let timer: number | null = null
-let seq = 0
 
-function nextId(prefix: string): string {
-  seq += 1
-  return `${prefix}-${Date.now()}-${seq}`
-}
+/** 有损格式不支持位深设置 */
+const lossyFormat = computed(
+  () => settings.value.format === 'mp3-320' || settings.value.format === 'aac-256',
+)
 
-function addFileNames(names: string[]): void {
-  const existing = new Set(files.value.map((file) => file.name))
-  let added = 0
-  for (const name of names) {
-    if (existing.has(name)) continue
-    existing.add(name)
-    files.value.push({
-      id: nextId('file'),
-      name,
-      sizeMb: Math.round((8 + Math.random() * 42) * 10) / 10,
-    })
-    added += 1
+const taskStatusText = (task: (typeof tasks.value)[number]): string => {
+  switch (task.status) {
+    case 'pending':
+      return '等待中'
+    case 'running':
+      return `转换中 ${task.progress}%`
+    case 'done':
+      return '已完成'
+    case 'failed':
+      return `失败：${task.message ?? '未知错误'}`
+    case 'cancelled':
+      return '已取消'
   }
-  if (added > 0) toastStore.success(`已添加 ${added} 个待转文件`)
 }
 
-function onPickClick(): void {
+/** 选择待转文件：Tauri 用系统对话框（真实路径），浏览器降级为 input */
+async function onPickClick(): Promise<void> {
+  if (isTauri.value) {
+    const paths = await pickAudioFiles()
+    if (paths && paths.length > 0) await converterStore.addPaths(paths)
+    return
+  }
   fileInputRef.value?.click()
 }
 
 function onFileChange(event: Event): void {
   const input = event.target as HTMLInputElement
-  addFileNames(Array.from(input.files ?? []).map((file) => file.name))
+  const names = Array.from(input.files ?? []).map((file) => file.name)
+  if (names.length > 0) void converterStore.addPaths(names)
   input.value = ''
 }
 
 function onDrop(event: DragEvent): void {
   dragOver.value = false
+  // Tauri WebView 拖拽拿到的是 File 对象（无绝对路径）：浏览器行为与 input 一致
   const dropped = event.dataTransfer?.files
   if (dropped && dropped.length > 0) {
-    addFileNames(Array.from(dropped).map((file) => file.name))
+    void converterStore.addPaths(Array.from(dropped).map((file) => file.name))
   }
 }
 
-function removeFile(id: string): void {
-  files.value = files.value.filter((file) => file.id !== id)
+async function onPickOutputDir(): Promise<void> {
+  const dir = await pickDirectory()
+  if (dir) converterStore.updateSettings({ outputDir: dir })
 }
 
-function clearFiles(): void {
-  files.value = []
-}
-
-const hasRunning = computed(() => tasks.value.some((task) => task.status === 'running'))
-const doneCount = computed(() => tasks.value.filter((task) => task.status === 'done').length)
-
-function startConvert(): void {
-  if (files.value.length === 0) {
-    toastStore.warning('请先添加待转文件')
-    return
-  }
-  if (hasRunning.value) {
-    toastStore.warning('转换进行中，请等待当前任务完成')
-    return
-  }
-  tasks.value = files.value.map((file) => ({
-    id: nextId('task'),
-    name: file.name,
-    status: 'pending',
-    progress: 0,
-  }))
-  runQueue()
-  toastStore.info(`开始转换 ${tasks.value.length} 个文件（${format.value}）`)
-}
-
-function runQueue(): void {
-  if (timer !== null) window.clearInterval(timer)
-  timer = window.setInterval(() => {
-    const running = tasks.value.find((task) => task.status === 'running')
-    if (running) {
-      running.progress = Math.min(100, running.progress + Math.round(6 + Math.random() * 14))
-      if (running.progress >= 100) {
-        running.status = 'done'
-        maybeFinish()
-      }
-      return
-    }
-    const next = tasks.value.find((task) => task.status === 'pending')
-    if (next) next.status = 'running'
-    else maybeFinish()
-  }, 240)
-}
-
-function maybeFinish(): void {
-  if (tasks.value.every((task) => task.status === 'done')) {
-    if (timer !== null) {
-      window.clearInterval(timer)
-      timer = null
-    }
-    toastStore.success(`全部转换完成，共 ${tasks.value.length} 个文件`)
+async function startConvert(): Promise<void> {
+  try {
+    await converterStore.start()
+    toastStore.info(`开始转换 ${files.value.length} 个文件（${formatLabel(settings.value.format)}）`)
+  } catch (error) {
+    toastStore.warning(error instanceof Error ? error.message : '启动转换失败')
   }
 }
 
-function clearFinished(): void {
-  tasks.value = tasks.value.filter((task) => task.status !== 'done')
+function formatLabel(value: ConvertFormat): string {
+  return FORMAT_OPTIONS.find((item) => item.value === value)?.label ?? value
 }
 
-onBeforeUnmount(() => {
-  if (timer !== null) window.clearInterval(timer)
+onMounted(() => {
+  // 先订阅再启动任务（幂等）；store 常驻保证切页后任务状态不丢
+  converterStore.init()
 })
 </script>
 
@@ -154,7 +111,9 @@ onBeforeUnmount(() => {
   <section class="converter">
     <header class="converter__header">
       <h1 class="converter__title">音频转换</h1>
-      <p class="converter__subtitle">浏览器预览为本地模拟任务，真实转换将在 Tauri 桌面端执行。</p>
+      <p class="converter__subtitle">
+        {{ isTauri ? '基于 FFmpeg 的本地批量转码，输出目录在曲库监控范围内时会自动入库。' : '浏览器预览为本地模拟任务，真实转换将在 Tauri 桌面端执行。' }}
+      </p>
     </header>
 
     <div class="converter__grid">
@@ -174,12 +133,12 @@ onBeforeUnmount(() => {
         >
           <Icon name="folder-plus" :size="26" />
           <p class="dropzone__text">拖入音频文件，或点击选择</p>
-          <p class="dropzone__hint">支持 MP3 / FLAC / WAV / AAC 等格式</p>
+          <p class="dropzone__hint">支持 MP3 / FLAC / WAV / AAC / APE / DSD 等格式</p>
           <input
             ref="fileInputRef"
             type="file"
             multiple
-            accept="audio/*"
+            accept="audio/*,.dsf,.dff,.ape,.wv,.tta,.tak,.dts"
             hidden
             @change="onFileChange"
           />
@@ -188,13 +147,14 @@ onBeforeUnmount(() => {
         <ul v-if="files.length > 0" class="file-list">
           <li v-for="file in files" :key="file.id" class="file-list__item">
             <Icon name="file" :size="16" />
-            <span class="file-list__name" :title="file.name">{{ file.name }}</span>
-            <span class="file-list__size u-tabular">{{ file.sizeMb }} MB</span>
+            <span class="file-list__name" :title="file.path">{{ file.name }}</span>
+            <span v-if="file.sizeMb > 0" class="file-list__size u-tabular">{{ file.sizeMb }} MB</span>
             <button
               type="button"
               class="file-list__remove"
               aria-label="移除"
-              @click="removeFile(file.id)"
+              :disabled="running"
+              @click="converterStore.removeFile(file.id)"
             >
               <Icon name="x" :size="14" />
             </button>
@@ -203,7 +163,9 @@ onBeforeUnmount(() => {
         <p v-else class="card__hint">尚未添加文件</p>
 
         <div v-if="files.length > 0" class="card__footer">
-          <BaseButton variant="ghost" size="sm" @click="clearFiles">清空列表</BaseButton>
+          <BaseButton variant="ghost" size="sm" :disabled="running" @click="converterStore.clearFiles">
+            清空列表
+          </BaseButton>
         </div>
       </section>
 
@@ -213,32 +175,62 @@ onBeforeUnmount(() => {
 
         <label class="field">
           <span class="field__label">输出格式</span>
-          <select v-model="format" class="field__control">
-            <option v-for="item in FORMATS" :key="item" :value="item">{{ item }}</option>
+          <select
+            class="field__control"
+            :value="settings.format"
+            @change="converterStore.updateSettings({ format: ($event.target as HTMLSelectElement).value as ConvertFormat })"
+          >
+            <option v-for="item in FORMAT_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
         </label>
 
         <label class="field">
           <span class="field__label">采样率</span>
-          <select v-model="sampleRate" class="field__control">
-            <option v-for="item in SAMPLE_RATES" :key="item" :value="item">{{ item }}</option>
+          <select
+            class="field__control"
+            :value="settings.sampleRate"
+            @change="converterStore.updateSettings({ sampleRate: Number(($event.target as HTMLSelectElement).value) })"
+          >
+            <option v-for="item in SAMPLE_RATE_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
         </label>
 
         <label class="field">
           <span class="field__label">位深</span>
-          <select v-model="bitDepth" class="field__control" :disabled="format.startsWith('MP3') || format.startsWith('AAC')">
-            <option v-for="item in BIT_DEPTHS" :key="item" :value="item">{{ item }}</option>
+          <select
+            class="field__control"
+            :disabled="lossyFormat"
+            :value="settings.bitDepth"
+            @change="converterStore.updateSettings({ bitDepth: Number(($event.target as HTMLSelectElement).value) as 16 | 24 })"
+          >
+            <option v-for="item in BIT_DEPTH_OPTIONS" :key="item" :value="item">{{ item }} bit</option>
           </select>
         </label>
 
-        <label class="field">
+        <div class="field">
           <span class="field__label">输出目录</span>
-          <input v-model="outputDir" type="text" class="field__control" placeholder="选择输出目录" />
-        </label>
+          <div class="field__row">
+            <input
+              class="field__control"
+              type="text"
+              placeholder="选择输出目录"
+              :value="settings.outputDir"
+              :disabled="isTauri"
+              @input="converterStore.updateSettings({ outputDir: ($event.target as HTMLInputElement).value })"
+            />
+            <BaseButton variant="ghost" size="sm" @click="onPickOutputDir">
+              <Icon name="folder" :size="14" />
+              浏览
+            </BaseButton>
+          </div>
+        </div>
 
         <div class="card__footer card__footer--end">
-          <BaseButton variant="primary" size="md" :disabled="hasRunning" @click="startConvert">
+          <BaseButton v-if="running" variant="ghost" size="md" @click="converterStore.cancel">
+            <Icon name="x" :size="16" />
+            取消转换
+          </BaseButton>
+          <BaseButton variant="primary" size="md" :disabled="running" @click="startConvert">
             <Icon name="swap" :size="16" />
             开始转换
           </BaseButton>
@@ -250,31 +242,39 @@ onBeforeUnmount(() => {
         <div class="card__head">
           <h2 class="card__title">任务队列</h2>
           <BaseButton
-            v-if="doneCount > 0"
+            v-if="finishedCount > 0"
             variant="ghost"
             size="sm"
-            :disabled="hasRunning"
-            @click="clearFinished"
+            :disabled="running"
+            @click="converterStore.clearFinished"
           >
             <Icon name="trash-2" :size="14" />
-            清除已完成
+            清除已结束
           </BaseButton>
         </div>
 
         <ul v-if="tasks.length > 0" class="task-list">
           <li v-for="task in tasks" :key="task.id" class="task-list__item">
             <div class="task-list__meta">
-              <span class="task-list__name" :title="task.name">{{ task.name }}</span>
-              <span class="task-list__status">
-                <template v-if="task.status === 'pending'">等待中</template>
-                <template v-else-if="task.status === 'running'">转换中 {{ task.progress }}%</template>
-                <template v-else>已完成</template>
+              <span class="task-list__name" :title="task.outputPath ?? task.name">{{ task.name }}</span>
+              <span
+                class="task-list__status"
+                :class="{
+                  'task-list__status--failed': task.status === 'failed',
+                  'task-list__status--done': task.status === 'done',
+                }"
+              >
+                {{ taskStatusText(task) }}
               </span>
             </div>
             <div class="task-list__bar">
               <div
                 class="task-list__fill"
-                :class="{ 'task-list__fill--done': task.status === 'done' }"
+                :class="{
+                  'task-list__fill--done': task.status === 'done',
+                  'task-list__fill--failed': task.status === 'failed',
+                  'task-list__fill--cancelled': task.status === 'cancelled',
+                }"
                 :style="{ width: `${task.status === 'done' ? 100 : task.progress}%` }"
               ></div>
             </div>
@@ -337,6 +337,7 @@ onBeforeUnmount(() => {
 
 .card__footer--end {
   justify-content: flex-end;
+  gap: var(--space-2);
 }
 
 .card__title {
@@ -458,6 +459,17 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
 }
 
+.field__row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.field__row .field__control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .field__control {
   width: 100%;
   padding: var(--space-2) var(--space-3);
@@ -510,6 +522,14 @@ onBeforeUnmount(() => {
   color: var(--color-text-tertiary);
 }
 
+.task-list__status--failed {
+  color: var(--color-danger);
+}
+
+.task-list__status--done {
+  color: var(--color-success);
+}
+
 .task-list__bar {
   height: 4px;
   background-color: var(--color-bg-hover);
@@ -526,5 +546,13 @@ onBeforeUnmount(() => {
 
 .task-list__fill--done {
   background-color: var(--color-success);
+}
+
+.task-list__fill--failed {
+  background-color: var(--color-danger);
+}
+
+.task-list__fill--cancelled {
+  background-color: var(--color-text-disabled);
 }
 </style>

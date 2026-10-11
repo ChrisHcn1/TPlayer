@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本（变更表结构时递增并写迁移分支）
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// 打开（必要时创建）曲库数据库并完成 PRAGMA / 建表
 pub fn open(db_path: &Path) -> AppResult<Connection> {
@@ -36,7 +36,30 @@ pub fn open(db_path: &Path) -> AppResult<Connection> {
         .map_err(|e| AppError::Library(format!("设置 synchronous 失败: {}", e)))?;
 
     init_schema(&conn)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// 幂等迁移：老库已建表但缺新列时补充（新库由 SCHEMA_SQL 直接带列，跳过）
+fn migrate(conn: &Connection) -> AppResult<()> {
+    let has_column = |name: &str| -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    };
+    if !has_column("replaygain_db") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN replaygain_db REAL")
+            .map_err(|e| AppError::Library(format!("迁移 schema v2 失败（replaygain_db）: {e}")))?;
+    }
+    if !has_column("replaygain_peak") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN replaygain_peak REAL")
+            .map_err(|e| AppError::Library(format!("迁移 schema v2 失败（replaygain_peak）: {e}")))?;
+    }
+    Ok(())
 }
 
 /// 建表（IF NOT EXISTS，幂等）

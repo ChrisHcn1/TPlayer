@@ -1,7 +1,7 @@
 # TPlayer Next —— 项目进度清单
 
 > 本文件是项目的唯一进度台账。**每次继续本项目时，先读本文件，不要全量遍历代码。**
-> 最后更新：2026-10-01
+> 最后更新：2026-10-11
 
 ---
 
@@ -141,8 +141,8 @@ npm run typecheck  # 仅类型检查
 - [x] 侧栏折叠把手移位 + 转换器入口归位（2026-10-01：折叠按钮从侧栏底部移到侧栏/内容区分隔线上垂直居中的 26px 圆钮（z-index 10，hover 品牌色）；/converter 路由保留但移出侧栏 nav，设置页新增"工具"页签内嵌 ConverterView，Ctrl+K 命令面板仍可直达）
 - [x] 艺术家/专辑封面展示（2026-10-01：MediaCard 新增封面懒加载，IntersectionObserver 300px 视口预取，img object-fit cover 铺满、无封面回落变体图标；AlbumsView/ArtistsView/CueAlbumsView 网格与三个详情页头部全部出封面）
 - [x] 专辑/艺术家封面聚合补全（2026-10-06：封面链扩展为 内嵌 → 同名边车 → 目录图(folder/cover/front 等及含 cover/folder/front 的变体) → 在线；新增 library_album_cover/library_artist_cover 命令，组内候选按 hasCover+音轨号排序逐首回退（上限 30），本地全空时仅做一次网易云在线匹配（受 online.enabled 控制）；分组键 album:/artist: 独立内存+磁盘缓存，成员单曲缓存自动镜像到分组键，下次启动零解析零联网，负缓存仅存内存保证重试；前端 useTrackCover 泛化为 track/album/artist 三类 key，网格与详情统一走聚合封面，store 不再维护代表曲目映射）
-- [ ] 转换器接 Rust 后端（三卡片交互已闭环，M2 前端仍为 mock；入口已移至设置-工具页签）
-- [ ] 队列项移除（需 player 服务新增 removeFromQueue / jumpTo 命令）
+- [x] 转换器接 Rust 后端（2026-10-11 完成：新增 `converter.rs` 模块 —— ffmpeg 批量转码专用线程（顺序执行、-progress 实时进度、stderr 错误回收、半成品清理、同名 "(n)" 编号绝不覆盖）、取消（任务间跳过 + kill 当前子进程）、`converter://event` 事件（started/progress/completed/failed/finished）；命令 converter_start/cancel/probe_files；AppError::Converter；实测修正 out_time_ms 微秒陷阱改解析 out_time 时间串；前端 types/converter.ts 契约 + services/converter.ts（Tauri 实现 + Web mock 定时器模拟）+ stores/converter.ts（事件驱动任务状态、设置 localStorage 持久化、切页不丢状态）+ ConverterView 真实路径选择（pickAudioFiles/pickDirectory）、取消按钮、失败/取消态展示；四格式命令行参数已用项目 bin/ffmpeg.exe 实测通过；cargo check 与 npm run build 零错误）
+- [x] 队列项移除（2026-10-11 完成：`handle.rs` remove_from_queue（下标越界校验、当前曲下标修正、移除当前曲不打断播放、被移除项恰为预加载下一曲时失效标记）、新增 PlaybackEvent::Queue 事件推送最新上下文 + player_remove_from_queue 命令；前端 IPlayer.removeFromQueue 契约 + Tauri/Web 双实现 + store removeFromQueue 动作与 queue 事件同步；QueuePanel 行尾 hover × 移除按钮（绝对定位避免 button 嵌套）；队列跳播已有双击 playFromContext 覆盖，未另设 jumpTo 命令；cargo check 与 npm run build 零错误）
 - [ ] 在线模块真实通道（默认关闭，开启也不上报本地曲库；设置开关已就绪；歌词与封面通道已真实化）
 - [ ] 拖拽导入（§5.8）
 - [ ] 系统媒体控制 SMTC / MediaSession 集成
@@ -161,6 +161,45 @@ npm run typecheck  # 仅类型检查
 
 ---
 
+### 性能优化专项：切歌/下一首间隙（淡入淡出减少切换间隙）（2026-10-10 新增）
+
+> 目标：将「点击下一首 / 自动连播」到新曲可闻的间隙压缩到 ~400ms 内并平滑过渡。
+> 根因（已定位）：引擎 `play()` 同步阻塞完成解码初始化后，新曲才从静默开始 400ms 淡入；全程无预解码/预加载下一曲；`FADE_MS` 硬编码 400ms 不可调；ffmpeg 后端切歌还需新起子进程（seek 为 `-ss` 重启）；状态机在曲目真正结束后才取 next_id 再 play。
+
+- [x] P0 预解码/预加载下一曲（核心）：引擎维护 `next` 链路（File::open + Decoder / ffmpeg 子进程提前驻留），切歌时直接 swap 接管为新 current、旧曲转 fading_out，消除「打开+解码初始化」可听间隙；注意句柄/子进程生命周期与多路驻留上限
+- [x] P1 交叉淡化时长参数化：`FADE_MS` 常量改为设置项（开关 + 0~3s 滑块，对齐旧版 crossfadeEnabled/crossfadeDuration 默认 1s），持久化进 config.json / settings store，engine 命令下发（2026-10-10 后端落地；2026-10-11 确认 SettingsView 播放页签 UI 已接好，闭环完成）
+- [ ] P1 解码初始化异步化：`play()` 内的 File::open / Decoder::new / spawn_ffmpeg 移出引擎主循环（或独立预解码线程），避免阻塞 fade 驱动与命令处理；ffmpeg 后端 seek 的 `-ss` 重启同步改异步
+- [x] P2 自动连播预加载（2026-10-10：handle.rs tick 循环在剩余 < 3s 且 next 空时经 maybe_preload_next 取下一曲 id 调 engine.preload 预解码到 next 链路，推送 NextPreloaded 事件；on_track_ended 优先 swap_to_next 无缝接管，失败/曲目变更回退普通 play；主动 play/stop 使预加载失效）
+- [x] P2 前端衔接（2026-10-10：PlayerBar 传输区「下一首准备中」徽标，由 NextPreloaded 事件驱动 nextReady 状态，切歌/停止自动复位；仅用 theme.css token，无写死色值）
+
+---
+
+### 功能增强专项（2026-10-10 新增）
+
+> 目标：延续核心体验打磨，按「尖刀功能优先」原则分两档推进——近期先落地三个高价值尖刀功能，其余建议功能列入后期更新项目计划。
+
+#### 近期实施项
+- [x] 收听报告 + 分享卡片：按曲目/歌手/时段/榜单维度生成收听统计报告，一键渲染可分享卡片（导出图片/复制文本）（2026-10-10 完成：本地统计 store + 收听报告视图 + SVG 分享卡片 PNG 导出）
+- [x] 音量归一化 ReplayGain：解析 ReplayGain 标签（或按参考响度计算），播放时按增益自动归一化，避免切歌音量跳变（2026-10-10 完成：入库解析内嵌 TRACK_GAIN/TRACK_PEAK 标签 + db v2 持久化 + 无标签曲目首次播放 ffmpeg ebur128 响度分析 + 引擎按增益归一化音量（-14 LUFS 目标、峰值防削波）+ 设置页开关，cargo build --release 与 npm run build 零错误）
+- [x] 目录自动监控：监听曲库目录变更（新增/删除/改名），增量同步进曲库，无需手动重新扫描（2026-10-11 完成：Rust notify 实时监听（600ms 去抖批量）+ 按磁盘实况增量入库/更新/移除 + Tauri 事件推送前端自动刷新曲库 + 设置页开关与监控状态展示，cargo build --release 与 npm run build 零错误）
+- [x] 睡眠定时器（2026-10-11 完成：`handle.rs` SleepTimer（epoch 到期 + wait_track_end 模式到期后播完当前曲才停、delay=0 立即进入曲终等待），tick 到期立即暂停并推送 sleepTimer 事件，on_track_ended 曲终停播分支；新增 player_set_sleep_timer / player_cancel_sleep_timer / player_sleep_timer_status 命令；IPlayer 契约 + Web mock（setTimeout 暂停/曲终停止）+ player store sleepTimer 状态与动作；PlayerBar 右侧新增月亮按钮，菜单 15/30/45/60/90 分钟 / 播完当前曲目后停止 / 取消定时，激活态高亮 + title 倒计时；顺带修复 NextPreloaded 事件 serde tag 全小写导致前端 'nextPreloaded' 分支不命中的隐患（改显式 rename）；cargo check 与 npm run build 零错误）
+
+#### 后期更新项目计划（未实施）
+- [x] 睡眠定时器（→ 已提前完成，见上）
+- [ ] 播放统计权重
+- [ ] 桌面歌词透明模式
+- [ ] 迷你模式
+- [ ] 频谱可视化
+- [ ] 元数据编辑器
+- [ ] 重复曲目检测
+- [ ] 智能歌单
+- [ ] 歌单导入导出 m3u/pls
+- [ ] 均衡器补齐
+- [ ] 变速播放
+- [ ] 播放历史导出
+
+---
+
 ## 6. 已知问题与决策备忘
 
 | 编号 | 问题 | 状态 |
@@ -175,6 +214,7 @@ npm run typecheck  # 仅类型检查
 | BUG-008 | 标题栏品牌名 | ✅ 已统一为「TPlayer Next」 |
 | BUG-009 | 依赖安装越界 | ⚠️ 记录：vue-router 缺失 + node_modules 缺失导致编译阻塞，file-agent 已代为 `npm install`（含补装 vue-router），用户此前约束为「本阶段不做重量级安装」，需知悉 |
 | BUG-010 | `dist/` 构建产物 | ⚠️ 复核用产物，可删除；已确认在 `.gitignore` 内 |
+| BUG-011 | 启动即假死（窗口"未响应"） | ✅ 已修复（2026-10-11。根因：目录监控 setup 中 `state.watch.reconfigure(app, &state.config.lock().unwrap().library_dirs, state.config.lock().unwrap().watch.enabled)` —— 同一表达式两次 lock 同一把 config Mutex，第 1 个临时 MutexGuard 存活到语句结束导致同线程自死锁（std Mutex 不可重入），主线程卡死在 setup 内、事件循环永不启动。修复：先在独立作用域取出 (dirs, watch_enabled) 再调用。经验教训：同一调用表达式中不要对同一 Mutex 多次 lock。诊断记录：Tauri 2 中非 async 命令默认跑在主线程、窗口先于 setup 创建（假死但窗口可见）、GUI 子系统下 eprintln 不可见需文件插桩 |
 
 ---
 

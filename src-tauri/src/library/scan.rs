@@ -13,7 +13,7 @@ use super::models::{album_id_of, ScanProgress, ScanStage, Track};
 
 /// 扫描支持的扩展名（索引范围 ≥ 播放范围：dsd/dts/ape 等可入库展示，
 /// 播放时若引擎无法解码会以明确错误事件反馈）
-const SUPPORTED_EXT: &[&str] = &[
+pub(crate) const SUPPORTED_EXT: &[&str] = &[
     // 可直接解码播放（rodio/symphonia）
     "mp3", "flac", "wav", "ogg", "oga", "opus", "aac", "m4a",
     // 可索引（lofty 读取标签或回退文件名），播放需后续解码后端
@@ -31,7 +31,7 @@ pub struct ScanResult {
 }
 
 /// 递归发现目录下所有音频文件
-fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -62,7 +62,7 @@ fn track_id_from_path(path: &Path) -> String {
 }
 
 /// 解析单个音频文件的元数据
-fn parse_track(path: &Path) -> Option<Track> {
+pub(crate) fn parse_track(path: &Path) -> Option<Track> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified_at = metadata
         .modified()
@@ -81,61 +81,89 @@ fn parse_track(path: &Path) -> Option<Track> {
     let id = track_id_from_path(path);
 
     // 用 lofty 读取标签
-    let (title, artists, album, track_number, year, mut duration, bitrate, sample_rate, has_cover) =
-        match lofty::read_from_path(path) {
-            Ok(file) => {
-                let tag = file.primary_tag().cloned();
-                let props = file.properties();
-                let title = tag
-                    .as_ref()
-                    .and_then(|t| t.title().map(|s| s.to_string()))
-                    .unwrap_or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "未知标题".to_string())
-                    });
-                let artists = tag
-                    .as_ref()
-                    .and_then(|t| t.artist().map(|a| split_artists(a.as_ref())))
-                    .unwrap_or_else(|| vec!["未知艺术家".to_string()]);
-                let album = tag
-                    .as_ref()
-                    .and_then(|t| t.album().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "未知专辑".to_string());
-                let track_number = tag.as_ref().and_then(|t| t.track());
-                let year = tag.as_ref().and_then(|t| t.year());
-                let duration = props.duration().as_secs_f64();
-                let bitrate = props.audio_bitrate();
-                let sample_rate = props.sample_rate();
-                let has_cover = tag.as_ref().map(|t| !t.pictures().is_empty()).unwrap_or(false);
-                (
-                    title,
-                    artists,
-                    album,
-                    track_number,
-                    year,
-                    duration,
-                    bitrate,
-                    sample_rate,
-                    has_cover,
-                )
-            }
-            Err(_) => (
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "未知标题".to_string()),
-                vec!["未知艺术家".to_string()],
-                "未知专辑".to_string(),
-                None,
-                None,
-                0.0,
-                None,
-                None,
-                false,
-            ),
-        };
+    let (
+        title,
+        artists,
+        album,
+        track_number,
+        year,
+        mut duration,
+        bitrate,
+        sample_rate,
+        has_cover,
+        replaygain_db,
+        replaygain_peak,
+    ) = match lofty::read_from_path(path) {
+        Ok(file) => {
+            let tag = file.primary_tag().cloned();
+            let props = file.properties();
+            let title = tag
+                .as_ref()
+                .and_then(|t| t.title().map(|s| s.to_string()))
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "未知标题".to_string())
+                });
+            let artists = tag
+                .as_ref()
+                .and_then(|t| t.artist().map(|a| split_artists(a.as_ref())))
+                .unwrap_or_else(|| vec!["未知艺术家".to_string()]);
+            let album = tag
+                .as_ref()
+                .and_then(|t| t.album().map(|s| s.to_string()))
+                .unwrap_or_else(|| "未知专辑".to_string());
+            let track_number = tag.as_ref().and_then(|t| t.track());
+            let year = tag.as_ref().and_then(|t| t.year());
+            let duration = props.duration().as_secs_f64();
+            let bitrate = props.audio_bitrate();
+            let sample_rate = props.sample_rate();
+            let has_cover = tag.as_ref().map(|t| !t.pictures().is_empty()).unwrap_or(false);
+            // ReplayGain 内嵌标签：优先取 TRACK 级增益与峰值（形如 "+3.21 dB" / "0.987654"）
+            let (replaygain_db, replaygain_peak) = match tag.as_ref() {
+                Some(t) => {
+                    let gain = t
+                        .get_strings(&lofty::tag::ItemKey::ReplayGainTrackGain)
+                        .find_map(parse_replaygain_gain_db);
+                    let peak = t
+                        .get_strings(&lofty::tag::ItemKey::ReplayGainTrackPeak)
+                        .find_map(parse_replaygain_peak);
+                    (gain, peak)
+                }
+                None => (None, None),
+            };
+            (
+                title,
+                artists,
+                album,
+                track_number,
+                year,
+                duration,
+                bitrate,
+                sample_rate,
+                has_cover,
+                replaygain_db,
+                replaygain_peak,
+            )
+        }
+        Err(_) => (
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "未知标题".to_string()),
+            vec!["未知艺术家".to_string()],
+            "未知专辑".to_string(),
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            false,
+            None,
+            None,
+        ),
+    };
 
     // 时长兜底：lofty 无法解析的格式（dsf/dff/dts/tta 等）用 ffprobe 探测，
     // 否则 duration=0 会导致播放进度不推进、自动连播失效
@@ -164,9 +192,32 @@ fn parse_track(path: &Path) -> Option<Track> {
         bitrate,
         sample_rate,
         has_cover,
+        replaygain_db,
+        replaygain_peak,
         added_at: chrono::Utc::now().timestamp(),
         modified_at,
     })
+}
+
+/// 解析 ReplayGain TRACK_GAIN 标签（形如 "+3.21 dB" / "-2.5 dB" / "0.00 dB"）
+fn parse_replaygain_gain_db(raw: &str) -> Option<f32> {
+    let trimmed = raw.trim();
+    let numeric = trimmed
+        .trim_end_matches("dB")
+        .trim_end_matches("db")
+        .trim_end_matches("DB")
+        .trim();
+    numeric.parse::<f32>().ok().map(|v| v.clamp(-24.0, 24.0))
+}
+
+/// 解析 ReplayGain TRACK_PEAK 标签（形如 "0.987654" 或 "0.98765 dBFS"）
+fn parse_replaygain_peak(raw: &str) -> Option<f32> {
+    let trimmed = raw.trim();
+    let numeric = trimmed
+        .trim_end_matches("dBFS")
+        .trim_end_matches("dbfs")
+        .trim();
+    numeric.parse::<f32>().ok().map(|v| v.clamp(0.0, 10.0))
 }
 
 fn split_artists(raw: &str) -> Vec<String> {

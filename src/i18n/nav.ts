@@ -41,6 +41,7 @@ const NAV_LABELS: Record<string, string> = {
   'nav.search': '搜索',
   /* 工具组（§1.1 第 8 项） */
   'nav.converter': '转换器',
+  'nav.stats': '收听报告',
   /* 底部固定组（§1.1 第 9 项 + §4.2 的主题切换 / 折叠按钮） */
   'nav.settings': '设置',
   'nav.theme': '切换主题',

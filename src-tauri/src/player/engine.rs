@@ -13,11 +13,6 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 
-/// 切歌淡入 / 淡出时长（毫秒）：旧曲目淡出与新曲目淡入重叠形成交叉淡化
-const FADE_MS: u64 = 400;
-/// 渐变驱动步进：引擎线程命令循环的轮询间隔
-const FADE_TICK_MS: u64 = 20;
-
 /// symphonia 原生可解码的扩展名；其余格式走 ffmpeg 子进程解码为 PCM
 const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga", "opus", "aac", "m4a"];
 
@@ -107,9 +102,9 @@ pub struct EngineCapabilities {
 /// 发往引擎线程的命令
 enum EngineCommand {
     /// 播放（附回执通道：打开/解码是否成功同步回传，失败可转为 error 事件）
-    Play(PathBuf, mpsc::Sender<AppResult<()>>),
+    Play(PathBuf, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
     /// 播放并定位到指定毫秒（断点续播专用：等混音线程起流后再 seek，规避启动竞态）
-    PlayAt(PathBuf, u64, mpsc::Sender<AppResult<()>>),
+    PlayAt(PathBuf, u64, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
     Pause,
     Resume,
     Stop,
@@ -118,27 +113,36 @@ enum EngineCommand {
     SetMuted(bool),
     /// 当前 sink 是否已播完（无音源在播）：供状态机兜底时长未知（0）时的结束检测
     IsEnded(mpsc::Sender<bool>),
+    /// 更新交叉淡化配置（启用 + 时长 ms）
+    SetCrossfade(bool, u64),
+    /// 预解码下一曲到待命链路（不发声；切歌时 SwapToNext 无缝接管）
+    Preload(PathBuf, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
+    /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
+    SwapToNext(mpsc::Sender<AppResult<()>>),
+    /// 更新音量归一化 ReplayGain 开关（开启时当前曲目立即应用增益）
+    SetReplayGain(bool),
 }
 
 /// 引擎句柄（Send）：PlayerHandle 通过它控制播放
+#[derive(Clone)]
 pub struct EngineHandle {
     tx: mpsc::Sender<EngineCommand>,
 }
 
 impl EngineHandle {
-    pub fn play(&self, path: PathBuf) -> AppResult<()> {
+    pub fn play(&self, path: PathBuf, gain: Option<(f32, f32)>) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::Play(path, ack_tx))
+            .send(EngineCommand::Play(path, gain, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?
     }
-    pub fn play_at(&self, path: PathBuf, position_ms: u64) -> AppResult<()> {
+    pub fn play_at(&self, path: PathBuf, position_ms: u64, gain: Option<(f32, f32)>) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::PlayAt(path, position_ms, ack_tx))
+            .send(EngineCommand::PlayAt(path, position_ms, gain, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
@@ -182,24 +186,59 @@ impl EngineHandle {
             .map(|_| ack_rx.recv().unwrap_or(false))
             .unwrap_or(false)
     }
+
+    /// 更新交叉淡化参数（启用 + 时长 ms）
+    pub fn set_crossfade(&self, enabled: bool, duration_ms: u64) {
+        let _ = self.tx.send(EngineCommand::SetCrossfade(enabled, duration_ms));
+    }
+
+    /// 预解码下一曲到待命链路（不发声；切歌时 swap_to_next 无缝接管）
+    pub fn preload(&self, path: std::path::PathBuf, gain: Option<(f32, f32)>) -> AppResult<()> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.tx
+            .send(EngineCommand::Preload(path, gain, ack_tx))
+            .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
+        ack_rx
+            .recv()
+            .map_err(|_| AppError::Player("引擎线程已退出".into()))?
+    }
+
+    /// 更新音量归一化 ReplayGain 开关（开启时当前曲目立即应用增益）
+    pub fn set_replaygain(&self, enabled: bool) {
+        let _ = self.tx.send(EngineCommand::SetReplayGain(enabled));
+    }
+
+    /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
+    pub fn swap_to_next(&self) -> AppResult<()> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.tx
+            .send(EngineCommand::SwapToNext(ack_tx))
+            .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
+        ack_rx
+            .recv()
+            .map_err(|_| AppError::Player("引擎线程已退出".into()))?
+    }
 }
 
 /// 启动引擎线程，返回可发送命令的句柄
 pub fn spawn_engine() -> EngineHandle {
     let (tx, rx) = mpsc::channel::<EngineCommand>();
     std::thread::Builder::new()
-        .name("audio-engine".into())
-        .spawn(move || {
-            let mut engine = RodioEngine::new();
+    .name("audio-engine".into())
+    .spawn(move || {
+        let mut engine = RodioEngine::new();
+            // 引擎级交叉淡化配置：是否启用 + 时长（ms）
+            let mut fade_enabled = true;
+            let mut fade_duration_ms: u64 = 400;
             // recv 改为带超时轮询：无命令期间也能以 ~20ms 步进驱动淡入淡出
             loop {
-                match rx.recv_timeout(Duration::from_millis(FADE_TICK_MS)) {
+                match rx.recv_timeout(Duration::from_millis(20)) {
                     Ok(cmd) => match cmd {
-                        EngineCommand::Play(path, ack) => {
-                            let _ = ack.send(engine.play(&path));
+                        EngineCommand::Play(path, gain, ack) => {
+                            let _ = ack.send(engine.play(&path, gain));
                         }
-                        EngineCommand::PlayAt(path, pos_ms, ack) => {
-                            let _ = ack.send(engine.play_at(&path, pos_ms));
+                        EngineCommand::PlayAt(path, pos_ms, gain, ack) => {
+                            let _ = ack.send(engine.play_at(&path, pos_ms, gain));
                         }
                         EngineCommand::Pause => {
                             let _ = engine.pause();
@@ -222,11 +261,33 @@ pub fn spawn_engine() -> EngineHandle {
                         EngineCommand::IsEnded(ack) => {
                             let _ = ack.send(engine.current_ended());
                         }
+                        EngineCommand::SetCrossfade(enabled, duration_ms) => {
+                            fade_enabled = enabled;
+                            fade_duration_ms = duration_ms;
+                            engine.fade_ms = duration_ms;
+                        }
+                        EngineCommand::Preload(path, gain, ack) => {
+                            let _ = ack.send(engine.preload(&path, gain));
+                        }
+                        EngineCommand::SwapToNext(ack) => {
+                            let _ = ack.send(engine.swap_to_next());
+                        }
+                        EngineCommand::SetReplayGain(enabled) => {
+                            engine.replaygain_enabled = enabled;
+                            // 开关变化时当前曲目立即按新策略重算目标音量
+                            if engine.fade_in_started.is_none() {
+                                engine.apply_volume();
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                engine.tick_fades();
+                if fade_enabled {
+                    engine.tick_fades(fade_duration_ms);
+                } else {
+                    engine.tick_fades(0);
+                }
             }
         })
         .expect("failed to spawn audio engine thread");
@@ -238,6 +299,8 @@ pub fn spawn_engine() -> EngineHandle {
 struct Playback {
     sink: rodio::Sink,
     ffmpeg_child: Option<Child>,
+    /// 本曲目生效的 ReplayGain 音量倍率（用户音量之外的乘数）
+    gain_scale: f32,
 }
 
 impl Playback {
@@ -286,6 +349,14 @@ struct RodioEngine {
     current_path: Option<PathBuf>,
     /// 当前曲目是否走 ffmpeg 管道（决定 seek 方式）
     current_is_ffmpeg: bool,
+    /// 预加载的下一曲链路（sink 暂停待命；SwapToNext 时接管）
+    next: Option<Playback>,
+    /// 预加载链路对应的路径（play 时据此判断是否复用）
+    next_path: Option<PathBuf>,
+    /// 当前交叉淡化时长（ms）；SetCrossfade 更新，切歌淡出起点计算使用
+    fade_ms: u64,
+    /// 音量归一化 ReplayGain 开关（默认开启，与设置默认一致）
+    replaygain_enabled: bool,
 }
 
 impl RodioEngine {
@@ -305,16 +376,41 @@ impl RodioEngine {
             muted: false,
             current_path: None,
             current_is_ffmpeg: false,
+            next: None,
+            next_path: None,
+            fade_ms: 1000,
+            replaygain_enabled: true,
         }
     }
 
-    /// 用户期望的目标音量（静音为 0）
+    /// 由 ReplayGain 标签/分析结果计算本曲目音量倍率（用户音量之外）
+    /// gain = (增益 dB, 峰值线性)；关闭开关或无数据时返回 1.0（不归一化）。
+    /// 规则：放大受峰值防削波限制（scale <= 1/peak），并整体限制在 [0.05, 4.0]
+    /// 防极端曲目把音量推到听感失衡。
+    fn gain_scale_for(&self, gain: Option<(f32, f32)>) -> f32 {
+        if !self.replaygain_enabled {
+            return 1.0;
+        }
+        let Some((gain_db, peak)) = gain else {
+            return 1.0;
+        };
+        let db = gain_db.clamp(-24.0, 24.0);
+        let mut scale = 10.0_f32.powf(db / 20.0);
+        if peak.is_finite() && peak > 0.0 {
+            scale = scale.min(1.0 / peak);
+        }
+        scale.clamp(0.05, 4.0)
+    }
+
+    /// 用户期望的目标音量（静音为 0，乘以当前曲目的 ReplayGain 倍率）
     fn target_volume(&self) -> f32 {
-        if self.muted {
+        let user = if self.muted {
             0.0
         } else {
             self.volume
-        }
+        };
+        let gain = self.current.as_ref().map(|p| p.gain_scale).unwrap_or(1.0);
+        user * gain
     }
 
     /// 立即把当前 sink 设到目标音量（音量 / 静音变更时调用）
@@ -331,10 +427,31 @@ impl RodioEngine {
     }
 
     /// 渐变驱动（每 ~20ms）：新曲目淡入到目标音量，旧曲目淡出到静默后回收
-    fn tick_fades(&mut self) {
+    /// fade_duration 为当前生效的交叉淡化时长（ms）；0 时关闭淡化。
+    fn tick_fades(&mut self, fade_duration_ms: u64) {
+        let fade_ms = if fade_duration_ms > 0 {
+            fade_duration_ms
+        } else {
+            // 关闭淡入淡出：直接设满音量 / 静默
+            if let Some(started) = self.fade_in_started {
+                let _ = started.elapsed();
+                if let Some(playback) = &self.current {
+                    playback.sink.set_volume(self.target_volume());
+                }
+                self.fade_in_started = None;
+            }
+            if let Some(fading) = &self.fading_out {
+                fading.playback.sink.set_volume(0.0);
+                if let Some(done) = self.fading_out.take() {
+                    done.playback.halt();
+                }
+            }
+            return;
+        };
+
         // 新曲目淡入
         if let Some(started) = self.fade_in_started {
-            let t = started.elapsed().as_millis() as f32 / FADE_MS as f32;
+            let t = started.elapsed().as_millis() as f32 / fade_ms as f32;
             if let Some(playback) = &self.current {
                 playback.sink.set_volume(self.target_volume() * Self::ease(t));
             }
@@ -346,7 +463,7 @@ impl RodioEngine {
 
         // 旧曲目淡出：结束即停止并释放（含 ffmpeg 子进程）
         if let Some(fading) = &self.fading_out {
-            let t = fading.started.elapsed().as_millis() as f32 / FADE_MS as f32;
+            let t = fading.started.elapsed().as_millis() as f32 / fade_ms as f32;
             let gain = fading.from * (1.0 - Self::ease(t));
             fading.playback.sink.set_volume(gain);
             if t >= 1.0 {
@@ -370,15 +487,26 @@ impl RodioEngine {
             .ok_or_else(|| AppError::Player("音频输出设备不可用".into()))
     }
 
-    fn play(&mut self, path: &std::path::Path) -> AppResult<()> {
+    fn play(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>) -> AppResult<()> {
         let handle = self.ensure_stream()?.clone();
+        let gain_scale = self.gain_scale_for(gain);
+
+        // 预加载链路与本曲目一致时直接无缝接管（复用已解码的下一曲）
+        if self.next_path.as_deref() == Some(path) {
+            return self.swap_to_next();
+        }
+        // 路径不一致：预加载链路已无用，立即回收
+        if let Some(stale) = self.next.take() {
+            stale.halt();
+        }
+        self.next_path = None;
 
         // 旧曲目转入淡出链路（交叉淡化）；淡出起点取其当前实际增益，
         // 淡入中途切歌也不会出现音量跳变
         if let Some(old) = self.current.take() {
             let from = match &self.fade_in_started {
                 Some(started) => {
-                    let t = started.elapsed().as_millis() as f32 / FADE_MS as f32;
+                    let t = started.elapsed().as_millis() as f32 / self.fade_ms as f32;
                     self.target_volume() * Self::ease(t)
                 }
                 None => self.target_volume(),
@@ -418,6 +546,7 @@ impl RodioEngine {
         self.current = Some(Playback {
             sink,
             ffmpeg_child,
+            gain_scale,
         });
         self.fade_in_started = Some(Instant::now());
         self.current_path = Some(path.to_path_buf());
@@ -425,9 +554,87 @@ impl RodioEngine {
         Ok(())
     }
 
+    /// 预解码下一曲到待命链路：创建 sink + 解码器/ffmpeg 子进程，
+    /// 但 sink 立即暂停不发声，等待 SwapToNext 或 play 路径一致时复用。
+    fn preload(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>) -> AppResult<()> {
+        // 新预加载前先回收旧预加载链路
+        if let Some(stale) = self.next.take() {
+            stale.halt();
+        }
+
+        let handle = self.ensure_stream()?.clone();
+        let gain_scale = self.gain_scale_for(gain);
+        let sink = rodio::Sink::try_new(&handle)
+            .map_err(|e| AppError::Player(format!("无法创建音频 sink: {}", e)))?;
+
+        let is_ffmpeg = !is_native_format(path);
+        let ffmpeg_child = if is_ffmpeg {
+            let (child, source) = spawn_ffmpeg_decoder(path, 0)?;
+            sink.append(source);
+            Some(child)
+        } else {
+            let file = std::fs::File::open(path).map_err(|e| {
+                AppError::Player(format!("无法打开音频文件 {}: {}", path.display(), e))
+            })?;
+            let decoder = rodio::Decoder::new(BufReader::new(file))
+                .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
+            sink.append(decoder);
+            None
+        };
+
+        // 待命：暂停不发声，避免预加载期间泄漏音频
+        sink.pause();
+        self.next = Some(Playback {
+            sink,
+            ffmpeg_child,
+            gain_scale,
+        });
+        self.next_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// 无缝接管预加载链路：旧曲目转入淡出，新曲目从静默淡入并开始发声。
+    fn swap_to_next(&mut self) -> AppResult<()> {
+        let next = self
+            .next
+            .take()
+            .ok_or_else(|| AppError::Player("没有预加载的曲目".into()))?;
+        let next_path = self.next_path.take();
+
+        // 旧曲目转入淡出链路（交叉淡化）；淡出起点取其当前实际增益
+        if let Some(old) = self.current.take() {
+            let from = match &self.fade_in_started {
+                Some(started) => {
+                    let t = started.elapsed().as_millis() as f32 / self.fade_ms as f32;
+                    self.target_volume() * Self::ease(t)
+                }
+                None => self.target_volume(),
+            };
+            if let Some(older) = self.fading_out.take() {
+                older.playback.halt();
+            }
+            self.fading_out = Some(FadingOut {
+                playback: old,
+                started: Instant::now(),
+                from,
+            });
+        }
+        self.fade_in_started = None;
+
+        // 接管：恢复播放并从静默淡入（sink 已 pause，此处 play 才开始发声）
+        let is_ffmpeg = next.ffmpeg_child.is_some();
+        next.sink.set_volume(0.0);
+        next.sink.play();
+        self.current = Some(next);
+        self.current_is_ffmpeg = is_ffmpeg;
+        self.fade_in_started = Some(Instant::now());
+        self.current_path = next_path;
+        Ok(())
+    }
+
     /// 播放并定位到断点（断点续播专用）
-    fn play_at(&mut self, path: &std::path::Path, position_ms: u64) -> AppResult<()> {
-        self.play(path)?;
+    fn play_at(&mut self, path: &std::path::Path, position_ms: u64, gain: Option<(f32, f32)>) -> AppResult<()> {
+        self.play(path, gain)?;
         if position_ms > 0 {
             // sink 新建后混音线程可能还没拉到首帧；此时立即 seek 在个别时序下
             // 会让 Sink::try_seek 永久等待（引擎线程卡死、进度冻结）。
@@ -459,6 +666,10 @@ impl RodioEngine {
         if let Some(fading) = self.fading_out.take() {
             fading.playback.halt();
         }
+        if let Some(stale) = self.next.take() {
+            stale.halt();
+        }
+        self.next_path = None;
         self.fade_in_started = None;
         self.current_path = None;
         self.current_is_ffmpeg = false;
@@ -532,6 +743,9 @@ impl Drop for RodioEngine {
         }
         if let Some(fading) = self.fading_out.take() {
             fading.playback.halt();
+        }
+        if let Some(stale) = self.next.take() {
+            stale.halt();
         }
     }
 }

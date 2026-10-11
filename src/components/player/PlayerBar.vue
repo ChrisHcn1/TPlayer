@@ -7,7 +7,7 @@
  * 右：歌词 / 队列面板开关 + 音量。
  * 状态只读消费 player snapshot，动作经 player store，不直接碰 services。
  */
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 
@@ -43,7 +43,7 @@ const {
   openNowPlaying,
 } = useLayout()
 const { openAt } = useContextMenu()
-const { snapshot } = storeToRefs(playerStore)
+const { snapshot, nextReady, sleepTimer } = storeToRefs(playerStore)
 const { coverUrl } = useTrackCover(() => snapshot.value.trackId)
 
 const track = computed(() => libraryStore.getTrack(snapshot.value.trackId))
@@ -55,6 +55,60 @@ const isFavorite = computed(() =>
 )
 
 const modeMeta = computed(() => MODE_META[snapshot.value.mode] ?? MODE_META.order)
+
+/** 睡眠定时器预设（分钟） */
+const SLEEP_PRESETS = [15, 30, 45, 60, 90]
+
+/** 每秒刷新的当前时刻：驱动剩余时长倒计时显示 */
+const nowMs = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  nowTimer = setInterval(() => {
+    nowMs.value = Date.now()
+  }, 1000)
+})
+onBeforeUnmount(() => {
+  if (nowTimer !== null) clearInterval(nowTimer)
+})
+
+const sleepRemainingMs = computed(() => {
+  if (!sleepTimer.value.active || sleepTimer.value.endsAtMs === null) return null
+  return Math.max(0, sleepTimer.value.endsAtMs - nowMs.value)
+})
+
+const sleepLabel = computed(() => {
+  if (!sleepTimer.value.active) return '睡眠定时器'
+  if (sleepTimer.value.waitTrackEnd) return '播完当前曲目后停止'
+  const remain = sleepRemainingMs.value ?? 0
+  const minutes = Math.floor(remain / 60000)
+  const seconds = Math.floor((remain % 60000) / 1000)
+  return minutes > 0
+    ? `剩余 ${minutes}:${String(seconds).padStart(2, '0')} 后暂停`
+    : `剩余 ${seconds} 秒后暂停`
+})
+
+function openSleepMenu(event: MouseEvent): void {
+  const items: MenuItem[] = [
+    ...SLEEP_PRESETS.map((minutes) => ({
+      key: `sleep-${minutes}`,
+      label: `${minutes} 分钟后暂停`,
+      onClick: () => void playerStore.setSleepTimer(minutes * 60_000, false),
+    })),
+    {
+      key: 'sleep-track-end',
+      label: '播完当前曲目后停止',
+      onClick: () => void playerStore.setSleepTimer(0, true),
+    },
+  ]
+  if (sleepTimer.value.active) {
+    items.push({
+      key: 'sleep-cancel',
+      label: '取消定时',
+      onClick: () => void playerStore.cancelSleepTimer(),
+    })
+  }
+  openAt(event.clientX, event.clientY, items, '睡眠定时器')
+}
 
 function onSeek(positionMs: number): void {
   void playerStore.seek(positionMs)
@@ -185,6 +239,10 @@ function openArtist(): void {
           <Icon name="next" :size="20" />
         </button>
       </div>
+      <p v-if="nextReady" class="transport__preload" role="status" aria-live="polite">
+        <Icon name="loader" :size="10" spin />
+        下一首准备中
+      </p>
       <div class="transport__timeline">
         <ProgressBar
           :position-ms="snapshot.positionMs"
@@ -226,6 +284,16 @@ function openArtist(): void {
         @click="togglePanelTab('queue')"
       >
         <Icon name="queue" :size="18" />
+      </button>
+      <button
+        type="button"
+        class="side-btn"
+        :class="{ 'side-btn--active': sleepTimer.active }"
+        aria-label="睡眠定时器"
+        :title="sleepLabel"
+        @click="openSleepMenu($event)"
+      >
+        <Icon name="moon" :size="18" />
       </button>
       <VolumeControl />
     </div>
@@ -419,6 +487,23 @@ function openArtist(): void {
   gap: 1px;
   align-self: stretch;
   min-width: 0;
+}
+
+.transport__preload {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--color-text-tertiary);
+  background-color: var(--color-bg-hover);
+  border-radius: var(--radius-full);
+}
+
+.transport__preload :deep(.icon) {
+  display: inline-flex;
 }
 
 .transport__timeline :deep(.progress) {

@@ -4,5 +4,6 @@
  */
 export * from './track'
 export * from './player'
+export * from './converter'
 export * from './lyrics'
 export * from './api'

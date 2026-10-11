@@ -24,10 +24,12 @@ import { usePlayerStore } from './stores/player'
 import { useLibraryStore } from './stores/library'
 import { usePlaylistStore } from './stores/playlist'
 import { useToastStore } from './stores/toast'
+import { useStatsStore } from './stores/stats'
 import { useTheme } from './composables/useTheme'
 import { useLayout } from './composables/useLayout'
 import { useCommandPalette } from './composables/useCommandPalette'
 import { updateService } from './services/update'
+import { subscribeWatcher } from './services/watcher'
 import { useTrackCover } from './composables/useTrackCover'
 import { useCoverTheme } from './composables/useCoverTheme'
 import {
@@ -210,6 +212,8 @@ watch(
 )
 
 onMounted(async () => {
+  // 0) 收听统计：实例化即启动对播放快照的自动跟踪（次数 / 时长 / 最后播放 / 时段分布）
+  useStatsStore()
   // 1) 主题：与 index.html 首屏脚本同键同步，无闪烁
   applyTheme(theme.value)
   // 2) 设置：恢复非主题类偏好（语言、曲库目录、在线开关等）
@@ -217,6 +221,11 @@ onMounted(async () => {
   await settingsStore.restore()
   // 3) 数据初始化：曲库 / 歌单 / 播放引擎（web 预览走 services/web 本地实现）
   await Promise.all([libraryStore.refresh(), playlistStore.refresh(), playerStore.init()])
+
+  // 3.5) 目录自动监控：订阅增量同步事件，文件变化后自动刷新曲库
+  subscribeWatcher(() => {
+    void libraryStore.refresh()
+  })
 
   // 4) 静默检查更新：延迟 8s 不拖慢启动；仅发现新版本时提示，
   //    离线 / 更新通道尚未配置 / 浏览器预览等失败一律静默忽略

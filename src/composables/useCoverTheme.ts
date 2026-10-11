@@ -18,6 +18,8 @@
  *     --color-cover-accent-soft  18% 透明，浅染色
  *     --color-cover-wash         7% 透明，整窗极淡背景染
  *     --color-cover-lyrics       歌词当前行色（近白/近墨的高亮文本色，与彩色 UI 区分）
+ *     --color-cover-lyrics-overlay  封面页歌词当前行色（沉浸大图场景：始终高亮、随封面明暗自适应）
+ *     --color-cover-lyrics-stroke   封面页歌词当前行描边色（亮封面下保证对比度）
  *     --color-cover-progress     进度条已播放色（饱和实色中调）
  *
  * 特性：
@@ -38,6 +40,10 @@ const SOFT_VAR = '--color-cover-accent-soft'
 const WASH_VAR = '--color-cover-wash'
 /** 歌词当前行色：比皮肤色（brand）更亮一档，与进度/按钮区分 */
 const LYRICS_VAR = '--color-cover-lyrics'
+/** 封面页歌词当前行色：沉浸式大图场景专用，始终高亮、随封面明暗自适应 */
+const LYRICS_OVERLAY_VAR = '--color-cover-lyrics-overlay'
+/** 封面页歌词当前行描边色（text-shadow 用），保证亮色封面下仍有对比 */
+const LYRICS_STROKE_VAR = '--color-cover-lyrics-stroke'
 /** 播放进度条已播放色：介于皮肤色与歌词色之间的中间调 */
 const PROGRESS_VAR = '--color-cover-progress'
 
@@ -54,6 +60,8 @@ const BRAND_VARS = [
 interface CoverHue {
   h: number
   s: number
+  /** 封面整体感知亮度（相对亮度加权均值 0-1，可选：灰度/失败分支由调用处兜底） */
+  luma?: number
 }
 
 const colorCache = new Map<string, CoverHue>()
@@ -152,11 +160,17 @@ async function extractHue(dataUrl: string): Promise<CoverHue | null> {
     }
     const buckets = new Map<number, Bucket>()
     let grayN = 0
+    // 全像素相对亮度累计（含近黑/近白），衡量封面整体明暗而非仅主色
+    let lumaSum = 0
+    let lumaN = 0
 
     for (let i = 0; i < data.length; i += 4) {
       const r = data[i]
       const g = data[i + 1]
       const b = data[i + 2]
+      // 相对亮度 Y = 0.2126R + 0.7152G + 0.0722B（sRGB 近似）
+      lumaSum += 0.2126 * r + 0.7152 * g + 0.0722 * b
+      lumaN += 1
       const [h, s, l] = rgbToHsl(r, g, b)
       if (l < 0.16 || l > 0.92 || s < 0.18) {
         grayN += 1
@@ -187,7 +201,11 @@ async function extractHue(dataUrl: string): Promise<CoverHue | null> {
       hue = { h: 0.6, s: 0.32 }
     }
 
-    if (hue) colorCache.set(dataUrl, hue)
+    if (hue) {
+      // 相对亮度归一化到 0-1（RGB 255 尺度）；失败/无采样像素时给中性值 0.5
+      hue.luma = lumaN > 0 ? lumaSum / lumaN / 255 : 0.5
+      colorCache.set(dataUrl, hue)
+    }
     return hue
   } catch {
     // decode 失败 / canvas 被污染（非 data: URL 等）：不染色
@@ -223,6 +241,18 @@ function applyHue(hue: CoverHue, theme: 'dark' | 'light'): void {
       : hslCss(h, 0.3, 0.14)
   const progress = hslCss(h, s, 0.5)
 
+  // 封面页（沉浸式大图场景）专用歌词色：不受主题影响、始终高亮，
+  // 并按封面整体明暗微调——封面越亮文字越白，配合描边保证任意封面可读
+  const luma = hue.luma ?? 0.5
+  const lyricsOverlay =
+    luma >= 0.55
+      ? hslCss(h, 0.08, 0.985)
+      : luma >= 0.25
+        ? hslCss(h, 0.12, 0.96)
+        : hslCss(h, 0.15, 0.92)
+  // 歌词描边色：封面越亮描边越浓，抵消亮部透出
+  const lyricsStroke = luma >= 0.55 ? 'rgba(6, 8, 12, 0.9)' : 'rgba(8, 10, 14, 0.72)'
+
   root.style.setProperty('--color-brand-solid', solid)
   root.style.setProperty('--color-brand-hover', hover)
   root.style.setProperty('--color-brand-active', active)
@@ -236,6 +266,8 @@ function applyHue(hue: CoverHue, theme: 'dark' | 'light'): void {
   root.style.setProperty(WASH_VAR, rgbaCss(h, s, solidL, 0.07))
   root.style.setProperty(LYRICS_VAR, lyrics)
   root.style.setProperty(PROGRESS_VAR, progress)
+  root.style.setProperty(LYRICS_OVERLAY_VAR, lyricsOverlay)
+  root.style.setProperty(LYRICS_STROKE_VAR, lyricsStroke)
 }
 
 function clearAccent(): void {
@@ -247,6 +279,8 @@ function clearAccent(): void {
   root.style.removeProperty(WASH_VAR)
   root.style.removeProperty(LYRICS_VAR)
   root.style.removeProperty(PROGRESS_VAR)
+  root.style.removeProperty(LYRICS_OVERLAY_VAR)
+  root.style.removeProperty(LYRICS_STROKE_VAR)
 }
 
 /**

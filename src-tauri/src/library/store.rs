@@ -76,6 +76,22 @@ impl LibraryStore {
             .ok()
     }
 
+    /// 更新单曲 ReplayGain 增益（后台分析完成后写回；None 表示无数据则置空）
+    pub fn update_replaygain(
+        &mut self,
+        id: &str,
+        gain_db: Option<f32>,
+        peak: Option<f32>,
+    ) -> AppResult<()> {
+        self.conn
+            .execute(
+                "UPDATE tracks SET replaygain_db = ?1, replaygain_peak = ?2 WHERE id = ?3",
+                params![gain_db.map(|v| v as f64), peak.map(|v| v as f64), id],
+            )
+            .map_err(|e| AppError::Library(format!("写入 ReplayGain 增益失败: {e}")))?;
+        Ok(())
+    }
+
     /// 专辑（含 CUE 分轨专辑）下全部曲目，按音轨号升序
     pub fn tracks_of_album(&self, album_id: &str) -> Vec<Track> {
         let mut stmt = self
@@ -633,6 +649,12 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
             .get::<_, Option<i64>>("sample_rate")?
             .map(|v| v as u32),
         has_cover: row.get::<_, i64>("has_cover")? != 0,
+        replaygain_db: row
+            .get::<_, Option<f64>>("replaygain_db")?
+            .map(|v| v as f32),
+        replaygain_peak: row
+            .get::<_, Option<f64>>("replaygain_peak")?
+            .map(|v| v as f32),
         added_at: row.get("added_at")?,
         modified_at: row.get("modified_at")?,
     })
@@ -649,8 +671,8 @@ fn upsert_track(
         INSERT INTO tracks(
             id, title, album, album_id, duration, track_number, year,
             file_path, file_size, format, bitrate, sample_rate,
-            has_cover, added_at, modified_at, artists_json
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+            has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
         ON CONFLICT(id) DO UPDATE SET
             title       = excluded.title,
             album       = excluded.album,
@@ -664,6 +686,8 @@ fn upsert_track(
             bitrate     = excluded.bitrate,
             sample_rate = excluded.sample_rate,
             has_cover   = excluded.has_cover,
+            replaygain_db   = excluded.replaygain_db,
+            replaygain_peak = excluded.replaygain_peak,
             modified_at = excluded.modified_at,
             artists_json= excluded.artists_json
         "#,
@@ -681,6 +705,8 @@ fn upsert_track(
             track.bitrate.map(|v| v as i64),
             track.sample_rate.map(|v| v as i64),
             track.has_cover as i64,
+            track.replaygain_db.map(|v| v as f64),
+            track.replaygain_peak.map(|v| v as f64),
             track.added_at,
             track.modified_at,
             artists_json,

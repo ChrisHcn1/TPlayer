@@ -15,6 +15,9 @@ export const SETTINGS_STORAGE_KEY = 'tplayer-next.settings'
 /** 播放位置持久化键 */
 export const PLAYBACK_PROGRESS_STORAGE_KEY = 'tplayer-next.playback-progress'
 
+/** 播放统计持久化键（stats store 使用；仅本地，不上传） */
+export const STATS_STORAGE_KEY = 'tplayer-next.stats'
+
 /* ------------------------------------------------------------------ *
  * Web 预览数据源（services/web）使用的 localStorage 键。
  * 仅在非 Tauri（浏览器）运行时使用；Tauri 下这些数据由 Rust 侧落盘，

@@ -7,7 +7,7 @@ use tauri::{AppHandle, State};
 
 use crate::error::{AppError, AppResult};
 use crate::player::engine::EngineCapabilities;
-use crate::player::state::{PlayContext, PlayMode, PlaybackSnapshot};
+use crate::player::state::{PlayContext, PlayMode, PlaybackSnapshot, SleepTimerStatus};
 use crate::AppState;
 
 /// 初始化播放器（恢复曲目缓存、音量等）
@@ -152,4 +152,76 @@ pub fn player_set_mode(
 #[tauri::command]
 pub fn player_dispose(state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().unwrap().dispose()
+}
+
+/// 设置交叉淡化（启用开关 + 时长毫秒，0~3000）
+///
+/// 写入 config.json 持久化，并立即下发引擎线程生效。
+#[tauri::command]
+pub fn player_set_crossfade(
+    state: State<'_, AppState>,
+    enabled: bool,
+    duration_ms: u64,
+) -> AppResult<()> {
+    let duration_ms = duration_ms.min(3000);
+    {
+        let mut config = state.config.lock().unwrap();
+        config.crossfade.enabled = enabled;
+        config.crossfade.duration_ms = duration_ms;
+        config.save(&state.config_path)?;
+    }
+    state.player.lock().unwrap().set_crossfade(enabled, duration_ms)
+}
+
+/// 设置音量归一化 ReplayGain 开关
+///
+/// 写入 config.json 持久化，并立即下发引擎线程生效（当前曲目按新策略重算增益）。
+#[tauri::command]
+pub fn player_set_replaygain(state: State<'_, AppState>, enabled: bool) -> AppResult<()> {
+    {
+        let mut config = state.config.lock().unwrap();
+        config.replaygain.enabled = enabled;
+        config.save(&state.config_path)?;
+    }
+    state.player.lock().unwrap().set_replaygain(enabled);
+    Ok(())
+}
+
+/// 设置睡眠定时器（delay_ms 毫秒后到期；wait_track_end=true 时到期后播完当前曲目才停止）
+#[tauri::command]
+pub fn player_set_sleep_timer(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    delay_ms: u64,
+    wait_track_end: bool,
+) -> AppResult<()> {
+    state
+        .player
+        .lock()
+        .unwrap()
+        .set_sleep_timer(delay_ms, wait_track_end, &app);
+    Ok(())
+}
+
+/// 取消睡眠定时器
+#[tauri::command]
+pub fn player_cancel_sleep_timer(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+    state.player.lock().unwrap().cancel_sleep_timer(&app);
+    Ok(())
+}
+
+/// 查询睡眠定时器状态
+#[tauri::command]
+pub fn player_sleep_timer_status(state: State<'_, AppState>) -> AppResult<SleepTimerStatus> {
+    Ok(state.player.lock().unwrap().sleep_timer_status())
+}
+
+/// 从播放队列中移除指定下标的曲目（移除当前播放曲目不打断播放）
+#[tauri::command]
+pub fn player_remove_from_queue(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    index: usize,
+) -> AppResult<()> {
+    state.player.lock().unwrap().remove_from_queue(index, &app)
 }

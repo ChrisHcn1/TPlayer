@@ -63,6 +63,15 @@ const tauriPlayer: IPlayer = {
   setVolume: (volume: number) => callCommand('player_set_volume', { volume }),
   setMuted: (muted: boolean) => callCommand('player_set_muted', { muted }),
   setMode: (mode: PlayMode) => callCommand('player_set_mode', { mode }),
+  setCrossfade: (enabled: boolean, durationMs: number) =>
+    callCommand('player_set_crossfade', { enabled, durationMs }),
+  setReplaygain: (enabled: boolean) =>
+    callCommand('player_set_replaygain', { enabled }),
+  setSleepTimer: (delayMs: number, waitTrackEnd: boolean) =>
+    callCommand('player_set_sleep_timer', { delayMs, waitTrackEnd }),
+  cancelSleepTimer: () => callCommand('player_cancel_sleep_timer'),
+  sleepTimerStatus: () => callCommand('player_sleep_timer_status'),
+  removeFromQueue: (index: number) => callCommand('player_remove_from_queue', { index }),
   dispose: () => callCommand('player_dispose'),
 }
 

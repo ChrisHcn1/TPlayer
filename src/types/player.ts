@@ -77,7 +77,30 @@ export interface IPlayer {
   setVolume(volume: number): Promise<void>
   setMuted(muted: boolean): Promise<void>
   setMode(mode: PlayMode): Promise<void>
+  /** 设置交叉淡化（启用开关 + 时长毫秒，0~3000）；浏览器 mock 忽略 */
+  setCrossfade(enabled: boolean, durationMs: number): Promise<void>
+  /** 设置音量归一化 ReplayGain 开关；浏览器 mock 忽略 */
+  setReplaygain(enabled: boolean): Promise<void>
+  /**
+   * 设置睡眠定时器：delayMs 毫秒后到期；waitTrackEnd=true 时到期后播完当前曲目才停止
+   * （delayMs=0 表示立即进入"播完当前曲目"等待）。
+   */
+  setSleepTimer(delayMs: number, waitTrackEnd: boolean): Promise<void>
+  /** 取消睡眠定时器 */
+  cancelSleepTimer(): Promise<void>
+  /** 查询睡眠定时器状态 */
+  sleepTimerStatus(): Promise<SleepTimerState>
+  /** 从播放队列移除指定下标的曲目（移除当前播放曲目不打断播放） */
+  removeFromQueue(index: number): Promise<void>
   dispose(): Promise<void>
+}
+
+/** 睡眠定时器状态（后端为唯一真相源） */
+export interface SleepTimerState {
+  active: boolean
+  waitTrackEnd: boolean
+  /** 到期时刻（Unix epoch 毫秒）；未启用时为 null */
+  endsAtMs: number | null
 }
 
 /** 播放状态事件（后端 -> 前端推送） */
@@ -88,4 +111,7 @@ export type PlaybackEvent =
   | { type: 'volume'; payload: { volume: number; muted: boolean } }
   | { type: 'mode'; payload: { mode: PlayMode } }
   | { type: 'ended'; payload: { trackId: string } }
+  | { type: 'nextPreloaded'; payload: { trackId: string } }
+  | { type: 'sleepTimer'; payload: SleepTimerState }
+  | { type: 'queue'; payload: PlayContext }
   | { type: 'error'; payload: { message: string; trackId: string | null } }

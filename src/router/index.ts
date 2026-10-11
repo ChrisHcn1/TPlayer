@@ -144,6 +144,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/ConverterView.vue'),
     meta: { titleKey: 'nav.converter' },
   },
+  {
+    path: '/stats',
+    name: 'stats',
+    component: () => import('../views/StatsView.vue'),
+    meta: { titleKey: 'nav.stats' },
+  },
 
   /* ---- 底部固定分组（nav = bottom） ---- */
   {

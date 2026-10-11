@@ -19,6 +19,7 @@ import { defineStore } from 'pinia'
 import { DEFAULT_LOCALE } from '../constants'
 import { DEFAULT_ONLINE_CONFIG } from '../services/online'
 import { loadSettings, saveSettings } from '../services/settings'
+import { playerService } from '../services/player'
 import type { OnlineModuleConfig } from '../types'
 
 /** 持久化结构（与 localStorage / 未来的 config.json 一一对应；不含 theme） */
@@ -27,6 +28,9 @@ export interface PersistedSettings {
   libraryDirs: string[]
   online: OnlineModuleConfig
   scanOnStartup: boolean
+  crossfade: { enabled: boolean; duration_ms: number }
+  replaygain: { enabled: boolean }
+  watch: { enabled: boolean }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -38,6 +42,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const libraryDirs = ref<string[]>([])
   const online = ref<OnlineModuleConfig>({ ...DEFAULT_ONLINE_CONFIG })
   const scanOnStartup = ref(false)
+  const crossfade = ref({ enabled: true, duration_ms: 1000 })
+  const replaygain = ref({ enabled: true })
+  const watch = ref({ enabled: true })
 
   /** 导出当前设置为持久化结构 */
   function toPersisted(): PersistedSettings {
@@ -46,6 +53,9 @@ export const useSettingsStore = defineStore('settings', () => {
       libraryDirs: [...libraryDirs.value],
       online: { ...online.value },
       scanOnStartup: scanOnStartup.value,
+      crossfade: { ...crossfade.value },
+      replaygain: { ...replaygain.value },
+      watch: { ...watch.value },
     }
   }
 
@@ -71,6 +81,23 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     if (typeof persisted.scanOnStartup === 'boolean') {
       scanOnStartup.value = persisted.scanOnStartup
+    }
+    if (persisted.crossfade) {
+      if (typeof persisted.crossfade.enabled === 'boolean') {
+        crossfade.value.enabled = persisted.crossfade.enabled
+      }
+      if (typeof persisted.crossfade.duration_ms === 'number') {
+        const d = persisted.crossfade.duration_ms
+        if (d >= 0 && d <= 3000) {
+          crossfade.value.duration_ms = d
+        }
+      }
+    }
+    if (persisted.replaygain && typeof persisted.replaygain.enabled === 'boolean') {
+      replaygain.value.enabled = persisted.replaygain.enabled
+    }
+    if (persisted.watch && typeof persisted.watch.enabled === 'boolean') {
+      watch.value.enabled = persisted.watch.enabled
     }
   }
 
@@ -129,6 +156,31 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
+  async function setCrossfadeEnabled(enabled: boolean): Promise<void> {
+    crossfade.value.enabled = enabled
+    persist()
+    void playerService.setCrossfade(enabled, crossfade.value.duration_ms)
+  }
+
+  async function setCrossfadeDuration(duration_ms: number): Promise<void> {
+    if (duration_ms < 0 || duration_ms > 3000) return
+    const d = Math.round(duration_ms)
+    crossfade.value.duration_ms = d
+    persist()
+    void playerService.setCrossfade(crossfade.value.enabled, d)
+  }
+
+  async function setReplaygainEnabled(enabled: boolean): Promise<void> {
+    replaygain.value.enabled = enabled
+    persist()
+    void playerService.setReplaygain(enabled)
+  }
+
+  async function setWatchEnabled(enabled: boolean): Promise<void> {
+    watch.value.enabled = enabled
+    persist()
+  }
+
   /**
    * 恢复出厂默认（仅重置"设置"，不影响曲库文件与播放历史）
    * 主题不在此重置：由 useTheme.resetTheme() 单独负责，保证主题只有一个写入方。
@@ -138,7 +190,12 @@ export const useSettingsStore = defineStore('settings', () => {
     libraryDirs.value = []
     online.value = { ...DEFAULT_ONLINE_CONFIG }
     scanOnStartup.value = false
+    crossfade.value = { enabled: true, duration_ms: 1000 }
+    replaygain.value = { enabled: true }
+    watch.value = { enabled: true }
     persist()
+    void playerService.setCrossfade(true, 1000)
+    void playerService.setReplaygain(true)
   }
 
   return {
@@ -146,6 +203,9 @@ export const useSettingsStore = defineStore('settings', () => {
     libraryDirs,
     online,
     scanOnStartup,
+    crossfade,
+    replaygain,
+    watch,
     restore,
     persist,
     setLocale,
@@ -154,6 +214,10 @@ export const useSettingsStore = defineStore('settings', () => {
     removeLibraryDir,
     setOnlineEnabled,
     setAllowLibraryUpload,
+    setCrossfadeEnabled,
+    setCrossfadeDuration,
+    setReplaygainEnabled,
+    setWatchEnabled,
     reset,
   }
 })

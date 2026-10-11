@@ -193,7 +193,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   pointer-events: none;
   /* 顶部（关闭按钮）与底部（歌词/控制）压暗，中部仅轻染；再叠一层封面主色 */
   background:
-    linear-gradient(to top, rgba(6, 8, 12, 0.92) 0%, rgba(6, 8, 12, 0.55) 34%, rgba(6, 8, 12, 0.12) 62%, rgba(6, 8, 12, 0.5) 100%),
+    linear-gradient(to top, rgba(6, 8, 12, 0.97) 0%, rgba(6, 8, 12, 0.78) 30%, rgba(6, 8, 12, 0.18) 62%, rgba(6, 8, 12, 0.62) 100%),
     var(--color-cover-accent-soft, transparent);
 }
 
@@ -261,8 +261,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   font-size: clamp(var(--font-size-xl), 3.4vw, 40px);
   font-weight: var(--font-weight-bold);
   line-height: 1.25;
-  /* 封面皮肤开启时用歌词色，未取色时回落白色（大封面上可读性最好） */
-  color: var(--color-cover-lyrics, #fff);
+  /* 封面页专用歌词色：不受主题影响、始终高亮（取色时随封面明暗自适应，未取色回落近白）；
+     多向描边 + 柔光保证任意封面（含亮色封面）下文字清晰可读 */
+  color: var(--color-cover-lyrics-overlay, #f4f6fa);
+  text-shadow:
+    0 1px 2px var(--color-cover-lyrics-stroke, rgba(8, 10, 14, 0.72)),
+    0 0 8px var(--color-cover-lyrics-stroke, rgba(8, 10, 14, 0.72)),
+    0 2px 24px rgba(0, 0, 0, 0.6);
   animation: now-line-in 0.3s ease-out;
 }
 

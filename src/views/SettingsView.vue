@@ -8,7 +8,7 @@
  *    浏览器降级为 prompt 文本输入；
  *  - 在线模块默认关闭；即使开启，allowLibraryUpload 仍需单独同意（privacy-first）。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import pkg from '../../package.json'
 import { useSettingsStore } from '../stores/settings'
@@ -19,11 +19,13 @@ import { useDialogStore } from '../stores/dialog'
 import { pickDirectory } from '../services/dialog'
 import { lyricsService } from '../services/lyrics'
 import { isTauriRuntime } from '../services/ipc'
+import { getWatcherStatus, subscribeWatcher, type WatcherStatus } from '../services/watcher'
 import { updateService, type Update, type UpdateProgress } from '../services/update'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import ConverterView from './ConverterView.vue'
 import { useLayout } from '../composables/useLayout'
+import { useRouter } from 'vue-router'
 
 type SettingsTab = 'playback' | 'appearance' | 'lyrics' | 'online' | 'tools' | 'update' | 'about'
 
@@ -43,9 +45,35 @@ const toastStore = useToastStore()
 const dialogStore = useDialogStore()
 const { theme, applyTheme } = useTheme()
 const { isCoverAccentEnabled, setCoverAccent } = useLayout()
+const router = useRouter()
 
 const activeTab = ref<SettingsTab>('playback')
 const scanning = ref(false)
+
+/** 目录自动监控状态（仅 Tauri 运行时后端提供；浏览器预览为 null） */
+const watcherStatus = ref<WatcherStatus | null>(null)
+let unlistenWatcher: (() => void) | null = null
+
+async function refreshWatcherStatus(): Promise<void> {
+  watcherStatus.value = await getWatcherStatus()
+}
+
+onMounted(() => {
+  void refreshWatcherStatus()
+  // 增量同步发生后实时更新状态展示
+  unlistenWatcher = subscribeWatcher((payload) => {
+    watcherStatus.value = {
+      enabled: watcherStatus.value?.enabled ?? true,
+      dirs: watcherStatus.value?.dirs ?? [],
+      last_event_at: payload.at,
+      last_event_desc: payload.desc,
+    }
+  })
+})
+
+onUnmounted(() => {
+  unlistenWatcher?.()
+})
 
 const themeOptions: ReadonlyArray<{ key: ThemeName; label: string; icon: string }> = [
   { key: 'dark', label: '深色', icon: 'moon' },
@@ -245,6 +273,102 @@ async function resetSettings(): Promise<void> {
             @change="settingsStore.setScanOnStartup(($event.target as HTMLInputElement).checked)"
           />
         </label>
+
+        <h2 class="panel__title panel__title--gap">交叉淡化</h2>
+        <p class="panel__desc">切换曲目时旧曲淡出、新曲淡入，避免突兀断音；实时生效并持久化。</p>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__label">启用交叉淡化</span>
+            <span class="setting-row__hint">关闭后切歌为即时切换</span>
+          </span>
+          <input
+            type="checkbox"
+            class="switch"
+            :checked="settingsStore.crossfade.enabled"
+            @change="settingsStore.setCrossfadeEnabled(($event.target as HTMLInputElement).checked)"
+          />
+        </label>
+        <div
+          class="setting-row setting-row--column"
+          :class="{ 'setting-row--disabled': !settingsStore.crossfade.enabled }"
+        >
+          <span class="setting-row__text">
+            <span class="setting-row__label">淡入淡出时长</span>
+            <span class="setting-row__hint">0 – 3 秒，默认 1 秒</span>
+          </span>
+          <input
+            type="range"
+            class="range"
+            min="0"
+            max="3000"
+            step="100"
+            :value="settingsStore.crossfade.duration_ms"
+            :disabled="!settingsStore.crossfade.enabled"
+            @input="
+              settingsStore.setCrossfadeDuration(
+                Number(($event.target as HTMLInputElement).value),
+              )
+            "
+          />
+          <span class="setting-row__value u-tabular">
+            {{ (settingsStore.crossfade.duration_ms / 1000).toFixed(1) }}s
+          </span>
+        </div>
+
+        <h2 class="panel__title panel__title--gap">音量归一化（ReplayGain）</h2>
+        <p class="panel__desc">
+          按曲目响度自动调整播放音量：优先读取音频内嵌 ReplayGain 标签，无标签曲目首次播放时后台分析响度并持久化；开启后避免不同歌曲音量忽大忽小。
+        </p>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__label">启用音量归一化</span>
+            <span class="setting-row__hint">目标响度 -14 LUFS，峰值防削波；实时生效并持久化</span>
+          </span>
+          <input
+            type="checkbox"
+            class="switch"
+            :checked="settingsStore.replaygain.enabled"
+            @change="settingsStore.setReplaygainEnabled(($event.target as HTMLInputElement).checked)"
+          />
+        </label>
+
+        <h2 class="panel__title panel__title--gap">目录自动监控</h2>
+        <p class="panel__desc">
+          实时监听曲库目录文件变化：新增音频自动入库、删除自动移除、重命名/修改自动更新元数据；无需手动扫描。
+        </p>
+        <label class="setting-row">
+          <span class="setting-row__text">
+            <span class="setting-row__label">启用目录自动监控</span>
+            <span class="setting-row__hint">默认开启；关闭后需手动「扫描曲库」更新</span>
+          </span>
+          <input
+            type="checkbox"
+            class="switch"
+            :checked="settingsStore.watch.enabled"
+            @change="settingsStore.setWatchEnabled(($event.target as HTMLInputElement).checked)"
+          />
+        </label>
+        <div v-if="isTauri && watcherStatus" class="setting-row setting-row--static">
+          <span class="setting-row__text">
+            <span class="setting-row__label">监控状态</span>
+            <span class="setting-row__hint">
+              {{
+                watcherStatus.dirs.length > 0
+                  ? `正在监控 ${watcherStatus.dirs.length} 个目录`
+                  : '暂无已登记曲库目录'
+              }}
+              <template v-if="watcherStatus.last_event_desc">
+                ｜最近：{{ watcherStatus.last_event_desc }}（{{ watcherStatus.last_event_at }}）
+              </template>
+            </span>
+          </span>
+        </div>
+        <div v-if="isTauri && !watcherStatus" class="setting-row setting-row--static">
+          <span class="setting-row__text">
+            <span class="setting-row__label">监控状态</span>
+            <span class="setting-row__hint">状态查询暂不可用</span>
+          </span>
+        </div>
       </div>
 
       <!-- 外观 -->
@@ -342,8 +466,16 @@ async function resetSettings(): Promise<void> {
         </div>
       </div>
 
-      <!-- 工具：音频转换器（原侧栏"工具"入口移入设置页，命令面板仍可直达） -->
+      <!-- 工具：收听报告入口 + 音频转换器（原侧栏"工具"入口移入设置页，命令面板仍可直达） -->
       <div v-else-if="activeTab === 'tools'" class="settings__tools">
+        <button class="tool-entry" @click="router.push('/stats')">
+          <span class="tool-entry__icon"><Icon name="clock" :size="20" /></span>
+          <span class="tool-entry__meta">
+            <span class="tool-entry__title">收听报告</span>
+            <span class="tool-entry__desc">播放次数 / 累计时长 / TOP 榜单 / 最常听时段，支持导出分享卡片</span>
+          </span>
+          <Icon name="next" :size="16" class="tool-entry__chevron" />
+        </button>
         <ConverterView />
       </div>
 
@@ -495,9 +627,70 @@ async function resetSettings(): Promise<void> {
   /* 内外边距由外壳 .app-shell__view-pad 统一提供，避免双倍留白 */
 }
 
-/* 工具页签：转换器占满内容列（不受 .panel 560px 限宽约束） */
+/* 工具页签：收听报告入口卡片 + 转换器占满内容列（不受 .panel 560px 限宽约束） */
 .settings__tools {
   min-width: 0;
+}
+
+.tool-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tool-entry:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.tool-entry:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.tool-entry__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  background: var(--color-brand-subtle);
+  color: var(--color-brand);
+}
+
+.tool-entry__meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool-entry__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-md);
+}
+
+.tool-entry__desc {
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  color: var(--color-text-tertiary);
+}
+
+.tool-entry__chevron {
+  color: var(--color-text-tertiary);
 }
 
 /* ---- 左侧导航 ---- */
@@ -637,6 +830,10 @@ async function resetSettings(): Promise<void> {
   opacity: 0.5;
 }
 
+.setting-row--static {
+  align-items: flex-start;
+}
+
 .setting-row__text {
   display: flex;
   flex-direction: column;
@@ -697,6 +894,30 @@ async function resetSettings(): Promise<void> {
 .switch:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* ---- 滑块（交叉淡化时长） ---- */
+.range {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-brand-solid);
+  cursor: pointer;
+}
+
+.range:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.range:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.setting-row__value {
+  align-self: flex-end;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
 }
 
 /* ---- 下拉 ---- */

@@ -3,7 +3,8 @@
  * 右面板 · 播放队列页签
  *
  * 渲染 player store 的 currentContext.trackIds；当前曲目高亮；
- * 双击某行以同一上下文从该曲目开始播放（playFromContext）。
+ * 双击某行以同一上下文从该曲目开始播放（playFromContext）；
+ * 行尾 × 按钮从队列移除该项（移除当前播放曲目不打断播放）。
  */
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
@@ -54,6 +55,11 @@ function playAt(rowId: string): void {
   if (!currentContext.value) return
   void playerStore.playFromContext(rowId, { ...currentContext.value })
 }
+
+/** 从队列移除指定下标的曲目（当前播放曲目被移除时播放不受影响） */
+function removeFromQueue(index: number): void {
+  void playerStore.removeFromQueue(index)
+}
 </script>
 
 <template>
@@ -70,7 +76,7 @@ function playAt(rowId: string): void {
     </div>
 
     <ul v-else class="queue-panel__list">
-      <li v-for="(row, index) in rows" :key="`${row.id}-${index}`">
+      <li v-for="(row, index) in rows" :key="`${row.id}-${index}`" class="queue-item">
         <button
           type="button"
           class="queue-row"
@@ -91,6 +97,15 @@ function playAt(rowId: string): void {
             class="queue-row__badge"
             aria-label="当前播放"
           ></span>
+        </button>
+        <button
+          type="button"
+          class="queue-row__remove"
+          aria-label="从队列移除"
+          :title="`从队列移除：${row.title}`"
+          @click.stop="removeFromQueue(index)"
+        >
+          <Icon name="x" :size="12" />
         </button>
       </li>
     </ul>
@@ -209,6 +224,39 @@ function playAt(rowId: string): void {
   height: 6px;
   background-color: var(--color-brand);
   border-radius: var(--radius-full);
+}
+
+.queue-row__remove {
+  position: absolute;
+  top: 50%;
+  right: var(--space-2);
+  z-index: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--color-text-tertiary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.queue-item {
+  position: relative;
+}
+
+.queue-item:hover .queue-row__remove,
+.queue-row__remove:focus-visible {
+  display: flex;
+}
+
+.queue-row__remove:hover {
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-hover);
 }
 
 .queue-panel__empty {

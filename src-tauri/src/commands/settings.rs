@@ -18,5 +18,13 @@ pub fn settings_save(state: State<'_, AppState>, config: AppConfig) -> AppResult
     let mut current = state.config.lock().unwrap();
     *current = config;
     current.save(&state.config_path)?;
+
+    // 配置落盘后按新配置重启目录监控（目录白名单 / 开关变化即时生效）
+    let watch_dirs = current.library_dirs.clone();
+    let watch_enabled = current.watch.enabled;
+    drop(current);
+    state
+        .watch
+        .reconfigure(state.app.clone(), &watch_dirs, watch_enabled);
     Ok(())
 }

@@ -17,6 +17,9 @@ export interface PersistedSettings {
   libraryDirs: string[]
   online: OnlineModuleConfig
   scanOnStartup: boolean
+  crossfade: { enabled: boolean; duration_ms: number }
+  replaygain: { enabled: boolean }
+  watch: { enabled: boolean }
 }
 
 /** 加载设置：Tauri 走命令，浏览器走 localStorage */

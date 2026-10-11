@@ -19,6 +19,66 @@ pub struct AppConfig {
     pub locale: String,
     /// 在线服务配置
     pub online: OnlineConfig,
+    /// 交叉淡化配置
+    pub crossfade: CrossfadeConfig,
+    /// 音量归一化 ReplayGain 配置（旧配置缺省时回落默认：开启、目标 -14 LUFS）
+    #[serde(default)]
+    pub replaygain: ReplayGainConfig,
+    /// 目录自动监控配置（旧配置缺省时回落默认：开启）
+    #[serde(default)]
+    pub watch: WatchConfig,
+}
+
+/// 目录自动监控配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchConfig {
+    /// 是否启用曲库目录自动监控（默认开启：放新歌自动入库、删除自动移除）
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// 音量归一化 ReplayGain 配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayGainConfig {
+    /// 是否启用（默认开启）
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+    /// 目标综合响度（LUFS，默认 -14，与主流流媒体平台一致）
+    #[serde(rename = "targetLufs")]
+    pub target_lufs: f32,
+}
+
+impl Default for ReplayGainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_lufs: -14.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossfadeConfig {
+    /// 是否启用交叉淡化（默认开启）
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+    /// 交叉淡化时长（毫秒，0~3000，默认 1000ms）
+    pub duration_ms: u64,
+}
+
+impl Default for CrossfadeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_ms: 1000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +109,9 @@ impl Default for AppConfig {
             scan_on_startup: true,
             locale: "zh-CN".to_string(),
             online: OnlineConfig::default(),
+            crossfade: CrossfadeConfig::default(),
+            replaygain: ReplayGainConfig::default(),
+            watch: WatchConfig::default(),
         }
     }
 }

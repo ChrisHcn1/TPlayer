@@ -26,6 +26,12 @@ pub struct Track {
     pub sample_rate: Option<u32>,
     #[serde(rename = "hasCover")]
     pub has_cover: bool,
+    /// ReplayGain 归一化增益（dB；NULL 表示尚无增益数据，播放时触发分析计算）
+    #[serde(rename = "replaygainDb", skip_serializing_if = "Option::is_none")]
+    pub replaygain_db: Option<f32>,
+    /// ReplayGain 峰值（线性，0..1；防削波限制用）
+    #[serde(rename = "replaygainPeak", skip_serializing_if = "Option::is_none")]
+    pub replaygain_peak: Option<f32>,
     /// 入库时间（Unix 秒）
     #[serde(rename = "addedAt")]
     pub added_at: i64,

@@ -96,6 +96,26 @@ impl Default for PlaybackSnapshot {
     }
 }
 
+/// 睡眠定时器查询结果（player_sleep_timer_status 返回）
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SleepTimerStatus {
+    pub active: bool,
+    #[serde(rename = "waitTrackEnd")]
+    pub wait_track_end: bool,
+    #[serde(rename = "endsAtMs")]
+    pub ends_at_ms: Option<u64>,
+}
+
+impl Default for SleepTimerStatus {
+    fn default() -> Self {
+        Self {
+            active: false,
+            wait_track_end: false,
+            ends_at_ms: None,
+        }
+    }
+}
+
 /// 播放事件（后端 -> 前端推送）
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "lowercase")]
@@ -123,6 +143,25 @@ pub enum PlaybackEvent {
     Ended {
         #[serde(rename = "trackId")]
         track_id: String,
+    },
+    /// 下一曲已预解码到待命链路（自动连播预加载完成）
+    #[serde(rename = "nextPreloaded")]
+    NextPreloaded {
+        #[serde(rename = "trackId")]
+        track_id: String,
+    },
+    /// 睡眠定时器状态变更（设置 / 到期触发 / 取消）
+    SleepTimer {
+        active: bool,
+        #[serde(rename = "waitTrackEnd")]
+        wait_track_end: bool,
+        /// 到期时刻（Unix epoch 毫秒）；"播完当前曲目"已到期等待时为 None
+        #[serde(rename = "endsAtMs")]
+        ends_at_ms: Option<u64>,
+    },
+    /// 播放队列变更（队列项移除等），payload 为最新播放上下文
+    Queue {
+        context: PlayContext,
     },
     Error {
         message: String,

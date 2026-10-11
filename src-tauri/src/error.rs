@@ -38,6 +38,9 @@ pub enum AppError {
     #[error("配置错误：{0}")]
     Config(String),
 
+    #[error("转换错误：{0}")]
+    Converter(String),
+
     #[error("I/O 错误：{0}")]
     Io(#[from] std::io::Error),
 }
@@ -59,6 +62,7 @@ impl AppError {
             Self::Update(_) => "UPDATE_ERROR",
             Self::OnlineDisabled(_) => "ONLINE_DISABLED",
             Self::Config(_) => "CONFIG_ERROR",
+            Self::Converter(_) => "CONVERTER_ERROR",
             Self::Io(_) => "IO_ERROR",
         }
     }

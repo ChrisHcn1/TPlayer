@@ -16,6 +16,7 @@ import type {
   PlaybackEvent,
   PlaybackSnapshot,
   PlayerCapabilities,
+  SleepTimerState,
 } from '../../types'
 import { createIdleSnapshot } from '../player'
 import { getTrackById } from './dataset'
@@ -40,6 +41,9 @@ export class WebPlayer implements IPlayer {
   private index = -1
   private timer: ReturnType<typeof setInterval> | null = null
   private listeners = new Set<(event: PlaybackEvent) => void>()
+  /** 睡眠定时器：到期时刻（epoch 毫秒）+ 是否播完当前曲；fired 表示已到期等待曲终 */
+  private sleepTimer: { endsAtMs: number; waitTrackEnd: boolean; fired: boolean } | null = null
+  private sleepTimerHandle: ReturnType<typeof setTimeout> | null = null
 
   subscribe(listener: (event: PlaybackEvent) => void): () => void {
     this.listeners.add(listener)
@@ -132,8 +136,81 @@ export class WebPlayer implements IPlayer {
     this.emit({ type: 'mode', payload: { mode } })
   }
 
+  async setCrossfade(_enabled: boolean, _durationMs: number): Promise<void> {
+    /* 浏览器 mock 引擎无真实音频输出，交叉淡化参数不生效，忽略即可 */
+  }
+
+  async setReplaygain(_enabled: boolean): Promise<void> {
+    /* 浏览器 mock 引擎无真实音频输出，ReplayGain 不生效，忽略即可 */
+  }
+
+  async setSleepTimer(delayMs: number, waitTrackEnd: boolean): Promise<void> {
+    this.clearSleepTimerHandle()
+    this.sleepTimer = {
+      endsAtMs: Date.now() + Math.max(delayMs, 1000),
+      waitTrackEnd,
+      fired: waitTrackEnd && delayMs === 0,
+    }
+    if (!this.sleepTimer.fired) {
+      const remaining = this.sleepTimer.endsAtMs - Date.now()
+      this.sleepTimerHandle = setTimeout(() => {
+        if (!this.sleepTimer) return
+        if (this.sleepTimer.waitTrackEnd) {
+          this.sleepTimer.fired = true
+        } else {
+          this.sleepTimer = null
+          void this.pause()
+          this.emitSleepTimer()
+        }
+      }, remaining)
+    }
+    this.emitSleepTimer()
+  }
+
+  async cancelSleepTimer(): Promise<void> {
+    if (!this.sleepTimer) return
+    this.clearSleepTimerHandle()
+    this.sleepTimer = null
+    this.emitSleepTimer()
+  }
+
+  async sleepTimerStatus(): Promise<SleepTimerState> {
+    if (!this.sleepTimer) return { active: false, waitTrackEnd: false, endsAtMs: null }
+    return {
+      active: true,
+      waitTrackEnd: this.sleepTimer.waitTrackEnd,
+      endsAtMs: this.sleepTimer.endsAtMs,
+    }
+  }
+
+  private clearSleepTimerHandle(): void {
+    if (this.sleepTimerHandle !== null) {
+      clearTimeout(this.sleepTimerHandle)
+      this.sleepTimerHandle = null
+    }
+  }
+
+  async removeFromQueue(index: number): Promise<void> {
+    if (!this.context) throw new Error('没有可操作的播放队列')
+    const ids = this.context.trackIds
+    if (index < 0 || index >= ids.length) throw new Error(`队列下标越界: ${index}`)
+    ids.splice(index, 1)
+    // 修正当前曲目下标：移除当前曲之前的项则前移；移除当前曲本身不打断播放
+    if (index < this.index && this.index > 0) this.index -= 1
+    if (this.index >= ids.length) this.index = ids.length - 1
+    this.emit({ type: 'queue', payload: { ...this.context, trackIds: [...ids] } })
+  }
+
+  private emitSleepTimer(): void {
+    void this.sleepTimerStatus().then((state) => {
+      this.emit({ type: 'sleepTimer', payload: state })
+    })
+  }
+
   async dispose(): Promise<void> {
     this.stopClock()
+    this.clearSleepTimerHandle()
+    this.sleepTimer = null
     this.listeners.clear()
   }
 
@@ -182,6 +259,16 @@ export class WebPlayer implements IPlayer {
 
   /** 一曲播完：按播放模式决定单曲重播 / 连播 / 结束 */
   private handleEnded(): void {
+    // 睡眠定时器"播完当前曲目"已到期：停止而不连播
+    if (this.sleepTimer?.fired && this.sleepTimer.waitTrackEnd) {
+      this.sleepTimer = null
+      this.stopClock()
+      this.patch({ status: 'stopped', positionMs: 0 })
+      this.emit({ type: 'status', payload: { status: 'stopped' } })
+      this.emitSleepTimer()
+      return
+    }
+
     const mode = this.snapshotState.mode
     const ids = this.context?.trackIds ?? []
     const trackId = this.snapshotState.trackId

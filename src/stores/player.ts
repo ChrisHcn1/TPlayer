@@ -14,7 +14,13 @@ import { defineStore } from 'pinia'
 
 import { createIdleSnapshot, playerService } from '../services/player'
 import { normalizeError } from '../services/ipc'
-import type { PlayContext, PlayMode, PlaybackEvent, PlaybackSnapshot } from '../types'
+import type {
+  PlayContext,
+  PlayMode,
+  PlaybackEvent,
+  PlaybackSnapshot,
+  SleepTimerState,
+} from '../types'
 
 /**
  * 播放上下文（含起始下标）。
@@ -34,6 +40,10 @@ export const usePlayerStore = defineStore('player', () => {
   const initialized = ref(false)
   /** 最近一次播放的上下文（决定队列与“下一首”语义）；RightPanel 队列据此渲染 */
   const currentContext = ref<PlayContext | null>(null)
+  /** 下一首是否已预解码完成（P2 自动连播预加载；PlayerBar 展示"下一首准备中"） */
+  const nextReady = ref(false)
+  /** 睡眠定时器状态（后端为唯一真相源，事件 + 主动查询同步） */
+  const sleepTimer = ref<SleepTimerState>({ active: false, waitTrackEnd: false, endsAtMs: null })
   /** 取消后端事件订阅（init 时登记，dispose 时注销） */
   let unsubscribe: (() => void) | null = null
 
@@ -83,9 +93,21 @@ export const usePlayerStore = defineStore('player', () => {
           positionMs: 0,
           error: null,
         }
+        nextReady.value = false
         return
       case 'progress':
         snapshot.value = { ...snapshot.value, positionMs: event.payload.positionMs }
+        return
+      case 'nextPreloaded':
+        // 下一曲已预解码到引擎待命链路：切歌将无缝衔接
+        nextReady.value = true
+        return
+      case 'sleepTimer':
+        sleepTimer.value = event.payload
+        return
+      case 'queue':
+        // 队列变更（移除队列项等）：以推送的最新上下文为准
+        currentContext.value = event.payload
         return
       case 'volume':
         snapshot.value = {
@@ -123,6 +145,7 @@ export const usePlayerStore = defineStore('player', () => {
       const restoredContext = await playerService.init()
       if (restoredContext) currentContext.value = restoredContext
       applySnapshot(await playerService.snapshot())
+      sleepTimer.value = await playerService.sleepTimerStatus()
       initialized.value = true
     })
   }
@@ -170,6 +193,7 @@ export const usePlayerStore = defineStore('player', () => {
   async function stop(): Promise<void> {
     await execute(async () => {
       await playerService.stop()
+      nextReady.value = false
       applySnapshot(await playerService.snapshot())
     })
   }
@@ -225,6 +249,29 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  /** 设置睡眠定时器（delayMs 毫秒后到期；waitTrackEnd=true 时播完当前曲目才停止） */
+  async function setSleepTimer(delayMs: number, waitTrackEnd = false): Promise<void> {
+    await execute(async () => {
+      await playerService.setSleepTimer(Math.max(0, Math.round(delayMs)), waitTrackEnd)
+      sleepTimer.value = await playerService.sleepTimerStatus()
+    })
+  }
+
+  /** 取消睡眠定时器 */
+  async function cancelSleepTimer(): Promise<void> {
+    await execute(async () => {
+      await playerService.cancelSleepTimer()
+      sleepTimer.value = await playerService.sleepTimerStatus()
+    })
+  }
+
+  /** 从队列移除指定下标的曲目（移除当前播放曲目不打断播放） */
+  async function removeFromQueue(index: number): Promise<void> {
+    await execute(async () => {
+      await playerService.removeFromQueue(index)
+    })
+  }
+
   /** 播放模式轮换：顺序 → 列表循环 → 单曲循环 → 随机（快捷键 R 使用） */
   const MODE_ORDER: PlayMode[] = ['order', 'repeat-all', 'repeat-one', 'shuffle']
   async function cycleMode(): Promise<void> {
@@ -249,6 +296,8 @@ export const usePlayerStore = defineStore('player', () => {
     currentContext,
     queueTrackIds,
     currentIndex,
+    nextReady,
+    sleepTimer,
     applySnapshot,
     applyEvent,
     init,
@@ -265,6 +314,9 @@ export const usePlayerStore = defineStore('player', () => {
     setMuted,
     setMode,
     cycleMode,
+    setSleepTimer,
+    cancelSleepTimer,
+    removeFromQueue,
     dispose,
   }
 })

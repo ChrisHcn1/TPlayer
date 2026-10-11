@@ -12,12 +12,15 @@ use tauri::{AppHandle, Listener, Manager};
 
 pub mod commands;
 pub mod config;
+pub mod converter;
 pub mod cover;
 pub mod error;
 pub mod library;
 pub mod lyrics;
 pub mod player;
+pub mod replaygain;
 pub mod security;
+pub mod watch;
 
 use config::AppConfig;
 use library::store::LibraryStore;
@@ -37,6 +40,10 @@ pub struct AppState {
     pub library_path: PathBuf,
     /// 歌词偏移持久化文件路径
     pub lyrics_offsets_path: PathBuf,
+    /// 目录自动监控管理器
+    pub watch: watch::WatchManager,
+    /// 音频转换器状态（running/cancel 原子标志）
+    pub converter: converter::ConverterState,
     /// AppHandle（用于事件推送，命令层也可直接从参数获取）
     pub app: AppHandle,
 }
@@ -69,7 +76,10 @@ pub fn run() {
             // 首次启动自动把旧 library.json 导入 SQLite 并备份为 library.json.bak
             let library = LibraryStore::open(library_path.clone(), legacy_library_path)?;
 
-            let player_handle = Arc::new(Mutex::new(PlayerHandle::new()));
+            // 启动引擎线程，返回可发送命令的句柄
+            let engine_handle = player::spawn_engine();
+
+            let player_handle = Arc::new(Mutex::new(PlayerHandle::new(engine_handle.clone())));
             // 退出标志：托盘"退出"置为 true，窗口 CloseRequested 据此区分"隐藏到托盘"与"真正退出"
             let should_quit = Arc::new(AtomicBool::new(false));
             // 加载上次会话的播放状态（断点 + 播放习惯），待 player_init 应用
@@ -78,6 +88,17 @@ pub fn run() {
                 .unwrap()
                 .set_persist_path(playback_path);
 
+            // 从配置下发交叉淡化参数
+            {
+                let cfg = &config;
+                engine_handle.set_crossfade(cfg.crossfade.enabled, cfg.crossfade.duration_ms);
+            }
+            // 从配置下发音量归一化 ReplayGain 开关
+            {
+                let cfg = &config;
+                engine_handle.set_replaygain(cfg.replaygain.enabled);
+            }
+
             let state = AppState {
                 player: player_handle.clone(),
                 library: Mutex::new(library),
@@ -85,10 +106,24 @@ pub fn run() {
                 config_path,
                 library_path,
                 lyrics_offsets_path,
+                watch: watch::WatchManager::new(),
+                converter: converter::ConverterState::new(),
                 app: app_handle.clone(),
             };
 
             app.manage(state);
+
+            // 目录自动监控：按配置启动监听（默认开启，曲库目录白名单变化时增量同步）
+            // 注意：config 两项必须先取出再调用（同一表达式里两次 lock 同一 Mutex
+            // 会因临时 MutexGuard 存活到语句结束而自死锁，卡死主线程）
+            {
+                let state = app.state::<AppState>();
+                let (dirs, watch_enabled) = {
+                    let config = state.config.lock().unwrap();
+                    (config.library_dirs.clone(), config.watch.enabled)
+                };
+                state.watch.reconfigure(app_handle.clone(), &dirs, watch_enabled);
+            }
 
             // ---- 系统托盘 ----
             // 菜单：播放/暂停、上一首、下一首 | 显示主窗口、退出
@@ -275,6 +310,12 @@ pub fn run() {
             commands::player::player_set_volume,
             commands::player::player_set_muted,
             commands::player::player_set_mode,
+            commands::player::player_set_crossfade,
+            commands::player::player_set_replaygain,
+            commands::player::player_set_sleep_timer,
+            commands::player::player_cancel_sleep_timer,
+            commands::player::player_sleep_timer_status,
+            commands::player::player_remove_from_queue,
             commands::player::player_dispose,
             // 曲库
             commands::library::library_scan,
@@ -308,6 +349,12 @@ pub fn run() {
             // 设置
             commands::settings::settings_load,
             commands::settings::settings_save,
+            // 目录监控
+            commands::watch::watcher_status,
+            // 音频转换
+            commands::converter::converter_start,
+            commands::converter::converter_cancel,
+            commands::converter::converter_probe_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
