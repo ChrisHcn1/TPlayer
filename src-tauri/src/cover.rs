@@ -224,7 +224,7 @@ pub async fn resolve_group_cover(
 // ---- 在线匹配（网易云） -------------------------------------------------
 
 const SEARCH_URL: &str = "https://music.163.com/api/search/get";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TPlayerNext/2.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TPlayer/2.0";
 /// 时长匹配容差（毫秒）：与歌词在线匹配保持一致
 const DURATION_TOLERANCE_MS: i64 = 3000;
 

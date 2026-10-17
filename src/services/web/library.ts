@@ -13,7 +13,7 @@ import {
   WEB_RECENT_STORAGE_KEY,
   WEB_REMOVED_STORAGE_KEY,
 } from '../../constants'
-import type { Album, Artist, LibraryStats, Playlist, RecentEntry, Track } from '../../types'
+import type { Album, Artist, LibraryStats, Playlist, RecentEntry, Track, TrackInfo } from '../../types'
 import {
   aggregateAlbums,
   aggregateArtists,
@@ -213,6 +213,38 @@ export const webLibrary = {
     const set = readStringSet(WEB_REMOVED_STORAGE_KEY)
     for (const id of ids) set.add(id)
     writeJSON(WEB_REMOVED_STORAGE_KEY, [...set])
+  },
+
+  /* ---- 拖拽导入（Web 预览无真实文件解析，约定返回空列表由调用方提示） ---- */
+  async importFiles(_paths: string[]): Promise<string[]> {
+    return []
+  },
+
+  /* ---- 曲目详情（Web 预览返回基础 Track 补齐的简化版本，字段仅用于联调） ---- */
+  async trackInfo(trackId: string): Promise<TrackInfo | null> {
+    const track = visibleTracks().find((item) => item.id === trackId)
+    if (!track) return null
+    return {
+      title: track.title,
+      artists: track.artists,
+      album: track.album,
+      trackNumber: null,
+      year: track.year,
+      duration: track.duration,
+      format: track.format,
+      bitrate: null,
+      sampleRate: track.sampleRate,
+      bitDepth: null,
+      channels: null,
+      filePath: track.filePath,
+      fileSize: track.fileSize,
+      modifiedAt: track.modifiedAt,
+      addedAt: track.addedAt,
+      cover: await webLibrary.cover(trackId),
+      embeddedLyrics: null,
+      replaygainDb: null,
+      replaygainPeak: null,
+    }
   },
 
   /* ---- 曲库目录（Web 预览无白名单概念，保留 no-op 以对齐契约） ---- */

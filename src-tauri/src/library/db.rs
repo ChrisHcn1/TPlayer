@@ -51,6 +51,47 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         .map(|n| n > 0)
         .unwrap_or(false)
     };
+    // schema v3：去掉 file_path 唯一约束（CUE 分轨共享镜像路径），并新增
+    // is_cue / cue_offset 列。SQLite 不支持直接 DROP UNIQUE，故整体重建 tracks 表。
+    if !has_column("is_cue") {
+        conn.execute_batch(
+            "CREATE TABLE tracks_new (
+                id           TEXT PRIMARY KEY,
+                title        TEXT NOT NULL,
+                album        TEXT NOT NULL,
+                album_id     TEXT,
+                duration     REAL NOT NULL,
+                track_number INTEGER,
+                year         INTEGER,
+                file_path    TEXT NOT NULL,
+                file_size    INTEGER NOT NULL,
+                format       TEXT NOT NULL,
+                bitrate      INTEGER,
+                sample_rate  INTEGER,
+                has_cover    INTEGER NOT NULL DEFAULT 0,
+                added_at     INTEGER NOT NULL,
+                modified_at  INTEGER NOT NULL,
+                artists_json TEXT NOT NULL DEFAULT '[]',
+                is_cue       INTEGER NOT NULL DEFAULT 0,
+                cue_offset   REAL,
+                replaygain_db   REAL,
+                replaygain_peak REAL
+            );
+            INSERT INTO tracks_new (
+                id, title, album, album_id, duration, track_number, year,
+                file_path, file_size, format, bitrate, sample_rate,
+                has_cover, added_at, modified_at, artists_json
+            )
+            SELECT id, title, album, album_id, duration, track_number, year,
+                   file_path, file_size, format, bitrate, sample_rate,
+                   has_cover, added_at, modified_at, artists_json
+            FROM tracks;
+            DROP TABLE tracks;
+            CREATE INDEX idx_tracks_album ON tracks_new(album_id);
+            ALTER TABLE tracks_new RENAME TO tracks;",
+        )
+        .map_err(|e| AppError::Library(format!("迁移 schema v3 失败: {e}")))?;
+    }
     if !has_column("replaygain_db") {
         conn.execute_batch("ALTER TABLE tracks ADD COLUMN replaygain_db REAL")
             .map_err(|e| AppError::Library(format!("迁移 schema v2 失败（replaygain_db）: {e}")))?;
@@ -85,7 +126,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     duration     REAL NOT NULL,
     track_number INTEGER,
     year         INTEGER,
-    file_path    TEXT NOT NULL UNIQUE,
+    file_path    TEXT NOT NULL,
     file_size    INTEGER NOT NULL,
     format       TEXT NOT NULL,
     bitrate      INTEGER,
@@ -94,7 +135,11 @@ CREATE TABLE IF NOT EXISTS tracks (
     added_at     INTEGER NOT NULL,
     modified_at  INTEGER NOT NULL,
     -- 艺术家数组 JSON，仅用于快速还原 Track 模型；聚合查询走 track_artists
-    artists_json TEXT NOT NULL DEFAULT '[]'
+    artists_json TEXT NOT NULL DEFAULT '[]',
+    -- CUE 分轨：标识该曲是否属于整盘镜像中的某一轨
+    is_cue       INTEGER NOT NULL DEFAULT 0,
+    -- CUE 分轨在镜像文件中的起始偏移（秒）；NULL 表示非分轨
+    cue_offset   REAL
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
 

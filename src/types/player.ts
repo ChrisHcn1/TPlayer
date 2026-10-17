@@ -35,6 +35,8 @@ export interface PlaybackSnapshot {
   /** 音量 0.0 ~ 1.0 */
   volume: number
   muted: boolean
+  /** 播放倍速（1.0 = 原速；有效区间 0.25 ~ 4.0） */
+  rate: number
   mode: PlayMode
   /** 播放错误信息 */
   error: string | null
@@ -48,6 +50,8 @@ export interface PlayContext {
   sourceId: string | null
   /** 上下文曲目 ID 有序列表 */
   trackIds: string[]
+  /** 续播/连播强制接管意图（Rust 经 compat-play 事件传入）：core 未就绪时也预热并在就绪后自动切播 */
+  force?: boolean
 }
 
 /**
@@ -68,6 +72,11 @@ export interface IPlayer {
    */
   subscribe(listener: (event: PlaybackEvent) => void): () => void
   play(trackId: string, context?: PlayContext): Promise<void>
+  /**
+   * 兜底通道静默接管（compat-play 事件路径专用；由 CompatPlayer 实现，base 实现无需提供）。
+   * 与 play 的区别：后端已完成队列/快照占位，本方法直接解码播放，不再触发后端占位事件。
+   */
+  playCompat?(trackId: string, context?: PlayContext): Promise<void>
   pause(): Promise<void>
   resume(): Promise<void>
   stop(): Promise<void>
@@ -77,6 +86,8 @@ export interface IPlayer {
   setVolume(volume: number): Promise<void>
   setMuted(muted: boolean): Promise<void>
   setMode(mode: PlayMode): Promise<void>
+  /** 设置播放倍速（有效区间 0.25 ~ 4.0） */
+  setRate(rate: number): Promise<void>
   /** 设置交叉淡化（启用开关 + 时长毫秒，0~3000）；浏览器 mock 忽略 */
   setCrossfade(enabled: boolean, durationMs: number): Promise<void>
   /** 设置音量归一化 ReplayGain 开关；浏览器 mock 忽略 */
@@ -110,6 +121,7 @@ export type PlaybackEvent =
   | { type: 'progress'; payload: { positionMs: number } }
   | { type: 'volume'; payload: { volume: number; muted: boolean } }
   | { type: 'mode'; payload: { mode: PlayMode } }
+  | { type: 'rate'; payload: { rate: number } }
   | { type: 'ended'; payload: { trackId: string } }
   | { type: 'nextPreloaded'; payload: { trackId: string } }
   | { type: 'sleepTimer'; payload: SleepTimerState }

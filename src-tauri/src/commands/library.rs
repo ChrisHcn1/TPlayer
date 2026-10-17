@@ -13,7 +13,7 @@ use tauri::{AppHandle, State};
 use crate::cover;
 use crate::error::{AppError, AppResult};
 use crate::library::models::{Album, Artist, LibraryStats, Playlist, RecentEntry, Track};
-use crate::library::scan::scan_directory;
+use crate::library::scan::{discover_audio_files, parse_track, scan_directory, SUPPORTED_EXT};
 use crate::AppState;
 
 /// 启动一次曲库扫描（增量）
@@ -30,6 +30,22 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
 
     if roots.is_empty() {
         return Err(AppError::Library("未配置曲库目录，请先在设置中添加".into()));
+    }
+
+    // 扫描前先校验每个根目录是否可达：网络盘未挂载 / 凭据缺失 / 路径非法（如
+    // SMB 共享写成 172.18.0.21/songs 而非常规 \\\\host\\share，或相对路径）都会被
+    // 静默吞掉导致「扫完 0 文件」。这里显式报错让用户看到真实原因。
+    let mut inaccessible = Vec::new();
+    for root in &roots {
+        if std::fs::metadata(root).is_err() {
+            inaccessible.push(root.to_string_lossy().to_string());
+        }
+    }
+    if !inaccessible.is_empty() {
+        return Err(AppError::Library(format!(
+            "以下曲库目录无法访问（网络盘未挂载 / 凭据缺失 / 路径非法；Windows SMB 共享需以 \\\\host\\share 形式，如 \\\\172.18.0.21\\songs，或将共享映射为盘符如 Y:\\songs）：{}",
+            inaccessible.join("；")
+        )));
     }
 
     // 增量扫描基线（id/path/mtime），扫描为同步阻塞操作，在命令线程中执行
@@ -136,7 +152,7 @@ pub async fn library_cover(
         }
     }
 
-    // 磁盘缓存目录：%APPDATA%/TPlayer Next/cover-cache
+    // 磁盘缓存目录：%APPDATA%/com.tplayer/cover-cache
     let cache_dir = cover_cache_dir(&state);
 
     if let Some(url) = read_disk_cache(&cache_dir, &track_id) {
@@ -180,7 +196,7 @@ pub async fn library_cover(
     Ok(url)
 }
 
-/// 封面磁盘缓存目录：%APPDATA%/TPlayer Next/cover-cache
+/// 封面磁盘缓存目录：%APPDATA%/com.tplayer/cover-cache
 fn cover_cache_dir(state: &State<'_, AppState>) -> PathBuf {
     state
         .config_path
@@ -456,4 +472,202 @@ pub fn library_remove_track_from_playlist(
     let mut library = state.library.lock().unwrap();
     library.remove_track_from_playlist(&id, &track_id)?;
     Ok(())
+}
+
+/// 拖拽导入：将给定路径（文件或目录）中的音频文件直接解析入库，
+/// 绕过白名单目录扫描（等价于用户显式把文件"放入"曲库）。
+///
+/// 安全约定：路径来自 Tauri 拖放事件（用户主动拖入窗口），视为可信，
+/// 与 library_add_dir（dialog 选择器）同源，不强制白名单校验。
+/// 返回成功入库的曲目 ID 列表；无可识别音频时返回空列表。
+#[tauri::command]
+pub fn library_import_files(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> AppResult<Vec<String>> {
+    let mut to_parse: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let path = PathBuf::from(raw);
+        if path.is_dir() {
+            to_parse.extend(discover_audio_files(&path));
+        } else if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if SUPPORTED_EXT.contains(&ext.to_lowercase().as_str()) {
+                    to_parse.push(path);
+                }
+            }
+        }
+    }
+    if to_parse.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut upserts: Vec<Track> = Vec::with_capacity(to_parse.len());
+    for path in &to_parse {
+        if let Some(track) = parse_track(path) {
+            upserts.push(track);
+        }
+    }
+    if upserts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 写入曲库并刷新播放器曲目缓存（与 library_scan 同构）
+    let mut library = state.library.lock().unwrap();
+    library.apply_scan(&upserts, &[])?;
+    let tracks = library.tracks();
+    drop(library);
+    state.player.lock().unwrap().set_tracks(tracks);
+
+    // 新导入曲目可能带来新封面，失效内存封面缓存（磁盘缓存保留）
+    cover_cache().lock().unwrap().clear();
+
+    Ok(upserts.into_iter().map(|t| t.id).collect())
+}
+
+// ---------------- 曲目详情（track_info） ----------------
+
+/// 曲目详情返回模型：面向前端 TrackInfoPanel 的全量元数据聚合。
+/// 所有字段均 Option 化，lofty 读不到、文件缺失、解码失败一律降级为 None，
+/// 严禁因单个字段缺失让整个接口报错导致前端崩溃。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrackInfo {
+    // ---- 基础信息 ----
+    pub title: String,
+    #[serde(rename = "artists")]
+    pub artists: Vec<String>,
+    pub album: String,
+    #[serde(rename = "trackNumber")]
+    pub track_number: Option<u32>,
+    pub year: Option<u32>,
+    /// 时长（秒），时长探测失败时为 0
+    pub duration: f64,
+
+    // ---- 技术信息 ----
+    /// 音频格式（小写扩展名）
+    pub format: String,
+    /// 比特率（bps）
+    pub bitrate: Option<u32>,
+    /// 采样率（Hz）
+    #[serde(rename = "sampleRate")]
+    pub sample_rate: Option<u32>,
+    /// 位深（bit）
+    #[serde(rename = "bitDepth")]
+    pub bit_depth: Option<u8>,
+    /// 声道数
+    pub channels: Option<u8>,
+
+    // ---- 存储信息 ----
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "fileSize")]
+    pub file_size: u64,
+    #[serde(rename = "modifiedAt")]
+    pub modified_at: i64,
+    #[serde(rename = "addedAt")]
+    pub added_at: i64,
+
+    // ---- 封面（data URL，与 library_cover 同链路；无封面为 None）----
+    pub cover: Option<String>,
+
+    // ---- 内嵌歌词（纯文本；无歌词为 None）----
+    #[serde(rename = "embeddedLyrics")]
+    pub embedded_lyrics: Option<String>,
+
+    // ---- ReplayGain ----
+    #[serde(rename = "replaygainDb")]
+    pub replaygain_db: Option<f32>,
+    #[serde(rename = "replaygainPeak")]
+    pub replaygain_peak: Option<f32>,
+}
+
+/// 读音频内嵌歌词（lofty Lyrics 标签）；失败或空文本一律返回 None
+fn read_embedded_lyrics(path: &std::path::Path) -> Option<String> {
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::ItemKey;
+    let tagged = lofty::read_from_path(path).ok()?;
+    let mut tags: Vec<&lofty::tag::Tag> = Vec::new();
+    if let Some(primary) = tagged.primary_tag() {
+        tags.push(primary);
+    }
+    tags.extend(tagged.tags().iter());
+    for tag in tags {
+        if let Some(text) = tag.get_string(&ItemKey::Lyrics) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 读取曲目元数据：先读曲库缓存（快），再用 lofty + ffprobe 补齐 bit_depth/channels 等技术字段
+fn enrich_track(track: &Track) -> TrackInfo {
+    use lofty::file::AudioFile;
+    let path = std::path::Path::new(&track.file_path);
+    let mut bit_depth = None;
+    let mut channels = None;
+    let mut duration = track.duration;
+
+    // 尝试 lofty 解析完整属性（bit_depth/channels 在 Track 模型中未持久化，每次实时解析）
+    if let Ok(file) = lofty::read_from_path(path) {
+        let props = file.properties();
+        bit_depth = props.bit_depth();
+        channels = props.channels();
+        // lofty 读取的 duration 更精确时以它为准
+        let lofty_dur = props.duration().as_secs_f64();
+        if lofty_dur > 0.0 && (duration <= 0.0 || (lofty_dur - duration).abs() > 0.5) {
+            duration = lofty_dur;
+        }
+    }
+
+    // 内嵌歌词
+    let embedded_lyrics = read_embedded_lyrics(path);
+
+    TrackInfo {
+        title: track.title.clone(),
+        artists: track.artists.clone(),
+        album: track.album.clone(),
+        track_number: track.track_number,
+        year: track.year,
+        duration,
+        format: track.format.clone(),
+        bitrate: track.bitrate,
+        sample_rate: track.sample_rate,
+        bit_depth,
+        channels,
+        file_path: track.file_path.clone(),
+        file_size: track.file_size,
+        modified_at: track.modified_at,
+        added_at: track.added_at,
+        cover: None, // 单独通过 library_cover 异步解析（含内存/磁盘两级缓存 + 在线回退）
+        embedded_lyrics,
+        replaygain_db: track.replaygain_db,
+        replaygain_peak: track.replaygain_peak,
+    }
+}
+
+/// 返回指定曲目的完整元数据（含技术参数、内嵌歌词、封面 data URL）。
+/// 任何字段缺失或解析失败一律降级为 None / 默认值，不向上抛错。
+#[tauri::command]
+pub async fn library_track_info(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> AppResult<Option<TrackInfo>> {
+    // 1. 查曲库缓存（路径 / 基础字段）
+    let track = match state.library.lock().unwrap().get_track(&track_id) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    // 2. 技术参数 + 内嵌歌词（同步解析，lofty 读取极快）
+    let mut info = enrich_track(&track);
+
+    // 3. 封面：复用 library_cover 的完整解析链（含缓存 + 在线匹配）
+    if let Ok(Some(url)) = library_cover(state.clone(), track_id.clone()).await {
+        info.cover = Some(url);
+    }
+
+    Ok(Some(info))
 }

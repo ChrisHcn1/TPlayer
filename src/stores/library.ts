@@ -15,6 +15,7 @@ import { defineStore } from 'pinia'
 
 import { libraryService } from '../services/library'
 import { normalizeError } from '../services/ipc'
+import { useToastStore } from './toast'
 import type { Album, Artist, LibraryStats, RecentEntry, ScanProgress, Track } from '../types'
 
 function createIdleScanProgress(): ScanProgress {
@@ -46,6 +47,7 @@ export const useLibraryStore = defineStore('library', () => {
   const keyword = ref('')
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const toast = useToastStore()
 
   const isEmpty = computed(() => tracks.value.length === 0)
 
@@ -164,6 +166,24 @@ export const useLibraryStore = defineStore('library', () => {
     }
   }
 
+  /**
+   * 拖拽导入落地：把拖入窗口的文件/目录路径交给后端解析入库，
+   * 成功后刷新曲库视图并返回入库曲目 ID 列表（供调用方建播放列表）。
+   * 浏览器预览无真实文件解析，importFiles 返回空列表。
+   */
+  async function importDropped(paths: string[]): Promise<string[]> {
+    if (paths.length === 0) return []
+    try {
+      const ids = await libraryService.importFiles(paths)
+      if (ids.length > 0) await refresh()
+      return ids
+    } catch (cause) {
+      error.value = normalizeError(cause).message
+      toast.warning(error.value)
+      return []
+    }
+  }
+
   async function cancelScan(): Promise<void> {
     try {
       await libraryService.cancelScan()
@@ -275,6 +295,7 @@ export const useLibraryStore = defineStore('library', () => {
     filterTracks,
     refresh,
     scan,
+    importDropped,
     cancelScan,
     applyScanProgress,
     setKeyword,

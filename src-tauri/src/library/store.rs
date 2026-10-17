@@ -59,6 +59,18 @@ impl LibraryStore {
 
     // ---- 曲目查询 ----
 
+    /// 是否存在指定文件路径的曲目（大小写不敏感；兼容层文件读取白名单用）。
+    /// config.library_dirs 可能被重置而曲库数据仍在（SQLite 持久化），曲库是路径的权威来源。
+    pub fn has_file_path(&self, path: &str) -> bool {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT 1 FROM tracks WHERE file_path = ?1 COLLATE NOCASE LIMIT 1")
+        else {
+            return false;
+        };
+        stmt.query_row([path], |_| Ok(())).is_ok()
+    }
+
     pub fn tracks(&self) -> Vec<Track> {
         let mut stmt = self
             .conn
@@ -244,12 +256,14 @@ impl LibraryStore {
         }
     }
 
-    /// 按专辑聚合：每组取音轨号最小者为代表（artists/year）
-    pub fn albums(&self) -> Vec<Album> {
+    /// 按专辑聚合：每组取音轨号最小者为代表（artists/year）。
+    /// `cue_only = true` 时只返回 CUE 分轨专辑，否则只返回普通专辑，
+    /// 二者互不重叠（由 tracks.is_cue 区分）。
+    fn albums_filtered(&self, cue_only: bool) -> Vec<Album> {
         let sql = r#"
             WITH ranked AS (
                 SELECT
-                    album_id, album, artists_json, year,
+                    album_id, album, artists_json, year, is_cue,
                     ROW_NUMBER() OVER (
                         PARTITION BY album_id
                         ORDER BY COALESCE(track_number, 2147483647), id
@@ -259,18 +273,21 @@ impl LibraryStore {
                 FROM tracks
                 WHERE album_id IS NOT NULL
             )
-            SELECT album_id, album, artists_json, year, tc, hc
-            FROM ranked WHERE rn = 1
+            SELECT album_id, album, artists_json, year, is_cue, tc, hc
+            FROM ranked
+            WHERE rn = 1 AND is_cue = ?1
             ORDER BY album
         "#;
+        let flag = if cue_only { 1i64 } else { 0i64 };
         let mut stmt = self.conn.prepare(sql).expect("prepare albums");
-        stmt.query_map([], |row| {
+        stmt.query_map([flag], |row| {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let artists_json: String = row.get(2)?;
             let year: Option<i64> = row.get(3)?;
-            let track_count: i64 = row.get(4)?;
-            let has_cover: i64 = row.get(5)?;
+            let is_cue: i64 = row.get(4)?;
+            let track_count: i64 = row.get(5)?;
+            let has_cover: i64 = row.get(6)?;
             let artists = serde_json::from_str::<Vec<String>>(&artists_json).unwrap_or_default();
             Ok(Album {
                 id,
@@ -279,7 +296,7 @@ impl LibraryStore {
                 year: year.map(|y| y as u32),
                 track_count: track_count as u32,
                 has_cover: has_cover != 0,
-                is_cue: false,
+                is_cue: is_cue != 0,
             })
         })
         .expect("query albums")
@@ -287,9 +304,14 @@ impl LibraryStore {
         .collect()
     }
 
-    /// CUE 分轨专辑（当前无 CUE 解析，返回空）
+    /// 普通专辑（不含 CUE 分轨专辑；CUE 由独立入口承载）
+    pub fn albums(&self) -> Vec<Album> {
+        self.albums_filtered(false)
+    }
+
+    /// CUE 分轨专辑（整盘镜像拆出的虚拟专辑）
     pub fn cue_albums(&self) -> Vec<Album> {
-        Vec::new()
+        self.albums_filtered(true)
     }
 
     /// 按艺术家聚合（曲目数 / 去重专辑数）
@@ -657,6 +679,8 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
             .map(|v| v as f32),
         added_at: row.get("added_at")?,
         modified_at: row.get("modified_at")?,
+        is_cue: row.get::<_, i64>("is_cue").unwrap_or(0) != 0,
+        cue_offset: row.get::<_, Option<f64>>("cue_offset")?,
     })
 }
 
@@ -671,8 +695,9 @@ fn upsert_track(
         INSERT INTO tracks(
             id, title, album, album_id, duration, track_number, year,
             file_path, file_size, format, bitrate, sample_rate,
-            has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+            has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json,
+            is_cue, cue_offset
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
         ON CONFLICT(id) DO UPDATE SET
             title       = excluded.title,
             album       = excluded.album,
@@ -689,7 +714,9 @@ fn upsert_track(
             replaygain_db   = excluded.replaygain_db,
             replaygain_peak = excluded.replaygain_peak,
             modified_at = excluded.modified_at,
-            artists_json= excluded.artists_json
+            artists_json= excluded.artists_json,
+            is_cue      = excluded.is_cue,
+            cue_offset  = excluded.cue_offset
         "#,
         params![
             track.id,
@@ -710,6 +737,8 @@ fn upsert_track(
             track.added_at,
             track.modified_at,
             artists_json,
+            track.is_cue as i64,
+            track.cue_offset,
         ],
     )
     .map_err(|e| AppError::Library(format!("写入曲目失败: {e}")))?;

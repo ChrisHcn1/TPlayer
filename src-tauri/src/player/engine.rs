@@ -19,21 +19,112 @@ const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga", "opus", "aac",
 /// ffmpeg 可解码的补充格式（ape/dsd/dts/wma/wv/tta/tak/aiff 等）
 const FFMPEG_EXT: &[&str] = &["wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts"];
 
-fn is_native_format(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| NATIVE_EXT.contains(&e.to_lowercase().as_str()))
-        .unwrap_or(false)
+/// DTS 位流同步字表（与 ffmpeg dca_parser 一致，按大端 32-bit 读入后比较）
+const DTS_SYNC_WORDS: &[u32] = &[
+    0x7FFE8001, // 16-bit big-endian（DTS-CD / 常规裸流最常见）
+    0xFF1F00E8, // 14-bit big-endian
+    0xE8001FFF, // 14-bit little-endian
+    0x0180FE7F, // 16-bit little-endian
+    0x64582025, // DTS-HD（XLL / 扩展子流 "dX %"）
+];
+
+/// 解析 RIFF 头，返回 data chunk 数据区在 head 内的偏移；无法解析返回 None
+fn riff_data_offset(head: &[u8]) -> Option<usize> {
+    if head.len() < 12 || &head[0..4] != b"RIFF" {
+        return None;
+    }
+    let mut off = 12usize;
+    while off + 8 <= head.len() {
+        let id = &head[off..off + 4];
+        let size = u32::from_le_bytes([head[off + 4], head[off + 5], head[off + 6], head[off + 7]])
+            as usize;
+        if id == b"data" {
+            return Some(off + 8);
+        }
+        // chunk 数据区 + 2 字节对齐填充
+        off += 8 + size + (size % 2);
+    }
+    None
 }
 
-/// 定位 bin 目录下的工具（ffmpeg/ffprobe）：沿可执行文件祖先目录查找
-/// （覆盖开发期项目根与安装布局）
+/// data chunk 起始小窗口内扫描 DTS 同步字（容忍极端帧对齐偏移）
+fn head_data_has_dts(head: &[u8]) -> bool {
+    let Some(data_off) = riff_data_offset(head) else {
+        return false;
+    };
+    let end = head.len().min(data_off + 16);
+    let mut i = data_off;
+    while i + 4 <= end {
+        let w = u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+        if DTS_SYNC_WORDS.contains(&w) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 读取文件头判断是否为「WAV 容器封装 DTS」（DTS-CD/DTS-ES 伪装 WAV）。
+/// 读失败按非 DTS 处理（保持原路由，由后续解码错误链路兜底）。
+fn wav_head_contains_dts(path: &Path) -> bool {
+    const HEAD_LEN: usize = 4096;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = vec![0u8; HEAD_LEN];
+    let mut total = 0usize;
+    while total < HEAD_LEN {
+        match file.read(&mut head[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(_) => break,
+        }
+    }
+    head_data_has_dts(&head[..total])
+}
+
+fn is_native_format(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext = ext.to_lowercase();
+    if !NATIVE_EXT.contains(&ext.as_str()) {
+        return false;
+    }
+    // WAV 容器深检：fmt 声称 PCM 但数据实为 DTS 位流（如 DTS-ES 封装在 .wav 中，
+    // symphonia 会按 PCM 打开并输出噪声）——识别后路由到 ffmpeg 管道解码。
+    // 反向误判（真 PCM 数据开头恰好命中同步字）代价仅为换 ffmpeg 通道，播放结果一致。
+    if ext == "wav" && wav_head_contains_dts(path) {
+        return false;
+    }
+    true
+}
+
+/// 定位 bin 目录下的工具（ffmpeg/ffprobe）：覆盖开发期与安装期多种布局。
+///
+/// - 沿可执行文件祖先目录查找 `<ancestor>/bin/<name>`（开发期 `src-tauri/bin`、
+///   构建产物目录下的 `bin/` 等）；
+/// - 安装包下 Tauri 把资源放到 `<app>/resources/bin/<name>`，单独补查该路径与
+///   同目录 `<app>/<name>`（避免 Release 版本找不到 ffmpeg 导致 DSD/APE/DTS 等
+///   依赖第三方解码的格式无法播放、进度与拖动失效）。
 fn resolve_bin_tool(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     for ancestor in exe.ancestors().skip(1) {
-        let candidate = ancestor.join("bin").join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+        let cand = ancestor.join("bin").join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    if let Some(parent) = exe.parent() {
+        for rel in [
+            std::path::Path::new("resources/bin").join(name),
+            std::path::Path::new("bin").join(name),
+            std::path::Path::new(name).to_path_buf(),
+        ] {
+            let cand = parent.join(rel);
+            if cand.is_file() {
+                return Some(cand);
+            }
         }
     }
     None
@@ -102,7 +193,8 @@ pub struct EngineCapabilities {
 /// 发往引擎线程的命令
 enum EngineCommand {
     /// 播放（附回执通道：打开/解码是否成功同步回传，失败可转为 error 事件）
-    Play(PathBuf, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
+    /// 末参为可选 CUE 分轨区间 (start_sec, duration_sec)：非 None 时按偏移定位播放
+    Play(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, mpsc::Sender<AppResult<()>>),
     /// 播放并定位到指定毫秒（断点续播专用：等混音线程起流后再 seek，规避启动竞态）
     PlayAt(PathBuf, u64, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
     Pause,
@@ -116,11 +208,14 @@ enum EngineCommand {
     /// 更新交叉淡化配置（启用 + 时长 ms）
     SetCrossfade(bool, u64),
     /// 预解码下一曲到待命链路（不发声；切歌时 SwapToNext 无缝接管）
-    Preload(PathBuf, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
+    /// 末参为可选 CUE 分轨区间 (start_sec, duration_sec)
+    Preload(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, mpsc::Sender<AppResult<()>>),
     /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
     SwapToNext(mpsc::Sender<AppResult<()>>),
     /// 更新音量归一化 ReplayGain 开关（开启时当前曲目立即应用增益）
     SetReplayGain(bool),
+    /// 更新播放倍速（1.0 = 原速）；立即作用于当前曲目与待命预加载链路
+    SetRate(f32),
 }
 
 /// 引擎句柄（Send）：PlayerHandle 通过它控制播放
@@ -130,10 +225,10 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn play(&self, path: PathBuf, gain: Option<(f32, f32)>) -> AppResult<()> {
+    pub fn play(&self, path: PathBuf, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::Play(path, gain, ack_tx))
+            .send(EngineCommand::Play(path, gain, range, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
@@ -193,10 +288,10 @@ impl EngineHandle {
     }
 
     /// 预解码下一曲到待命链路（不发声；切歌时 swap_to_next 无缝接管）
-    pub fn preload(&self, path: std::path::PathBuf, gain: Option<(f32, f32)>) -> AppResult<()> {
+    pub fn preload(&self, path: std::path::PathBuf, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::Preload(path, gain, ack_tx))
+            .send(EngineCommand::Preload(path, gain, range, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
@@ -206,6 +301,11 @@ impl EngineHandle {
     /// 更新音量归一化 ReplayGain 开关（开启时当前曲目立即应用增益）
     pub fn set_replaygain(&self, enabled: bool) {
         let _ = self.tx.send(EngineCommand::SetReplayGain(enabled));
+    }
+
+    /// 更新播放倍速（1.0 = 原速）；新曲目装载时也会自动沿用该速率
+    pub fn set_rate(&self, rate: f32) {
+        let _ = self.tx.send(EngineCommand::SetRate(rate));
     }
 
     /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
@@ -234,8 +334,8 @@ pub fn spawn_engine() -> EngineHandle {
             loop {
                 match rx.recv_timeout(Duration::from_millis(20)) {
                     Ok(cmd) => match cmd {
-                        EngineCommand::Play(path, gain, ack) => {
-                            let _ = ack.send(engine.play(&path, gain));
+                        EngineCommand::Play(path, gain, range, ack) => {
+                            let _ = ack.send(engine.play(&path, gain, range));
                         }
                         EngineCommand::PlayAt(path, pos_ms, gain, ack) => {
                             let _ = ack.send(engine.play_at(&path, pos_ms, gain));
@@ -266,8 +366,8 @@ pub fn spawn_engine() -> EngineHandle {
                             fade_duration_ms = duration_ms;
                             engine.fade_ms = duration_ms;
                         }
-                        EngineCommand::Preload(path, gain, ack) => {
-                            let _ = ack.send(engine.preload(&path, gain));
+                        EngineCommand::Preload(path, gain, range, ack) => {
+                            let _ = ack.send(engine.preload(&path, gain, range));
                         }
                         EngineCommand::SwapToNext(ack) => {
                             let _ = ack.send(engine.swap_to_next());
@@ -278,6 +378,9 @@ pub fn spawn_engine() -> EngineHandle {
                             if engine.fade_in_started.is_none() {
                                 engine.apply_volume();
                             }
+                        }
+                        EngineCommand::SetRate(rate) => {
+                            let _ = engine.set_rate(rate);
                         }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -357,6 +460,8 @@ struct RodioEngine {
     fade_ms: u64,
     /// 音量归一化 ReplayGain 开关（默认开启，与设置默认一致）
     replaygain_enabled: bool,
+    /// 当前播放倍速（1.0 = 原速；新建/接管链路时下发到 sink）
+    rate: f32,
 }
 
 impl RodioEngine {
@@ -380,6 +485,7 @@ impl RodioEngine {
             next_path: None,
             fade_ms: 1000,
             replaygain_enabled: true,
+            rate: 1.0,
         }
     }
 
@@ -487,7 +593,7 @@ impl RodioEngine {
             .ok_or_else(|| AppError::Player("音频输出设备不可用".into()))
     }
 
-    fn play(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>) -> AppResult<()> {
+    fn play(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
         let handle = self.ensure_stream()?.clone();
         let gain_scale = self.gain_scale_for(gain);
 
@@ -526,9 +632,13 @@ impl RodioEngine {
         let sink = rodio::Sink::try_new(&handle)
             .map_err(|e| AppError::Player(format!("无法创建音频 sink: {}", e)))?;
 
+        let start_ms = range.map(|(s, _)| (s * 1000.0) as u64).unwrap_or(0);
+        let duration_ms = range
+            .and_then(|(_, d)| if d > 0.0 { Some((d * 1000.0) as u64) } else { None });
+
         let is_ffmpeg = !is_native_format(path);
         let ffmpeg_child = if is_ffmpeg {
-            let (child, source) = spawn_ffmpeg_decoder(path, 0)?;
+            let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
             sink.append(source);
             Some(child)
         } else {
@@ -538,11 +648,19 @@ impl RodioEngine {
             let decoder = rodio::Decoder::new(BufReader::new(file))
                 .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
             sink.append(decoder);
+            // CUE 分轨：原生解码路径按起始偏移 seek（时长由播放状态机按 per-track duration 推进）
+            if let Some((start, _)) = range {
+                if start > 0.0 {
+                    let _ = sink.try_seek(std::time::Duration::from_secs_f64(start));
+                }
+            }
             None
         };
 
         // 新曲目从静默开始淡入
         sink.set_volume(0.0);
+        // 继承当前倍速（切歌/seek 重启后避免倍速丢失）
+        sink.set_speed(self.rate);
         self.current = Some(Playback {
             sink,
             ffmpeg_child,
@@ -556,7 +674,7 @@ impl RodioEngine {
 
     /// 预解码下一曲到待命链路：创建 sink + 解码器/ffmpeg 子进程，
     /// 但 sink 立即暂停不发声，等待 SwapToNext 或 play 路径一致时复用。
-    fn preload(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>) -> AppResult<()> {
+    fn preload(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
         // 新预加载前先回收旧预加载链路
         if let Some(stale) = self.next.take() {
             stale.halt();
@@ -567,9 +685,13 @@ impl RodioEngine {
         let sink = rodio::Sink::try_new(&handle)
             .map_err(|e| AppError::Player(format!("无法创建音频 sink: {}", e)))?;
 
+        let start_ms = range.map(|(s, _)| (s * 1000.0) as u64).unwrap_or(0);
+        let duration_ms = range
+            .and_then(|(_, d)| if d > 0.0 { Some((d * 1000.0) as u64) } else { None });
+
         let is_ffmpeg = !is_native_format(path);
         let ffmpeg_child = if is_ffmpeg {
-            let (child, source) = spawn_ffmpeg_decoder(path, 0)?;
+            let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
             sink.append(source);
             Some(child)
         } else {
@@ -579,11 +701,19 @@ impl RodioEngine {
             let decoder = rodio::Decoder::new(BufReader::new(file))
                 .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
             sink.append(decoder);
+            // CUE 分轨：原生解码路径按起始偏移 seek（时长由播放状态机按 per-track duration 推进）
+            if let Some((start, _)) = range {
+                if start > 0.0 {
+                    let _ = sink.try_seek(std::time::Duration::from_secs_f64(start));
+                }
+            }
             None
         };
 
         // 待命：暂停不发声，避免预加载期间泄漏音频
         sink.pause();
+        // 待命链路也继承倍速（swap 接管后延续）
+        sink.set_speed(self.rate);
         self.next = Some(Playback {
             sink,
             ffmpeg_child,
@@ -624,6 +754,7 @@ impl RodioEngine {
         // 接管：恢复播放并从静默淡入（sink 已 pause，此处 play 才开始发声）
         let is_ffmpeg = next.ffmpeg_child.is_some();
         next.sink.set_volume(0.0);
+        next.sink.set_speed(self.rate);
         next.sink.play();
         self.current = Some(next);
         self.current_is_ffmpeg = is_ffmpeg;
@@ -634,15 +765,27 @@ impl RodioEngine {
 
     /// 播放并定位到断点（断点续播专用）
     fn play_at(&mut self, path: &std::path::Path, position_ms: u64, gain: Option<(f32, f32)>) -> AppResult<()> {
-        self.play(path, gain)?;
-        if position_ms > 0 {
+        if position_ms == 0 {
+            return self.play(path, gain, None);
+        }
+        // 带位置起播时预加载链路不可复用（swap_to_next 只能从 0 开始），先回收
+        if let Some(stale) = self.next.take() {
+            stale.halt();
+        }
+        self.next_path = None;
+
+        if is_native_format(path) {
+            self.play(path, gain, None)?;
             // sink 新建后混音线程可能还没拉到首帧；此时立即 seek 在个别时序下
             // 会让 Sink::try_seek 永久等待（引擎线程卡死、进度冻结）。
-            // 先让出 ~150ms 等输出线程开始消费，再定位。
+            // 先让出 ~150ms 等输出线程开始消费，再定位（原生解码仅此路径可实现）。
             std::thread::sleep(Duration::from_millis(150));
-            self.seek(position_ms)?;
+            self.seek(position_ms)
+        } else {
+            // FFmpeg 管道：解码进程以 -ss 直接从目标位置起流，
+            // 无"先播开头再跳转"的听感跳秒，也无 150ms 等待
+            self.play(path, gain, Some((position_ms as f64 / 1000.0, 0.0)))
         }
-        Ok(())
     }
 
     fn pause(&mut self) -> AppResult<()> {
@@ -687,7 +830,7 @@ impl RodioEngine {
                 .current_path
                 .clone()
                 .ok_or_else(|| AppError::Player("没有正在播放的曲目".into()))?;
-            let (child, source) = spawn_ffmpeg_decoder(&path, position_ms)?;
+            let (child, source) = spawn_ffmpeg_decoder(&path, position_ms, None)?;
             if let Some(old) = playback.ffmpeg_child.take() {
                 let mut old = old;
                 let _ = old.kill();
@@ -697,6 +840,8 @@ impl RodioEngine {
             playback.sink.clear();
             playback.sink.append(source);
             playback.sink.play();
+            // ffmpeg 后端 seek 重启后重新应用倍速
+            playback.sink.set_speed(self.rate);
         } else {
             playback
                 .sink
@@ -722,6 +867,20 @@ impl RodioEngine {
         self.muted = muted;
         if self.fade_in_started.is_none() {
             self.apply_volume();
+        }
+        Ok(())
+    }
+
+    /// 设置播放倍速并立即作用于当前曲目与待命预加载链路。
+    /// 速率记录在引擎内，后续新建 sink（切歌 / seek 重启后端）会自动沿用。
+    fn set_rate(&mut self, rate: f32) -> AppResult<()> {
+        let r = rate.clamp(0.25, 4.0);
+        self.rate = r;
+        if let Some(playback) = &self.current {
+            playback.sink.set_speed(r);
+        }
+        if let Some(playback) = &self.next {
+            playback.sink.set_speed(r);
         }
         Ok(())
     }
@@ -752,7 +911,11 @@ impl Drop for RodioEngine {
 
 /// 启动 ffmpeg 将任意格式解码为 PCM s16le（44.1kHz 双声道）并输出到管道，
 /// 返回（子进程, rodio 音源）。seek 通过 -ss 在输入端定位实现。
-fn spawn_ffmpeg_decoder(path: &Path, offset_ms: u64) -> AppResult<(Child, PcmStreamSource)> {
+fn spawn_ffmpeg_decoder(
+    path: &Path,
+    offset_ms: u64,
+    duration_ms: Option<u64>,
+) -> AppResult<(Child, PcmStreamSource)> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
         AppError::Player("该格式需要 FFmpeg 解码，未找到 bin/ffmpeg.exe".into())
     })?;
@@ -761,6 +924,12 @@ fn spawn_ffmpeg_decoder(path: &Path, offset_ms: u64) -> AppResult<(Child, PcmStr
     if offset_ms > 0 {
         cmd.arg("-ss")
             .arg(format!("{:.3}", offset_ms as f64 / 1000.0));
+    }
+    if let Some(d) = duration_ms {
+        if d > 0 {
+            cmd.arg("-t")
+                .arg(format!("{:.3}", d as f64 / 1000.0));
+        }
     }
     cmd.arg("-v")
         .arg("error")
@@ -886,5 +1055,123 @@ impl rodio::Source for PcmStreamSource {
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造 WAV 文件字节：RIFF + WAVE + fmt(16B, PCM 44.1kHz/16bit/stereo) + 可选前置 chunk + data
+    fn wav_bytes(data: &[u8], pre_chunk: Option<(&[u8], &[u8])>) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        body.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        body.extend_from_slice(&44100u32.to_le_bytes());
+        body.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+        body.extend_from_slice(&4u16.to_le_bytes());
+        body.extend_from_slice(&16u16.to_le_bytes());
+        if let Some((id, payload)) = pre_chunk {
+            body.extend_from_slice(id);
+            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 != 0 {
+                body.push(0);
+            }
+        }
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        // name 含扩展名且置于末尾，保证 extension() 解析正确
+        let p = std::env::temp_dir().join(format!(
+            "tplayer-engine-{}-{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            name
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn true_pcm_wav_stays_native() {
+        let p = write_temp("pcm.wav", &wav_bytes(&[0x00, 0x00, 0x12, 0x34, 0xAB, 0xCD], None));
+        assert!(is_native_format(&p));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn dts_in_wav_standard_sync_routes_to_ffmpeg() {
+        let dts = [0x7F, 0xFE, 0x80, 0x01, 0x11, 0x22, 0x33, 0x44];
+        let p = write_temp("dts.wav", &wav_bytes(&dts, None));
+        assert!(!is_native_format(&p));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn dts_in_wav_with_list_chunk_detected() {
+        // LIST chunk 将 data 起始推到 64B 之后（旧 64B 读头会 miss 的场景）
+        let dts = [0x7F, 0xFE, 0x80, 0x01, 0x00, 0x01, 0x02, 0x03];
+        let list_payload = b"INFOIART\050\000\000\000TPlayer test artist padding!";
+        let p = write_temp("dts-list.wav", &wav_bytes(&dts, Some((b"LIST", list_payload))));
+        assert!(!is_native_format(&p));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn dts_in_wav_hd_and_le_syncs_detected() {
+        for sync in [
+            [0x64u8, 0x58, 0x20, 0x25], // DTS-HD
+            [0x01u8, 0x80, 0xFE, 0x7F], // 16-bit LE
+            [0xFFu8, 0x1F, 0x00, 0xE8], // 14-bit BE
+            [0xE8u8, 0x00, 0x1F, 0xFF], // 14-bit LE
+        ] {
+            let mut data = sync.to_vec();
+            data.extend_from_slice(&[0x55, 0x66, 0x77, 0x88]);
+            let p = write_temp("dts-hd.wav", &wav_bytes(&data, None));
+            assert!(!is_native_format(&p), "sync {:02X?} 应识别为 DTS", sync);
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn non_riff_and_native_exts_unaffected() {
+        // 非 WAV 扩展名不做内容深检
+        let flac = write_temp("x.flac", b"fLaC\x00\x00\x00\x22");
+        assert!(is_native_format(&flac));
+        let _ = std::fs::remove_file(&flac);
+        // DTS 裸流扩展名直接走 ffmpeg
+        let dts = write_temp("x.dts", &[0x7F, 0xFE, 0x80, 0x01]);
+        assert!(!is_native_format(&dts));
+        let _ = std::fs::remove_file(&dts);
+        // RIFF 但 fmt/data 结构损坏（解析不到 data）：按 wav 原生处理，交由解码错误链路兜底
+        let broken = write_temp("broken.wav", b"RIFF\x24\x00\x00\x00WAVEfmt ");
+        assert!(is_native_format(&broken));
+        let _ = std::fs::remove_file(&broken);
+    }
+
+    #[test]
+    fn riff_data_offset_walks_chunks() {
+        let dts = [0x7Fu8, 0xFE, 0x80, 0x01];
+        let bytes = wav_bytes(&dts, None);
+        let off = riff_data_offset(&bytes).unwrap();
+        // 44 = 12(RIFF头) + 8+16(fmt) + 8(data头)
+        assert_eq!(off, 44);
+        assert_eq!(&bytes[off..off + 4], &[0x7F, 0xFE, 0x80, 0x01]);
+        assert!(head_data_has_dts(&bytes));
     }
 }

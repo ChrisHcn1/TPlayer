@@ -76,6 +76,8 @@ pub struct PlaybackSnapshot {
     /// 音量 0.0 ~ 1.0
     pub volume: f32,
     pub muted: bool,
+    /// 播放倍速（1.0 = 原速；有效区间 0.25 ~ 4.0）
+    pub rate: f32,
     pub mode: PlayMode,
     /// 播放错误信息
     pub error: Option<String>,
@@ -90,6 +92,7 @@ impl Default for PlaybackSnapshot {
             duration_ms: 0,
             volume: 1.0,
             muted: false,
+            rate: 1.0,
             mode: PlayMode::Order,
             error: None,
         }
@@ -139,6 +142,10 @@ pub enum PlaybackEvent {
     },
     Mode {
         mode: PlayMode,
+    },
+    /// 播放倍速变更（1.0 = 原速）
+    Rate {
+        rate: f32,
     },
     Ended {
         #[serde(rename = "trackId")]

@@ -48,6 +48,8 @@ export interface Album {
   trackCount: number
   /** 封面是否可用 */
   hasCover: boolean
+  /** 是否为 CUE 分轨专辑（整盘镜像拆出的虚拟专辑） */
+  isCue?: boolean
 }
 
 /** 歌手（聚合视图） */
@@ -99,4 +101,39 @@ export interface RecentEntry {
   trackId: string
   /** 最近一次播放时间（Unix 秒） */
   playedAt: number
+}
+
+/** 曲目详情（完整元数据）—— Rust track_info 命令返回 */
+export interface TrackInfo {
+  title: string
+  artists: string[]
+  album: string
+  trackNumber: number | null
+  year: number | null
+  /** 时长（秒） */
+  duration: number
+
+  /** 音频格式（小写扩展名） */
+  format: string
+  /** 比特率（bps） */
+  bitrate: number | null
+  /** 采样率（Hz） */
+  sampleRate: number | null
+  /** 位深（bit） */
+  bitDepth: number | null
+  /** 声道数 */
+  channels: number | null
+
+  filePath: string
+  fileSize: number
+  modifiedAt: number
+  addedAt: number
+
+  /** 封面 data URL（无封面为 null） */
+  cover: string | null
+  /** 内嵌歌词纯文本（无歌词为 null） */
+  embeddedLyrics: string | null
+
+  replaygainDb: number | null
+  replaygainPeak: number | null
 }

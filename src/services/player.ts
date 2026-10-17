@@ -30,6 +30,7 @@ export function createIdleSnapshot(): PlaybackSnapshot {
     durationMs: 0,
     volume: 1,
     muted: false,
+    rate: 1,
     mode: 'order',
     error: null,
   }
@@ -63,6 +64,7 @@ const tauriPlayer: IPlayer = {
   setVolume: (volume: number) => callCommand('player_set_volume', { volume }),
   setMuted: (muted: boolean) => callCommand('player_set_muted', { muted }),
   setMode: (mode: PlayMode) => callCommand('player_set_mode', { mode }),
+  setRate: (rate: number) => callCommand('player_set_rate', { rate }),
   setCrossfade: (enabled: boolean, durationMs: number) =>
     callCommand('player_set_crossfade', { enabled, durationMs }),
   setReplaygain: (enabled: boolean) =>
@@ -78,4 +80,14 @@ const tauriPlayer: IPlayer = {
 /** 单例：Web 引擎在应用生命周期内复用同一个时钟与监听器集合 */
 const webPlayer = new WebPlayer()
 
-export const playerService: IPlayer = isTauriRuntime() ? tauriPlayer : webPlayer
+/**
+ * 零侵入接入音频格式兼容补丁：
+ * 把原生 IPlayer 包进 CompatPlayer —— 正常文件走原生（零开销），
+ * 仅当原生 play 失败时才在 Web Worker 内魔数识别 + 分级解码 + 兜底播放。
+ * 不修改 tauriPlayer / webPlayer / WebPlayer / Rust 引擎的任何代码。
+ */
+import { createCompatPlayer } from './compat'
+
+const basePlayer: IPlayer = isTauriRuntime() ? tauriPlayer : webPlayer
+
+export const playerService: IPlayer = createCompatPlayer(basePlayer)

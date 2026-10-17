@@ -82,5 +82,5 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   'dts',
 ] as const
 
-/** 应用数据目录名（与旧版 %APPDATA%\TPlayer 隔离） */
-export const APP_DATA_DIR_NAME = 'TPlayer Next'
+/** 应用数据目录名（由 identifier `com.tplayer` 决定，实际路径为 %APPDATA%\com.tplayer） */
+export const APP_DATA_DIR_NAME = 'com.tplayer'

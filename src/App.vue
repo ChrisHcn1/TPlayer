@@ -15,7 +15,7 @@
  * 主题单一事实源：useTheme（持久化键 THEME_STORAGE_KEY）。
  * 本文件不读 settings store 的 theme（该字段已移除），避免双写双源。
  */
-import { computed, defineComponent, onMounted, ref, watch } from 'vue'
+import { computed, defineComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView, useRoute, type RouteMeta } from 'vue-router'
 
 import { router } from './router'
@@ -28,10 +28,12 @@ import { useStatsStore } from './stores/stats'
 import { useTheme } from './composables/useTheme'
 import { useLayout } from './composables/useLayout'
 import { useCommandPalette } from './composables/useCommandPalette'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { updateService } from './services/update'
 import { subscribeWatcher } from './services/watcher'
 import { useTrackCover } from './composables/useTrackCover'
 import { useCoverTheme } from './composables/useCoverTheme'
+import { isTauriRuntime, normalizeError } from './services/ipc'
 import {
   DEFAULT_SHORTCUTS,
   LAYOUT_SHORTCUTS,
@@ -48,6 +50,7 @@ import ToastContainer from './components/common/ToastContainer.vue'
 import DialogHost from './components/common/DialogHost.vue'
 import ContextMenuHost from './components/common/ContextMenuHost.vue'
 import CommandPalette from './components/common/CommandPalette.vue'
+import Icon from './components/common/Icon.vue'
 
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
@@ -69,6 +72,89 @@ const {
 const commandPalette = useCommandPalette()
 const route = useRoute()
 const contentRef = ref<HTMLElement | null>(null)
+
+/** 拖拽导入遮罩是否可见（仅 Tauri 环境注册拖放监听） */
+const isDragging = ref(false)
+/** 卸载时注销拖放监听 */
+let unlistenDrag: (() => void) | undefined
+
+/**
+ * 注册 Tauri 拖放事件：文件/目录拖入窗口时显示遮罩，松手后将真实路径交给曲库入库。
+ * 浏览器预览无 Tauri 运行时，不注册（HTML5 drop 拿不到真实路径）。
+ */
+function setupDragImport(): void {
+  if (!isTauriRuntime()) return
+  void getCurrentWebview()
+    .onDragDropEvent((event) => {
+      const payload = event.payload
+      switch (payload.type) {
+        case 'enter':
+        case 'over':
+          isDragging.value = true
+          break
+        case 'drop':
+          isDragging.value = false
+          if (payload.paths.length > 0) {
+            void loadDroppedAsPlaylist(payload.paths)
+          }
+          break
+        default:
+          // leave / exit
+          isDragging.value = false
+      }
+    })
+    .then((unlisten) => {
+      unlistenDrag = unlisten
+    })
+}
+
+/**
+ * 拖入文件/目录：解析入库后自动建成「拖放列表」歌单并立即播放，
+ * 满足"拖入即加载播放列表"的便捷操作；NAS / 网盘路径同样适用
+ * （入库即被 compat 的 has_file_path 放行，无需白名单目录）。
+ */
+async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
+  const ids = await libraryStore.importDropped(paths)
+  if (ids.length === 0) {
+    toastStore.info('拖入的内容中没有可识别的音频文件')
+    return
+  }
+  try {
+    await playlistStore.refresh()
+    let playlist = playlistStore.playlists.find((p) => p.name === '拖放列表')
+    if (!playlist) {
+      await playlistStore.create('拖放列表')
+      playlist = playlistStore.playlists.find((p) => p.name === '拖放列表')
+    }
+    if (!playlist) {
+      toastStore.warning('创建播放列表失败')
+      return
+    }
+    // 追加模式 + 全量去重：trackId 由后端按文件绝对路径哈希生成（唯一标识），
+    // 已存在于播放列表中的重复文件自动过滤，列表既有内容不被清空重加
+    const existing = new Set(playlist.trackIds)
+    const newIds = ids.filter((id) => !existing.has(id))
+    await playlistStore.addTracks(playlist.id, ids)
+    if (newIds.length === 0) {
+      toastStore.info(`所选音频均已存在于「拖放列表」，已跳过 ${ids.length} 个重复文件`)
+      return
+    }
+    // 从首个新增曲目开始播放；队列上下文为去重合并后的完整列表
+    const merged = playlistStore.byId(playlist.id)?.trackIds ?? [...playlist.trackIds, ...newIds]
+    await playerStore.playFromContext(newIds[0], {
+      source: 'playlist',
+      sourceId: playlist.id,
+      trackIds: merged,
+    })
+    toastStore.success(`已追加 ${newIds.length} 首到「拖放列表」并开始播放`)
+  } catch (cause) {
+    toastStore.warning(normalizeError(cause).message)
+  }
+}
+
+onUnmounted(() => {
+  unlistenDrag?.()
+})
 
 // 封面取色：跟随当前曲目封面维护全局强调色变量（播放条氛围光 / 放大层）
 const { coverUrl: currentCoverUrl } = useTrackCover(() => playerStore.snapshot.trackId)
@@ -214,6 +300,8 @@ watch(
 onMounted(async () => {
   // 0) 收听统计：实例化即启动对播放快照的自动跟踪（次数 / 时长 / 最后播放 / 时段分布）
   useStatsStore()
+  // 0.5) 拖拽导入：注册 Tauri 拖放事件（浏览器预览环境自动跳过）
+  setupDragImport()
   // 1) 主题：与 index.html 首屏脚本同键同步，无闪烁
   applyTheme(theme.value)
   // 2) 设置：恢复非主题类偏好（语言、曲库目录、在线开关等）
@@ -304,6 +392,17 @@ void router
     <ContextMenuHost />
     <CommandPalette />
     <NowPlayingOverlay v-if="isNowPlayingOpen" />
+
+    <!-- 拖拽导入遮罩：文件/目录拖入窗口时覆盖全窗，松手即入库 -->
+    <transition name="drag-overlay">
+      <div v-if="isDragging" class="drag-overlay">
+        <div class="drag-overlay__card">
+          <Icon name="file-audio" :size="40" />
+          <p class="drag-overlay__title">松开以加载播放列表</p>
+          <p class="drag-overlay__hint">支持音频文件与文件夹（含 NAS / 网盘），自动建列表并播放</p>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -375,5 +474,55 @@ void router
   min-width: 0;
   /* 抬升区：阴影 + 顶部 1px 边框，保证与内容区层级稳定 */
   box-shadow: var(--shadow-elevation-2);
+}
+
+/* ---- 拖拽导入遮罩（覆盖全窗，置于内容之上、浮层之下） ---- */
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  color: var(--color-text-primary);
+  background-color: color-mix(in srgb, var(--color-bg-base) 78%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.drag-overlay__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-10) var(--space-12);
+  text-align: center;
+  color: var(--color-brand);
+  background-color: var(--color-bg-elevated);
+  border: 2px dashed var(--color-brand);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-elevation-2);
+}
+
+.drag-overlay__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.drag-overlay__hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.drag-overlay-enter-active,
+.drag-overlay-leave-active {
+  transition: opacity var(--transition-colors);
+}
+
+.drag-overlay-enter-from,
+.drag-overlay-leave-to {
+  opacity: 0;
 }
 </style>

@@ -12,7 +12,7 @@ use serde_json::Value;
 const SEARCH_URL: &str = "https://music.163.com/api/search/get";
 const LYRIC_URL: &str = "https://music.163.com/api/song/lyric";
 /// 搜索关键词与请求头
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TPlayerNext/2.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TPlayer/2.0";
 /// 时长匹配容差（毫秒）：搜索结果与本地时长差在此范围内优先选用
 const DURATION_TOLERANCE_MS: i64 = 3000;
 

@@ -53,6 +53,30 @@ pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// 递归发现目录下所有 .cue 索引文件（仅开发版本启用）
+#[cfg(debug_assertions)]
+pub(crate) fn discover_cue_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("cue") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files
+}
+
 /// 生成稳定 ID（基于文件路径的 SHA-256 前 16 位 hex）
 fn track_id_from_path(path: &Path) -> String {
     let mut hasher = Sha256::new();
@@ -196,6 +220,8 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
         replaygain_peak,
         added_at: chrono::Utc::now().timestamp(),
         modified_at,
+        is_cue: false,
+        cue_offset: None,
     })
 }
 
@@ -241,9 +267,10 @@ fn file_mtime(path: &Path) -> i64 {
 /// 执行增量扫描并推送进度事件。
 ///
 /// `existing` 为库内 (id, file_path, modified_at) 基线：
-///  - mtime 未变的文件跳过元数据解析（大曲库二次扫描几乎零成本）；
-///  - 新增 / 变更文件重新解析进 upserts；
-///  - 基线中磁盘已消失的文件进 removed_ids。
+///  - mtime 未变的音频文件跳过元数据解析（大曲库二次扫描几乎零成本）；
+///  - 新增 / 变更音频文件重新解析进 upserts；
+///  - CUE 分轨每轮重新解析（id 稳定，upsert 会保留 added_at）；
+///  - 基线中磁盘已消失的曲目（按 id 判定）进 removed_ids。
 pub fn scan_directory(
     roots: &[PathBuf],
     existing: &[(String, String, i64)],
@@ -258,27 +285,50 @@ pub fn scan_directory(
     };
     emit(app, &progress);
 
-    // 基线索引：path → (id, mtime)
+    // 基线索引：path → (id, mtime)；用于音频文件增量跳过
     let existing_by_path: std::collections::HashMap<String, (String, i64)> = existing
         .iter()
         .map(|(id, path, mtime)| (path.clone(), (id.clone(), *mtime)))
         .collect();
 
-    // 发现阶段
-    let mut all_files = Vec::new();
+    // 发现阶段：音频文件
+    let mut all_audio = Vec::new();
     for root in roots {
-        all_files.extend(discover_audio_files(root));
+        all_audio.extend(discover_audio_files(root));
     }
-    progress.total = all_files.len() as u32;
+
+    // 解析 CUE 分轨（仅开发版本启用；Release 构建不含 CUE 解析，未完成的
+    // 分轨功能不会随安装包上线）。开发态仍保留完整解析能力以便继续开发。
+    let mut cue_tracks: Vec<Track> = Vec::new();
+    let mut referenced: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    #[cfg(debug_assertions)]
+    {
+        let mut cue_files = Vec::new();
+        for root in roots {
+            cue_files.extend(discover_cue_files(root));
+        }
+        for cue in &cue_files {
+            let tracks = super::cue::parse_cue(cue);
+            for t in &tracks {
+                referenced.insert(std::path::PathBuf::from(&t.file_path));
+            }
+            cue_tracks.extend(tracks);
+        }
+    }
+    // 排除被 CUE 引用的镜像文件（Release 下 referenced 为空，镜像按整轨正常入库）
+    all_audio.retain(|p| !referenced.contains(p));
+
+    progress.total = (all_audio.len() + cue_tracks.len()) as u32;
     progress.stage = ScanStage::Parsing;
     emit(app, &progress);
 
-    // 解析阶段（仅新增 / 变更文件）
+    // 解析阶段（仅新增 / 变更音频文件重新解析）
     let mut upserts = Vec::new();
-    let mut seen_paths = std::collections::HashSet::with_capacity(all_files.len());
-    for (i, path) in all_files.iter().enumerate() {
+    let mut seen_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(all_audio.len() + cue_tracks.len());
+    for (i, path) in all_audio.iter().enumerate() {
         let path_str = path.to_string_lossy().to_string();
-        seen_paths.insert(path_str.clone());
+        seen_ids.insert(track_id_from_path(path));
         progress.current_path = Some(path_str.clone());
 
         let mtime = file_mtime(path);
@@ -298,10 +348,17 @@ pub fn scan_directory(
         }
     }
 
-    // 删除检测：基线中存在、本轮未在磁盘发现的路径
+    // CUE 分轨：每轮重新解析（其 id 稳定，upsert 会保留 added_at）
+    for t in &cue_tracks {
+        seen_ids.insert(t.id.clone());
+    }
+    upserts.extend(cue_tracks);
+
+    // 删除检测：基线中存在、本轮未发现的曲目（按 id 判定，
+    // 覆盖「同一镜像路径对应多条分轨」与「镜像从整轨转为分轨」的情况）
     let mut removed_ids: Vec<String> = existing
         .iter()
-        .filter(|(_, path, _)| !seen_paths.contains(path))
+        .filter(|(id, _, _)| !seen_ids.contains(id))
         .map(|(id, _, _)| id.clone())
         .collect();
     removed_ids.sort();

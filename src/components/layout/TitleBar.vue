@@ -4,7 +4,7 @@
  *
  * 规格（DESIGN §4.3）：
  *   - 高 --size-titlebar-h，背景 --color-bg-sidebar，底部 1px --color-border-subtle
- *   - 左：Logo（--size-icon-lg）+ 品牌名 "TPlayer Next"
+ *   - 左：Logo（--size-icon-lg）+ 品牌名 "TPlayer"
  *   - 中：全局搜索（320 × 28）+ Ctrl K 快捷键提示
  *   - 右：主题切换、设置入口、窗口控制（最小化 / 最大化 / 关闭）
  *   - 非 Tauri 环境：窗口控制整体不渲染（不占位、不引起右侧控件位移）
@@ -79,8 +79,8 @@ function handleDragDoubleClick(event: MouseEvent) {
   >
     <!-- 左：Logo + 品牌名 -->
     <div class="title-bar__left">
-      <img src="/logo.svg" alt="TPlayer Next" class="title-bar__logo" />
-      <span class="title-bar__brand">TPlayer Next</span>
+      <img src="/logo.svg" alt="TPlayer" class="title-bar__logo" />
+      <span class="title-bar__brand">TPlayer</span>
     </div>
 
     <!-- 中：全局搜索（可交互区域，需排除窗口拖拽）；聚焦/点击即唤起 Ctrl+K 命令浮层 -->

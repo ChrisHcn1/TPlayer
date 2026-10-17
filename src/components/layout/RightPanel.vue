@@ -26,20 +26,24 @@ import { useLayout, type PanelTab } from '../../composables/useLayout'
 import { resolveNavLabel } from '../../i18n/nav'
 import LyricsPanel from '../panel/LyricsPanel.vue'
 import QueuePanel from '../panel/QueuePanel.vue'
+import TrackInfoPanel from '../panel/TrackInfoPanel.vue'
 import Icon from '../common/Icon.vue'
 
 const { panelTab, setPanelTab, closePanel } = useLayout()
 
-/** 页签顺序按 §4.10 固定为「歌词 / 队列」 */
+/** 页签顺序按 §4.10 固定为「歌词 / 队列 / 曲目信息」 */
 const tabs: ReadonlyArray<{ tab: PanelTab; labelKey: string }> = [
   { tab: 'lyrics', labelKey: 'nav.panel-lyrics' },
   { tab: 'queue', labelKey: 'nav.panel-queue' },
+  { tab: 'info', labelKey: 'nav.panel-info' },
 ]
 
 const closeLabel = computed(() => resolveNavLabel('nav.panel-close'))
-const currentTabLabel = computed(() =>
-  resolveNavLabel(panelTab.value === 'lyrics' ? 'nav.panel-lyrics' : 'nav.panel-queue'),
-)
+const currentTabLabel = computed(() => {
+  if (panelTab.value === 'lyrics') return resolveNavLabel('nav.panel-lyrics')
+  if (panelTab.value === 'queue') return resolveNavLabel('nav.panel-queue')
+  return resolveNavLabel('nav.panel-info')
+})
 </script>
 
 <template>
@@ -77,7 +81,8 @@ const currentTabLabel = computed(() =>
          具体滚动容器在各面板内部（歌词逐行居中 / 队列长列表） -->
     <div class="right-panel__body" role="tabpanel" :aria-label="currentTabLabel">
       <LyricsPanel v-if="panelTab === 'lyrics'" />
-      <QueuePanel v-else />
+      <QueuePanel v-else-if="panelTab === 'queue'" />
+      <TrackInfoPanel v-else />
     </div>
   </aside>
 </template>

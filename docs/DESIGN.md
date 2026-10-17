@@ -1,7 +1,7 @@
 # TPlayer v2 界面与布局重设计规范（DESIGN）
 
 - 文档版本：v1.0 · 2026-09-26
-- 适用对象：`E:\TPlayerNext`（TPlayer Next）v2 前端全部界面实现（Vue 3 + TypeScript + Tauri v2）
+- 适用对象：`E:\TPlayerNext`（TPlayer）v2 前端全部界面实现（Vue 3 + TypeScript + Tauri v2）
 - 需求基线：`E:\TPlayerNext\docs\FEATURES-INVENTORY.md`（旧版功能域 A~N、重复冲突 D-01~D-21、缺陷 B-01~B-25）
 - 文档性质：**界面与布局的单点事实源（Single Source of Truth）**。凡尺寸、颜色、间距、圆角、动效、交互行为，一律以本文档为准；实现与本文冲突时改实现，不改本文。本文档变更须升版本号并在文末登记。
 - 阅读顺序建议：§1 信息架构 → §2 布局 → §3 设计规范（token 全集）→ §4 组件 → §5 交互 → §6 无障碍 → §7 自适应 → §8 差异表（验收勾兑）。

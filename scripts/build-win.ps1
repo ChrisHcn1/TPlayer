@@ -12,7 +12,13 @@
     签名密钥（minisign）二选一提供：
       1. 环境变量 TAURI_SIGNING_PRIVATE_KEY（私钥字符串或 .key 文件路径）
          环境变量 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（私钥密码，无密码可省）
-      2. 本地文件 src-tauri/.tauri-signing/TPlayerNext.key（已 gitignore，不入库）
+      2. 本地文件 src-tauri\.tauri-signing\TPlayerNext.key（已 gitignore，不入库）
+
+    安装器行为：安装前自动检测并完整卸载旧版 TPlayer / TPlayerNext
+    （hook 定义于 src-tauri\nsis\hooks.nsh，经 tauri.conf.json
+    bundle.windows.nsis.installerHooks 注入 NSIS 安装器；旧版本静默卸载失败时，
+    交互模式弹窗询问继续或终止，静默模式自动清理后继续；用户数据目录不受影响）。
+    注意 installerHooks 路径按 src-tauri 目录解析（如 nsis\hooks.nsh）。
 
 .EXAMPLE
     # 用环境变量

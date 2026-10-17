@@ -8,6 +8,8 @@
  */
 import { computed, ref } from 'vue'
 
+import { formatMs, progressRatio } from '../../utils/format'
+
 interface Props {
   positionMs: number
   durationMs: number
@@ -32,20 +34,13 @@ const effectiveDuration = computed(() => Math.max(0, props.durationMs))
 const ratio = computed(() => {
   if (effectiveDuration.value === 0) return 0
   if (dragging.value) return dragRatio.value
-  return Math.min(1, Math.max(0, props.positionMs / effectiveDuration.value))
+  return progressRatio(props.positionMs, effectiveDuration.value)
 })
 
-function format(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`
-}
-
-const positionText = computed(() => format(ratio.value * effectiveDuration.value))
-const durationText = computed(() => format(effectiveDuration.value))
+const positionText = computed(() => formatMs(ratio.value * effectiveDuration.value))
+const durationText = computed(() => formatMs(effectiveDuration.value))
 const hoverText = computed(() =>
-  hoverRatio.value === null ? '' : format(hoverRatio.value * effectiveDuration.value),
+  hoverRatio.value === null ? '' : formatMs(hoverRatio.value * effectiveDuration.value),
 )
 
 function ratioFromEvent(event: PointerEvent | MouseEvent): number {

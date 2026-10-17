@@ -11,6 +11,7 @@ import {
   type MenuItem,
 } from '../../composables/useContextMenu'
 import Icon from './Icon.vue'
+import TrackMenuInfo from './TrackMenuInfo.vue'
 
 const MENU_WIDTH = 208
 
@@ -20,6 +21,8 @@ const rootRef = ref<HTMLElement | null>(null)
 const submenuStyle = ref<Record<string, string>>({})
 /** 当前展开子菜单的父项（直接持有 items，模板渲染用） */
 const submenuParent = ref<MenuItem | null>(null)
+/** 菜单内容（如曲目信息头异步加载）导致高度变化时的动态重定位 */
+let resizeObserver: ResizeObserver | null = null
 
 const positionStyle = computed(() => ({
   left: `${state.x}px`,
@@ -49,9 +52,17 @@ async function reposition(): Promise<void> {
 
 watch(
   () => state.open,
-  (open) => {
+  async (open) => {
+    // 菜单每次打开都是全新元素，重挂 ResizeObserver 监听内容高度变化
+    resizeObserver?.disconnect()
+    resizeObserver = null
     if (open) {
       reposition()
+      await nextTick()
+      if (rootRef.value) {
+        resizeObserver = new ResizeObserver(() => void reposition())
+        resizeObserver.observe(rootRef.value)
+      }
       window.addEventListener('resize', close)
       window.addEventListener('blur', close)
     } else {
@@ -62,6 +73,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   window.removeEventListener('resize', close)
   window.removeEventListener('blur', close)
 })
@@ -121,6 +134,7 @@ function runChild(child: MenuItem): void {
       <ul
         ref="rootRef"
         class="context-menu"
+        :class="{ 'context-menu--track': !!state.trackId }"
         :style="positionStyle"
         role="menu"
         tabindex="-1"
@@ -129,6 +143,11 @@ function runChild(child: MenuItem): void {
         @contextmenu.prevent.stop
       >
         <li v-if="state.title" class="context-menu__title">{{ state.title }}</li>
+
+        <!-- 曲目信息头（右键单曲目）：完整元数据 / 歌词 / 封面 / 文件路径 -->
+        <li v-if="state.trackId" class="context-menu__info">
+          <TrackMenuInfo :track-id="state.trackId" />
+        </li>
 
         <template v-for="(item, index) in state.items" :key="item.key ?? `d-${index}`">
           <li v-if="item.divider" class="context-menu__divider" role="separator"></li>
@@ -223,6 +242,15 @@ function runChild(child: MenuItem): void {
 
 .context-menu--sub {
   z-index: calc(var(--z-dropdown) + 1);
+}
+
+/* 带曲目信息头的宽菜单（完整元数据 / 歌词 / 封面 / 路径） */
+.context-menu--track {
+  width: 320px;
+}
+
+.context-menu__info {
+  margin-bottom: var(--space-1);
 }
 
 .context-menu__title {

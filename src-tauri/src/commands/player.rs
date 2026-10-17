@@ -13,20 +13,19 @@ use crate::AppState;
 /// 初始化播放器（恢复曲目缓存、音量等）
 ///
 /// 返回上次会话恢复出的播放上下文（断点续播），无恢复内容时为 None。
-/// 恢复出曲目且播放列表（上下文）不为空时自动从断点位置继续播放；
-/// 自动续播失败（文件缺失等）不影响初始化，UI 停留在错误态可手动重试。
+/// 断点曲目为原生可播的非 CUE 曲目时自动从断点位置续播；需前端 WASM 兜底
+/// 解码的冷门格式（FFmpeg 缺失）与 CUE 分轨在 restore 阶段已跳过定位——
+/// 避免启动即触发整文件慢解码或错误定位，用户可手动选择播放。
+/// 自动续播失败（文件缺失等）不影响初始化，按队列顺序自动跳过尝试。
 #[tauri::command]
 pub fn player_init(state: State<'_, AppState>, app: AppHandle) -> AppResult<Option<PlayContext>> {
     let tracks = state.library.lock().unwrap().tracks();
     let mut player = state.player.lock().unwrap();
     player.set_tracks(tracks);
     let restored = player.apply_pending_restore();
-    // 断点存在即自动续播（播放列表为空时 apply_pending_restore 已返回 None）
-    if player.snapshot.track_id.is_some() {
-        // 断点曲目无法播放（文件缺失/解码器不可用）时，自动顺序跳过到可播放曲目
-        if player.resume(&app).is_err() {
-            let _ = player.play_current_or_skip(&app);
-        }
+    // 断点存在且已定位：从断点位置自动续播；失败则从当前断点曲目起按队列尝试
+    if player.snapshot.track_id.is_some() && player.resume(&app).is_err() {
+        let _ = player.play_current_or_skip(&app);
     }
     Ok(restored)
 }
@@ -84,6 +83,8 @@ pub fn player_next(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> 
         player.next()
     };
     if let Some(id) = next_id {
+        // 需 compat 解码的曲目由 play_or_skip 内 stage_compat 占位并发 compat-play 事件，
+        // 此处统一走 play，保证手动切歌与自动连播行为一致
         let track = state
             .library
             .lock()
@@ -185,6 +186,16 @@ pub fn player_set_replaygain(state: State<'_, AppState>, enabled: bool) -> AppRe
     }
     state.player.lock().unwrap().set_replaygain(enabled);
     Ok(())
+}
+
+/// 设置播放倍速（有效区间 0.25 ~ 4.0）；引擎立即生效并向前端广播 Rate 事件
+#[tauri::command]
+pub fn player_set_rate(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    rate: f32,
+) -> AppResult<()> {
+    state.player.lock().unwrap().set_rate(rate, &app)
 }
 
 /// 设置睡眠定时器（delay_ms 毫秒后到期；wait_track_end=true 时到期后播完当前曲目才停止）

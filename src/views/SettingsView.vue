@@ -1,14 +1,21 @@
 <script setup lang="ts">
 /**
- * 设置视图（DESIGN §2.4）：左侧六个页签 —— 播放 / 外观 / 歌词 / 在线 / 更新 / 关于。
+ * 设置视图（DESIGN §2.4）：左侧分组页签 —— 按功能属性归类。
+ *
+ * 分组（每个分组名即功能属性）：
+ *  - 界面与外观：外观 / 歌词
+ *  - 播放与媒体：播放 / 媒体库
+ *  - 服务与工具：在线服务 / 工具
+ *  - 系统：更新 / 关于
  *
  * 约定：
  *  - 主题唯一事实源 useTheme，本页只做切换 UI；
  *  - 曲库目录白名单经 settings store；Tauri 下走系统目录选择器（services/dialog），
  *    浏览器降级为 prompt 文本输入；
  *  - 在线模块默认关闭；即使开启，allowLibraryUpload 仍需单独同意（privacy-first）。
+ *  - 支持 /settings/:tab 直达（外观 / 播放 / 媒体库 / 歌词 / 在线服务 / 工具 / 更新 / 关于）。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import pkg from '../../package.json'
 import { useSettingsStore } from '../stores/settings'
@@ -18,26 +25,80 @@ import { useToastStore } from '../stores/toast'
 import { useDialogStore } from '../stores/dialog'
 import { pickDirectory } from '../services/dialog'
 import { lyricsService } from '../services/lyrics'
-import { isTauriRuntime } from '../services/ipc'
+import { isTauriRuntime, normalizeError } from '../services/ipc'
 import { getWatcherStatus, subscribeWatcher, type WatcherStatus } from '../services/watcher'
 import { updateService, type Update, type UpdateProgress } from '../services/update'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import ConverterView from './ConverterView.vue'
 import { useLayout } from '../composables/useLayout'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
-type SettingsTab = 'playback' | 'appearance' | 'lyrics' | 'online' | 'tools' | 'update' | 'about'
+type SettingsTab =
+  | 'appearance'
+  | 'playback'
+  | 'library'
+  | 'lyrics'
+  | 'online'
+  | 'tools'
+  | 'update'
+  | 'about'
 
-const TABS: ReadonlyArray<{ key: SettingsTab; label: string; icon: string }> = [
-  { key: 'playback', label: '播放与曲库', icon: 'play' },
-  { key: 'appearance', label: '外观', icon: 'sun' },
-  { key: 'lyrics', label: '歌词', icon: 'lyrics' },
-  { key: 'online', label: '在线服务', icon: 'globe' },
-  { key: 'tools', label: '工具', icon: 'swap' },
-  { key: 'update', label: '更新', icon: 'download' },
-  { key: 'about', label: '关于', icon: 'info' },
+interface TabDef {
+  key: SettingsTab
+  label: string
+  icon: string
+}
+
+interface TabGroup {
+  key: string
+  label: string
+  tabs: ReadonlyArray<TabDef>
+}
+
+/** 左侧导航分组（每个组名即功能属性） */
+const TAB_GROUPS: ReadonlyArray<TabGroup> = [
+  {
+    key: 'interface',
+    label: '界面与外观',
+    tabs: [
+      { key: 'appearance', label: '外观', icon: 'sun' },
+      { key: 'lyrics', label: '歌词', icon: 'lyrics' },
+    ],
+  },
+  {
+    key: 'playback-media',
+    label: '播放与媒体',
+    tabs: [
+      { key: 'playback', label: '播放', icon: 'play' },
+      { key: 'library', label: '媒体库', icon: 'disc' },
+    ],
+  },
+  {
+    key: 'service',
+    label: '服务与工具',
+    tabs: [
+      { key: 'online', label: '在线服务', icon: 'globe' },
+      { key: 'tools', label: '工具', icon: 'swap' },
+    ],
+  },
+  {
+    key: 'system',
+    label: '系统',
+    tabs: [
+      { key: 'update', label: '更新', icon: 'download' },
+      { key: 'about', label: '关于', icon: 'info' },
+    ],
+  },
 ]
+
+const TAB_KEYS = new Set<SettingsTab>(
+  TAB_GROUPS.flatMap((group) => group.tabs.map((tab) => tab.key)),
+)
+
+function isSettingsTab(value: unknown): value is SettingsTab {
+  return typeof value === 'string' && TAB_KEYS.has(value as SettingsTab)
+}
 
 const settingsStore = useSettingsStore()
 const libraryStore = useLibraryStore()
@@ -46,8 +107,10 @@ const dialogStore = useDialogStore()
 const { theme, applyTheme } = useTheme()
 const { isCoverAccentEnabled, setCoverAccent } = useLayout()
 const router = useRouter()
+const route = useRoute()
 
-const activeTab = ref<SettingsTab>('playback')
+const DEFAULT_TAB: SettingsTab = 'appearance'
+const activeTab = ref<SettingsTab>(DEFAULT_TAB)
 const scanning = ref(false)
 
 /** 目录自动监控状态（仅 Tauri 运行时后端提供；浏览器预览为 null） */
@@ -59,6 +122,10 @@ async function refreshWatcherStatus(): Promise<void> {
 }
 
 onMounted(() => {
+  // 支持 /settings/:tab 直达
+  if (isSettingsTab(route.params.tab)) {
+    activeTab.value = route.params.tab
+  }
   void refreshWatcherStatus()
   // 增量同步发生后实时更新状态展示
   unlistenWatcher = subscribeWatcher((payload) => {
@@ -70,6 +137,14 @@ onMounted(() => {
     }
   })
 })
+
+// 浏览器前进/后退或地址栏变化时同步页签
+watch(
+  () => route.params.tab,
+  (tab) => {
+    if (isSettingsTab(tab)) activeTab.value = tab
+  },
+)
 
 onUnmounted(() => {
   unlistenWatcher?.()
@@ -83,11 +158,18 @@ const themeOptions: ReadonlyArray<{ key: ThemeName; label: string; icon: string 
 const isTauri = computed(() => isTauriRuntime())
 const appVersion = computed(() => pkg.version)
 
+function selectTab(tab: SettingsTab): void {
+  activeTab.value = tab
+  // 同步到地址栏，便于直达与分享
+  if (route.params.tab !== tab) {
+    void router.replace({ name: 'settings-tab', params: { tab } })
+  }
+}
+
 async function addLibraryDir(): Promise<void> {
   const picked = await pickDirectory()
   if (picked) {
-    await settingsStore.addLibraryDir(picked)
-    toastStore.success('已添加曲库目录')
+    await persistLibraryDir(() => settingsStore.addLibraryDir(picked), '已添加曲库目录')
     return
   }
   // 浏览器（或选择器不可用）：降级为手动输入路径
@@ -97,7 +179,16 @@ async function addLibraryDir(): Promise<void> {
       ? '未能打开系统目录选择器，请手动输入目录路径。'
       : '浏览器预览环境不支持系统目录选择，请输入一个模拟目录路径。',
     placeholder: '例如 D:\\Music',
-    validate: (value) => (value.trim().length === 0 ? '路径不能为空' : null),
+    validate: (value) => {
+      const v = value.trim()
+      if (!v) return '路径不能为空'
+      // Windows 绝对路径需盘符（C:\）或 UNC（\\host\share）；网络共享若写成
+      // 172.18.0.21/songs 这类非法形式，扫描时会静默失败，这里提前提示正确写法
+      if (!/^[A-Za-z]:\\|\\\\/.test(v)) {
+        return '请填绝对路径；Windows 网络共享需以 \\\\ 开头（如 \\\\172.18.0.21\\songs），或先映射为盘符（如 Y:\\songs）'
+      }
+      return null
+    },
   })
   if (input === null) return
   const dir = input.trim()
@@ -105,8 +196,21 @@ async function addLibraryDir(): Promise<void> {
     toastStore.warning('该目录已在白名单中')
     return
   }
-  await settingsStore.addLibraryDir(dir)
-  toastStore.success('已添加曲库目录')
+  await persistLibraryDir(() => settingsStore.addLibraryDir(dir), '已添加曲库目录')
+}
+
+/**
+ * 统一处理曲库目录写入：成功提示，失败给出可定位错误。
+ * 原先 store 的持久化失败被静默吞掉，UI 仍提示"已添加"，
+ * 导致扫描时才发现"未配置曲库目录"，极具误导性。
+ */
+async function persistLibraryDir(action: () => Promise<void>, successText: string): Promise<void> {
+  try {
+    await action()
+    toastStore.success(successText)
+  } catch (cause) {
+    toastStore.error('保存曲库目录失败：' + normalizeError(cause).message)
+  }
 }
 
 async function removeLibraryDir(dir: string): Promise<void> {
@@ -115,7 +219,8 @@ async function removeLibraryDir(dir: string): Promise<void> {
     message: `确定将「${dir}」从曲库白名单中移除吗？已扫描的曲目不受影响。`,
     confirmText: '移除',
   })
-  if (confirmed) await settingsStore.removeLibraryDir(dir)
+  if (!confirmed) return
+  await persistLibraryDir(() => settingsStore.removeLibraryDir(dir), '已移除曲库目录')
 }
 
 async function scanNow(): Promise<void> {
@@ -212,258 +317,277 @@ async function resetSettings(): Promise<void> {
 
 <template>
   <section class="settings">
-    <!-- 左侧页签 -->
+    <!-- 左侧分组页签 -->
     <nav class="settings__nav" aria-label="设置页签">
-      <button
-        v-for="tab in TABS"
-        :key="tab.key"
-        type="button"
-        class="settings__nav-item"
-        :class="{ 'settings__nav-item--active': activeTab === tab.key }"
-        @click="activeTab = tab.key"
-      >
-        <Icon :name="tab.icon" :size="17" />
-        {{ tab.label }}
-      </button>
+      <template v-for="group in TAB_GROUPS" :key="group.key">
+        <p class="settings__nav-group">{{ group.label }}</p>
+        <button
+          v-for="tab in group.tabs"
+          :key="tab.key"
+          type="button"
+          class="settings__nav-item"
+          :class="{ 'settings__nav-item--active': activeTab === tab.key }"
+          @click="selectTab(tab.key)"
+        >
+          <Icon :name="tab.icon" :size="17" />
+          {{ tab.label }}
+        </button>
+      </template>
     </nav>
 
     <!-- 右侧内容 -->
     <div class="settings__content">
-      <!-- 播放与曲库 -->
-      <div v-if="activeTab === 'playback'" class="panel">
-        <h2 class="panel__title">曲库目录</h2>
-        <p class="panel__desc">只有白名单内的目录才允许被扫描与读取。</p>
-        <ul v-if="settingsStore.libraryDirs.length > 0" class="dir-list">
-          <li v-for="dir in settingsStore.libraryDirs" :key="dir" class="dir-list__item">
-            <Icon name="folder" :size="17" />
-            <span class="dir-list__path" :title="dir">{{ dir }}</span>
+      <!-- 外观：主题 / 氛围 -->
+      <div v-if="activeTab === 'appearance'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">主题</h2>
+          <p class="setting-card__desc">主题选择会立即生效并持久化。</p>
+          <div class="theme-options">
             <button
+              v-for="option in themeOptions"
+              :key="option.key"
               type="button"
-              class="dir-list__remove"
-              aria-label="移除目录"
-              title="移除目录"
-              @click="removeLibraryDir(dir)"
+              class="theme-option"
+              :class="{ 'theme-option--active': theme === option.key }"
+              @click="applyTheme(option.key)"
             >
-              <Icon name="trash-2" :size="15" />
+              <Icon :name="option.icon" :size="20" />
+              <span>{{ option.label }}</span>
+              <Icon v-if="theme === option.key" name="check" :size="15" class="theme-option__check" />
             </button>
-          </li>
-        </ul>
-        <p v-else class="panel__empty">尚未添加曲库目录</p>
-        <div class="panel__actions">
-          <BaseButton variant="primary" size="sm" @click="addLibraryDir">
-            <Icon name="folder-plus" :size="15" />
-            添加目录
-          </BaseButton>
-          <BaseButton variant="subtle" size="sm" :disabled="scanning" @click="scanNow">
-            <Icon name="refresh" :size="15" />
-            {{ scanning ? '扫描中…' : '立即扫描' }}
-          </BaseButton>
-        </div>
+          </div>
+        </section>
 
-        <h2 class="panel__title panel__title--gap">启动行为</h2>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">启动时自动扫描曲库</span>
-            <span class="setting-row__hint">应用启动后在后台检查白名单目录的变化</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.scanOnStartup"
-            @change="settingsStore.setScanOnStartup(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
-
-        <h2 class="panel__title panel__title--gap">交叉淡化</h2>
-        <p class="panel__desc">切换曲目时旧曲淡出、新曲淡入，避免突兀断音；实时生效并持久化。</p>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">启用交叉淡化</span>
-            <span class="setting-row__hint">关闭后切歌为即时切换</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.crossfade.enabled"
-            @change="settingsStore.setCrossfadeEnabled(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
-        <div
-          class="setting-row setting-row--column"
-          :class="{ 'setting-row--disabled': !settingsStore.crossfade.enabled }"
-        >
-          <span class="setting-row__text">
-            <span class="setting-row__label">淡入淡出时长</span>
-            <span class="setting-row__hint">0 – 3 秒，默认 1 秒</span>
-          </span>
-          <input
-            type="range"
-            class="range"
-            min="0"
-            max="3000"
-            step="100"
-            :value="settingsStore.crossfade.duration_ms"
-            :disabled="!settingsStore.crossfade.enabled"
-            @input="
-              settingsStore.setCrossfadeDuration(
-                Number(($event.target as HTMLInputElement).value),
-              )
-            "
-          />
-          <span class="setting-row__value u-tabular">
-            {{ (settingsStore.crossfade.duration_ms / 1000).toFixed(1) }}s
-          </span>
-        </div>
-
-        <h2 class="panel__title panel__title--gap">音量归一化（ReplayGain）</h2>
-        <p class="panel__desc">
-          按曲目响度自动调整播放音量：优先读取音频内嵌 ReplayGain 标签，无标签曲目首次播放时后台分析响度并持久化；开启后避免不同歌曲音量忽大忽小。
-        </p>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">启用音量归一化</span>
-            <span class="setting-row__hint">目标响度 -14 LUFS，峰值防削波；实时生效并持久化</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.replaygain.enabled"
-            @change="settingsStore.setReplaygainEnabled(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
-
-        <h2 class="panel__title panel__title--gap">目录自动监控</h2>
-        <p class="panel__desc">
-          实时监听曲库目录文件变化：新增音频自动入库、删除自动移除、重命名/修改自动更新元数据；无需手动扫描。
-        </p>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">启用目录自动监控</span>
-            <span class="setting-row__hint">默认开启；关闭后需手动「扫描曲库」更新</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.watch.enabled"
-            @change="settingsStore.setWatchEnabled(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
-        <div v-if="isTauri && watcherStatus" class="setting-row setting-row--static">
-          <span class="setting-row__text">
-            <span class="setting-row__label">监控状态</span>
-            <span class="setting-row__hint">
-              {{
-                watcherStatus.dirs.length > 0
-                  ? `正在监控 ${watcherStatus.dirs.length} 个目录`
-                  : '暂无已登记曲库目录'
-              }}
-              <template v-if="watcherStatus.last_event_desc">
-                ｜最近：{{ watcherStatus.last_event_desc }}（{{ watcherStatus.last_event_at }}）
-              </template>
+        <section class="setting-card">
+          <h2 class="setting-card__title">氛围</h2>
+          <p class="setting-card__desc">让界面色调跟随当前歌曲封面，营造统一氛围。</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">皮肤色跟随当前歌曲封面</span>
+              <span class="setting-row__hint">从封面提取主色，接管按钮、选中态、进度条、歌词高亮等强调色，并为界面晕染同色氛围</span>
             </span>
-          </span>
-        </div>
-        <div v-if="isTauri && !watcherStatus" class="setting-row setting-row--static">
-          <span class="setting-row__text">
-            <span class="setting-row__label">监控状态</span>
-            <span class="setting-row__hint">状态查询暂不可用</span>
-          </span>
-        </div>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="isCoverAccentEnabled"
+              @change="setCoverAccent(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+        </section>
       </div>
 
-      <!-- 外观 -->
-      <div v-else-if="activeTab === 'appearance'" class="panel">
-        <h2 class="panel__title">主题</h2>
-        <p class="panel__desc">主题选择会立即生效并持久化。</p>
-        <div class="theme-options">
-          <button
-            v-for="option in themeOptions"
-            :key="option.key"
-            type="button"
-            class="theme-option"
-            :class="{ 'theme-option--active': theme === option.key }"
-            @click="applyTheme(option.key)"
+      <!-- 播放：交叉淡化 / 音量归一化 -->
+      <div v-else-if="activeTab === 'playback'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">交叉淡化</h2>
+          <p class="setting-card__desc">切换曲目时旧曲淡出、新曲淡入，避免突兀断音；实时生效并持久化。</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">启用交叉淡化</span>
+              <span class="setting-row__hint">关闭后切歌为即时切换</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.crossfade.enabled"
+              @change="settingsStore.setCrossfadeEnabled(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <div
+            class="setting-row setting-row--column"
+            :class="{ 'setting-row--disabled': !settingsStore.crossfade.enabled }"
           >
-            <Icon :name="option.icon" :size="20" />
-            <span>{{ option.label }}</span>
-            <Icon v-if="theme === option.key" name="check" :size="15" class="theme-option__check" />
-          </button>
-        </div>
+            <span class="setting-row__text">
+              <span class="setting-row__label">淡入淡出时长</span>
+              <span class="setting-row__hint">0 – 3 秒，默认 1 秒</span>
+            </span>
+            <input
+              type="range"
+              class="range"
+              min="0"
+              max="3000"
+              step="100"
+              :value="settingsStore.crossfade.duration_ms"
+              :disabled="!settingsStore.crossfade.enabled"
+              @input="
+                settingsStore.setCrossfadeDuration(
+                  Number(($event.target as HTMLInputElement).value),
+                )
+              "
+            />
+            <span class="setting-row__value u-tabular">
+              {{ (settingsStore.crossfade.duration_ms / 1000).toFixed(1) }}s
+            </span>
+          </div>
+        </section>
 
-        <h2 class="panel__title panel__title--gap">氛围</h2>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">皮肤色跟随当前歌曲封面</span>
-            <span class="setting-row__hint">从封面提取主色，接管按钮、选中态、进度条、歌词高亮等强调色，并为界面晕染同色氛围</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="isCoverAccentEnabled"
-            @change="setCoverAccent(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
+        <section class="setting-card">
+          <h2 class="setting-card__title">音量归一化</h2>
+          <p class="setting-card__desc">
+            按曲目响度自动调整播放音量：优先读取音频内嵌 ReplayGain 标签，无标签曲目首次播放时后台分析响度并持久化；开启后避免不同歌曲音量忽大忽小。
+          </p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">启用音量归一化（ReplayGain）</span>
+              <span class="setting-row__hint">目标响度 -14 LUFS，峰值防削波；实时生效并持久化</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.replaygain.enabled"
+              @change="settingsStore.setReplaygainEnabled(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+        </section>
+      </div>
+
+      <!-- 媒体库：曲库目录 / 启动行为 / 目录自动监控 -->
+      <div v-else-if="activeTab === 'library'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">曲库目录</h2>
+          <p class="setting-card__desc">只有白名单内的目录才允许被扫描与读取。</p>
+          <ul v-if="settingsStore.libraryDirs.length > 0" class="dir-list">
+            <li v-for="dir in settingsStore.libraryDirs" :key="dir" class="dir-list__item">
+              <Icon name="folder" :size="17" />
+              <span class="dir-list__path" :title="dir">{{ dir }}</span>
+              <button
+                type="button"
+                class="dir-list__remove"
+                aria-label="移除目录"
+                title="移除目录"
+                @click="removeLibraryDir(dir)"
+              >
+                <Icon name="trash-2" :size="15" />
+              </button>
+            </li>
+          </ul>
+          <p v-else class="panel__empty">尚未添加曲库目录</p>
+          <div class="panel__actions">
+            <BaseButton variant="primary" size="sm" @click="addLibraryDir">
+              <Icon name="folder-plus" :size="15" />
+              添加目录
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" :disabled="scanning" @click="scanNow">
+              <Icon name="refresh" :size="15" />
+              {{ scanning ? '扫描中…' : '立即扫描' }}
+            </BaseButton>
+          </div>
+        </section>
+
+        <section class="setting-card">
+          <h2 class="setting-card__title">启动与同步</h2>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">启动时自动扫描曲库</span>
+              <span class="setting-row__hint">应用启动后在后台检查白名单目录的变化</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.scanOnStartup"
+              @change="settingsStore.setScanOnStartup(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">启用目录自动监控</span>
+              <span class="setting-row__hint">默认开启；关闭后需手动「扫描曲库」更新</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.watch.enabled"
+              @change="settingsStore.setWatchEnabled(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <div v-if="isTauri && watcherStatus" class="setting-row setting-row--static">
+            <span class="setting-row__text">
+              <span class="setting-row__label">监控状态</span>
+              <span class="setting-row__hint">
+                {{
+                  watcherStatus.dirs.length > 0
+                    ? `正在监控 ${watcherStatus.dirs.length} 个目录`
+                    : '暂无已登记曲库目录'
+                }}
+                <template v-if="watcherStatus.last_event_desc">
+                  ｜最近：{{ watcherStatus.last_event_desc }}（{{ watcherStatus.last_event_at }}）
+                </template>
+              </span>
+            </span>
+          </div>
+          <div v-if="isTauri && !watcherStatus" class="setting-row setting-row--static">
+            <span class="setting-row__text">
+              <span class="setting-row__label">监控状态</span>
+              <span class="setting-row__hint">状态查询暂不可用</span>
+            </span>
+          </div>
+        </section>
       </div>
 
       <!-- 歌词 -->
       <div v-else-if="activeTab === 'lyrics'" class="panel">
-        <h2 class="panel__title">歌词来源</h2>
-        <p class="panel__desc">
-          歌词优先级为：音频内嵌歌词 &gt; 同名 .lrc 边车文件 &gt; 在线匹配（需开启在线服务，M3 落地）。
-          逐行偏移校正在右侧歌词面板底部进行，按曲目单独保存。
-        </p>
-        <div class="panel__actions">
-          <BaseButton variant="subtle" size="sm" @click="clearLyricsCache">
-            <Icon name="trash-2" :size="15" />
-            清除歌词缓存
-          </BaseButton>
-        </div>
+        <section class="setting-card">
+          <h2 class="setting-card__title">歌词来源</h2>
+          <p class="setting-card__desc">
+            歌词优先级为：音频内嵌歌词 &gt; 同名 .lrc 边车文件 &gt; 在线匹配（需开启在线服务，M3 落地）。
+            逐行偏移校正在右侧歌词面板底部进行，按曲目单独保存。
+          </p>
+          <div class="panel__actions">
+            <BaseButton variant="subtle" size="sm" @click="clearLyricsCache">
+              <Icon name="trash-2" :size="15" />
+              清除歌词缓存
+            </BaseButton>
+          </div>
+        </section>
       </div>
 
       <!-- 在线服务 -->
       <div v-else-if="activeTab === 'online'" class="panel">
-        <h2 class="panel__title">在线能力</h2>
-        <label class="setting-row">
-          <span class="setting-row__text">
-            <span class="setting-row__label">启用在线服务</span>
-            <span class="setting-row__hint">开启后可使用在线音源匹配与歌词匹配（M3 落地）</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.online.enabled"
-            @change="settingsStore.setOnlineEnabled(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
+        <section class="setting-card">
+          <h2 class="setting-card__title">在线能力</h2>
+          <p class="setting-card__desc">在线服务默认关闭；开启后按需使用，本地曲库默认不上报。</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">启用在线服务</span>
+              <span class="setting-row__hint">开启后可使用在线音源匹配与歌词匹配（M3 落地）</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.online.enabled"
+              @change="settingsStore.setOnlineEnabled(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
 
-        <label class="setting-row" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
-          <span class="setting-row__text">
-            <span class="setting-row__label">允许上报本地曲库特征</span>
-            <span class="setting-row__hint">用于提高在线匹配准确率；默认关闭，需单独同意</span>
-          </span>
-          <input
-            type="checkbox"
-            class="switch"
-            :checked="settingsStore.online.allowLibraryUpload"
-            :disabled="!settingsStore.online.enabled"
-            @change="settingsStore.setAllowLibraryUpload(($event.target as HTMLInputElement).checked)"
-          />
-        </label>
+          <label class="setting-row" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
+            <span class="setting-row__text">
+              <span class="setting-row__label">允许上报本地曲库特征</span>
+              <span class="setting-row__hint">用于提高在线匹配准确率；默认关闭，需单独同意</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.online.allowLibraryUpload"
+              :disabled="!settingsStore.online.enabled"
+              @change="settingsStore.setAllowLibraryUpload(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
 
-        <div class="setting-row setting-row--column" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
-          <span class="setting-row__text">
-            <span class="setting-row__label">服务提供方</span>
-          </span>
-          <select
-            class="select"
-            :value="settingsStore.online.provider"
-            disabled
-            title="更多服务提供方将在 M3 接入"
-          >
-            <option value="netease">网易云音乐</option>
-            <option value="none">未选择</option>
-          </select>
-        </div>
+          <div class="setting-row setting-row--column" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
+            <span class="setting-row__text">
+              <span class="setting-row__label">服务提供方</span>
+            </span>
+            <select
+              class="select"
+              :value="settingsStore.online.provider"
+              disabled
+              title="更多服务提供方将在 M3 接入"
+            >
+              <option value="netease">网易云音乐</option>
+              <option value="none">未选择</option>
+            </select>
+          </div>
+        </section>
       </div>
 
       <!-- 工具：收听报告入口 + 音频转换器（原侧栏"工具"入口移入设置页，命令面板仍可直达） -->
@@ -481,139 +605,143 @@ async function resetSettings(): Promise<void> {
 
       <!-- 更新 -->
       <div v-else-if="activeTab === 'update'" class="panel">
-        <h2 class="panel__title">检查更新</h2>
-        <p class="panel__desc">
-          当前版本：{{ appVersion }}。更新包经数字签名校验，仅从官方发布通道获取，
-          下载与安装均需你手动确认，不会静默升级。
-        </p>
+        <section class="setting-card">
+          <h2 class="setting-card__title">检查更新</h2>
+          <p class="setting-card__desc">
+            当前版本：{{ appVersion }}。更新包经数字签名校验，仅从官方发布通道获取，
+            下载与安装均需你手动确认，不会静默升级。
+          </p>
 
-        <!-- 未检查 / 检查中 / 已是最新 / 失败 / 浏览器环境 -->
-        <div v-if="updateStatus !== 'available' && updateStatus !== 'downloading'" class="update">
-          <div v-if="updateStatus === 'checking'" class="update__hint">
-            <Icon name="loader" :size="15" spin />
-            正在检查更新…
-          </div>
-          <div v-else-if="updateStatus === 'up-to-date'" class="update__hint update__hint--ok">
-            <Icon name="check" :size="15" />
-            已是最新版本
-          </div>
-          <div v-else-if="updateStatus === 'error'" class="update__hint update__hint--error">
-            <Icon name="info" :size="15" />
-            检查更新失败{{ updateError ? `：${updateError}` : '' }}
-          </div>
-          <div v-else-if="updateStatus === 'unsupported'" class="update__hint">
-            <Icon name="info" :size="15" />
-            浏览器预览环境不支持应用内升级，请使用安装版 TPlayer Next。
-          </div>
-
-          <div class="panel__actions">
-            <BaseButton
-              variant="primary"
-              size="sm"
-              :disabled="updateStatus === 'checking'"
-              @click="checkUpdates"
-            >
-              <Icon name="refresh" :size="15" />
-              {{ updateStatus === 'error' ? '重试' : '检查更新' }}
-            </BaseButton>
-          </div>
-        </div>
-
-        <!-- 发现新版本 -->
-        <div v-else-if="updateStatus === 'available' && availableUpdate" class="update">
-          <div class="update__card">
-            <div class="update__version">
-              新版本 v{{ availableUpdate.version }}
-              <span class="update__date">{{ availableUpdate.date }}</span>
+          <!-- 未检查 / 检查中 / 已是最新 / 失败 / 浏览器环境 -->
+          <div v-if="updateStatus !== 'available' && updateStatus !== 'downloading'" class="update">
+            <div v-if="updateStatus === 'checking'" class="update__hint">
+              <Icon name="loader" :size="15" spin />
+              正在检查更新…
             </div>
-            <pre v-if="availableUpdate.body" class="update__notes">{{ availableUpdate.body }}</pre>
-          </div>
-          <div class="panel__actions">
-            <BaseButton variant="primary" size="sm" @click="installUpdate">
-              <Icon name="download" :size="15" />
-              下载并安装
-            </BaseButton>
-          </div>
-        </div>
-
-        <!-- 下载安装中 -->
-        <div v-else class="update">
-          <div class="update__hint">
-            <Icon name="loader" :size="15" spin />
-            正在下载更新…
-          </div>
-          <div class="update__progress">
-            <div class="update__progress-bar">
-              <div
-                class="update__progress-fill"
-                :style="{ width: updatePercent === null ? '100%' : `${updatePercent}%` }"
-                :class="{ 'update__progress-fill--indeterminate': updatePercent === null }"
-              />
+            <div v-else-if="updateStatus === 'up-to-date'" class="update__hint update__hint--ok">
+              <Icon name="check" :size="15" />
+              已是最新版本
             </div>
-            <div class="update__progress-meta u-tabular">
-              <span>{{ updatePercent === null ? '下载中' : `${updatePercent}%` }}</span>
-              <span>{{ updateSizeText }}</span>
+            <div v-else-if="updateStatus === 'error'" class="update__hint update__hint--error">
+              <Icon name="info" :size="15" />
+              检查更新失败{{ updateError ? `：${updateError}` : '' }}
+            </div>
+            <div v-else-if="updateStatus === 'unsupported'" class="update__hint">
+              <Icon name="info" :size="15" />
+              浏览器预览环境不支持应用内升级，请使用安装版 TPlayer。
+            </div>
+
+            <div class="panel__actions">
+              <BaseButton
+                variant="primary"
+                size="sm"
+                :disabled="updateStatus === 'checking'"
+                @click="checkUpdates"
+              >
+                <Icon name="refresh" :size="15" />
+                {{ updateStatus === 'error' ? '重试' : '检查更新' }}
+              </BaseButton>
             </div>
           </div>
-          <p class="panel__desc">下载完成后安装器将自动启动，应用会重启进入新版本。</p>
-        </div>
+
+          <!-- 发现新版本 -->
+          <div v-else-if="updateStatus === 'available' && availableUpdate" class="update">
+            <div class="update__card">
+              <div class="update__version">
+                新版本 v{{ availableUpdate.version }}
+                <span class="update__date">{{ availableUpdate.date }}</span>
+              </div>
+              <pre v-if="availableUpdate.body" class="update__notes">{{ availableUpdate.body }}</pre>
+            </div>
+            <div class="panel__actions">
+              <BaseButton variant="primary" size="sm" @click="installUpdate">
+                <Icon name="download" :size="15" />
+                下载并安装
+              </BaseButton>
+            </div>
+          </div>
+
+          <!-- 下载安装中 -->
+          <div v-else class="update">
+            <div class="update__hint">
+              <Icon name="loader" :size="15" spin />
+              正在下载更新…
+            </div>
+            <div class="update__progress">
+              <div class="update__progress-bar">
+                <div
+                  class="update__progress-fill"
+                  :style="{ width: updatePercent === null ? '100%' : `${updatePercent}%` }"
+                  :class="{ 'update__progress-fill--indeterminate': updatePercent === null }"
+                />
+              </div>
+              <div class="update__progress-meta u-tabular">
+                <span>{{ updatePercent === null ? '下载中' : `${updatePercent}%` }}</span>
+                <span>{{ updateSizeText }}</span>
+              </div>
+            </div>
+            <p class="setting-card__desc">下载完成后安装器将自动启动，应用会重启进入新版本。</p>
+          </div>
+        </section>
       </div>
 
       <!-- 关于 -->
       <div v-else class="panel">
-        <h2 class="panel__title">TPlayer Next</h2>
-        <p class="about__tagline">本地优先的桌面音乐播放器</p>
+        <section class="setting-card">
+          <h2 class="setting-card__title">TPlayer</h2>
+          <p class="about__tagline">本地优先的桌面音乐播放器</p>
 
-        <p class="about__intro">
-          TPlayer Next 是 TPlayer 的下一代版本，基于 Tauri 2、Vue 3 与 Rust 重新构建。
-          所有曲目数据保存在本机 SQLite 数据库中，不依赖任何云服务即可完成曲库管理与播放；
-          在线能力作为可选增强存在，默认关闭。与旧版采用不同的应用标识与数据目录，可共存安装。
-        </p>
+          <p class="about__intro">
+            TPlayer 是基于 Tauri 2、Vue 3 与 Rust 重新构建的本地优先桌面音乐播放器。
+            所有曲目数据保存在本机 SQLite 数据库中，不依赖任何云服务即可完成曲库管理与播放；
+            在线能力作为可选增强存在，默认关闭。
+          </p>
 
-        <h3 class="about__heading">主要特性</h3>
-        <ul class="about__list">
-          <li>支持 18 种音频格式：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、DSF/DFF、DTS 等</li>
-          <li>播放队列与交叉淡化、多种播放模式、托盘控制与全局快捷键</li>
-          <li>专辑 / 艺术家自动聚合，CUE 分轨识别</li>
-          <li>封面自动匹配（内嵌标签 → 同名图片 → 目录封面 → 可选在线补全），并按封面主色生成界面皮肤</li>
-          <li>收藏、最近播放、自定义歌单，LRC 歌词与逐行偏移调整</li>
-          <li>万级曲库的增量扫描与虚拟滚动，SQLite 持久化，启动与浏览更快</li>
-          <li>内置应用内自动升级：更新包经数字签名校验，手动确认后安装，不会静默更新</li>
-        </ul>
+          <h3 class="about__heading">主要特性</h3>
+          <ul class="about__list">
+            <li>支持 18 种音频格式：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、DSF/DFF、DTS 等</li>
+            <li>播放队列与交叉淡化、多种播放模式、托盘控制与全局快捷键</li>
+            <li>专辑 / 艺术家自动聚合，CUE 分轨识别</li>
+            <li>封面自动匹配（内嵌标签 → 同名图片 → 目录封面 → 可选在线补全），并按封面主色生成界面皮肤</li>
+            <li>收藏、最近播放、自定义歌单，LRC 歌词与逐行偏移调整</li>
+            <li>万级曲库的增量扫描与虚拟滚动，SQLite 持久化，启动与浏览更快</li>
+            <li>内置应用内自动升级：更新包经数字签名校验，手动确认后安装，不会静默更新</li>
+          </ul>
 
-        <h3 class="about__heading">隐私说明</h3>
-        <p class="about__intro">
-          曲库文件、收藏、歌单与播放记录只存储在本机（<span class="u-tabular">%APPDATA%\TPlayer Next</span>）。
-          应用不会上传你的曲目信息；歌词、封面等在线增强默认关闭，即使手动开启，
-          「上报本地曲库特征」仍需单独同意。
-        </p>
+          <h3 class="about__heading">隐私说明</h3>
+          <p class="about__intro">
+            曲库文件、收藏、歌单与播放记录只存储在本机（<span class="u-tabular">%APPDATA%\com.tplayer</span>）。
+            应用不会上传你的曲目信息；歌词、封面等在线增强默认关闭，即使手动开启，
+            「上报本地曲库特征」仍需单独同意。
+          </p>
 
-        <h3 class="about__heading">致谢</h3>
-        <p class="about__intro">
-          感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式转换）、
-          minisign（升级签名）、Vue 与 Tauri 等开源项目。
-        </p>
+          <h3 class="about__heading">致谢</h3>
+          <p class="about__intro">
+            感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式转换）、
+            minisign（升级签名）、Vue 与 Tauri 等开源项目。
+          </p>
 
-        <dl class="about">
-          <div class="about__row">
-            <dt>版本</dt>
-            <dd class="u-tabular">{{ appVersion }}</dd>
+          <dl class="about">
+            <div class="about__row">
+              <dt>版本</dt>
+              <dd class="u-tabular">{{ appVersion }}</dd>
+            </div>
+            <div class="about__row">
+              <dt>运行环境</dt>
+              <dd>{{ isTauri ? 'Tauri 桌面环境' : '浏览器预览环境' }}</dd>
+            </div>
+            <div class="about__row">
+              <dt>技术栈</dt>
+              <dd>Tauri 2 · Vue 3 · TypeScript · Rust</dd>
+            </div>
+          </dl>
+          <div class="panel__actions">
+            <BaseButton variant="danger" size="sm" @click="resetSettings">
+              <Icon name="trash-2" :size="15" />
+              恢复默认设置
+            </BaseButton>
           </div>
-          <div class="about__row">
-            <dt>运行环境</dt>
-            <dd>{{ isTauri ? 'Tauri 桌面环境' : '浏览器预览环境' }}</dd>
-          </div>
-          <div class="about__row">
-            <dt>技术栈</dt>
-            <dd>Tauri 2 · Vue 3 · TypeScript · Rust</dd>
-          </div>
-        </dl>
-        <div class="panel__actions">
-          <BaseButton variant="danger" size="sm" @click="resetSettings">
-            <Icon name="trash-2" :size="15" />
-            恢复默认设置
-          </BaseButton>
-        </div>
+        </section>
       </div>
     </div>
   </section>
@@ -693,11 +821,24 @@ async function resetSettings(): Promise<void> {
   color: var(--color-text-tertiary);
 }
 
-/* ---- 左侧导航 ---- */
+/* ---- 左侧导航（分组） ---- */
 .settings__nav {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+}
+
+.settings__nav-group {
+  margin: var(--space-3) var(--space-3) var(--space-1);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  user-select: none;
+}
+
+.settings__nav-group:first-child {
+  margin-top: 0;
 }
 
 .settings__nav-item {
@@ -734,18 +875,24 @@ async function resetSettings(): Promise<void> {
   max-width: 560px;
 }
 
-.panel__title {
+/* ---- 设置卡片（DESIGN §2.4：分组用卡片承载） ---- */
+.setting-card {
+  padding: var(--space-4) var(--space-5);
+  margin-bottom: var(--space-4);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevation-1);
+}
+
+.setting-card__title {
   margin: 0 0 var(--space-1);
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
 }
 
-.panel__title--gap {
-  margin-top: var(--space-6);
-}
-
-.panel__desc {
+.setting-card__desc {
   margin: 0 0 var(--space-4);
   font-size: var(--font-size-xs);
   line-height: var(--line-height-sm);
@@ -780,7 +927,7 @@ async function resetSettings(): Promise<void> {
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   color: var(--color-text-secondary);
-  background-color: var(--color-bg-elevated);
+  background-color: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-sm);
 }
@@ -818,6 +965,11 @@ async function resetSettings(): Promise<void> {
   gap: var(--space-4);
   padding: var(--space-3) 0;
   border-top: 1px solid var(--color-border-subtle);
+}
+
+.setting-row:first-child {
+  border-top: none;
+  padding-top: 0;
 }
 
 .setting-row--column {
@@ -952,7 +1104,7 @@ async function resetSettings(): Promise<void> {
   padding: var(--space-4) var(--space-3);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
-  background-color: var(--color-bg-elevated);
+  background-color: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -1054,7 +1206,7 @@ async function resetSettings(): Promise<void> {
 .update__card {
   margin-bottom: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
 }

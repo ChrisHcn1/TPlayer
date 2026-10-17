@@ -21,8 +21,8 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { LAYOUT_DEFAULTS, LAYOUT_STORAGE_KEY } from '../constants'
 
-/** 右面板页签（§4.10：歌词 / 队列，顺序固定） */
-export type PanelTab = 'lyrics' | 'queue'
+/** 右面板页签（§4.10：歌词 / 队列 / 曲目信息，顺序固定） */
+export type PanelTab = 'lyrics' | 'queue' | 'info'
 
 /** 布局状态：可持久化的全部字段（新增字段须同步读取校验、默认值与本注释） */
 interface LayoutState {
@@ -39,7 +39,7 @@ interface LayoutState {
 }
 
 function isPanelTab(value: unknown): value is PanelTab {
-  return value === 'lyrics' || value === 'queue'
+  return value === 'lyrics' || value === 'queue' || value === 'info'
 }
 
 /**

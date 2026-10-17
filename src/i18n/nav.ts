@@ -55,6 +55,7 @@ const NAV_LABELS: Record<string, string> = {
   'nav.panel-label': '歌词与队列',
   'nav.panel-lyrics': '歌词',
   'nav.panel-queue': '队列',
+  'nav.panel-info': '曲目信息',
   'nav.panel-close': '关闭面板',
   'nav.lyrics-loading': '歌词加载中',
   'nav.queue-loading': '播放队列加载中',

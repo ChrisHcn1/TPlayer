@@ -1,7 +1,7 @@
-# TPlayer Next —— 项目进度清单
+# TPlayer —— 项目进度清单
 
 > 本文件是项目的唯一进度台账。**每次继续本项目时，先读本文件，不要全量遍历代码。**
-> 最后更新：2026-10-11
+> 最后更新：2026-10-14
 
 ---
 
@@ -19,7 +19,7 @@ M1 交互骨架已跑通：`npm run build` 零报错，`npm run dev` 在 http://
 | M1 交互骨架 | 图标集、右键菜单、多选条、浮层、真实数据接入 | ✅ 完成（2026-09-30，浏览器实测） |
 | M2 数据层 | Rust 播放引擎统一 Player trait、IPC 打通 | ✅ 完成（2026-09-30，cargo build + npm run build 零错误） |
 | M3 功能闭环 | 歌词、转换器、在线模块、SMTC、应用图标 | 🔶 进行中（歌词链/断点续播/播放习惯/ffprobe 兜底/播放条歌词行/系统托盘/应用图标已落地） |
-| M4 性能与发布 | SQLite 持久化、虚拟滚动/封面性能、NSIS 打包、应用内自动升级 | ✅ 完成（2026-10-06，升级 endpoint 待真实仓库地址后替换） |
+| M4 性能与发布 | SQLite 持久化、虚拟滚动/封面性能、NSIS 打包、应用内自动升级 | ✅ 完成（2026-10-06；**升级 endpoint 当前指向 `ChrisHcn1/TPlayer` 仓库；发布前请确认该仓库即本项目发版仓库且公钥匹配，否则自动更新校验失败**，见 §5 M4 第 6 项） |
 
 ---
 
@@ -45,7 +45,7 @@ npm run typecheck  # 仅类型检查
 - [x] `docs/FEATURES-INVENTORY.md` — 旧版功能清点（8 功能域 / 90+ 功能项 / D-01~D-21 重复冲突 / B-01~B-25 逻辑缺陷）
 - [x] `docs/DESIGN.md` — 设计规范定稿（1695 行，§1 信息架构 / §2 布局 / §3 token / §4 组件 / §5 交互 / §6 快捷键）
 - [x] `docs/PROJECT-STATUS.md` — 本文件
-- [ ] `docs/ARCHITECTURE.md`、`docs/ROADMAP.md` — 待补
+- [x] `docs/ARCHITECTURE.md`、`docs/ROADMAP.md` — 架构与路线图（2026-10-14 补：分层/命令契约/状态管理/安全边界/在线模块设计约束/平台约束/构建发布；里程碑回顾与 M3 状态、SMTC 决策、发布前待办）
 
 ### 3.2 设计资产
 - [x] `public/logo.svg`、`public/favicon.svg`、`public/logo-1024.svg`
@@ -143,17 +143,17 @@ npm run typecheck  # 仅类型检查
 - [x] 专辑/艺术家封面聚合补全（2026-10-06：封面链扩展为 内嵌 → 同名边车 → 目录图(folder/cover/front 等及含 cover/folder/front 的变体) → 在线；新增 library_album_cover/library_artist_cover 命令，组内候选按 hasCover+音轨号排序逐首回退（上限 30），本地全空时仅做一次网易云在线匹配（受 online.enabled 控制）；分组键 album:/artist: 独立内存+磁盘缓存，成员单曲缓存自动镜像到分组键，下次启动零解析零联网，负缓存仅存内存保证重试；前端 useTrackCover 泛化为 track/album/artist 三类 key，网格与详情统一走聚合封面，store 不再维护代表曲目映射）
 - [x] 转换器接 Rust 后端（2026-10-11 完成：新增 `converter.rs` 模块 —— ffmpeg 批量转码专用线程（顺序执行、-progress 实时进度、stderr 错误回收、半成品清理、同名 "(n)" 编号绝不覆盖）、取消（任务间跳过 + kill 当前子进程）、`converter://event` 事件（started/progress/completed/failed/finished）；命令 converter_start/cancel/probe_files；AppError::Converter；实测修正 out_time_ms 微秒陷阱改解析 out_time 时间串；前端 types/converter.ts 契约 + services/converter.ts（Tauri 实现 + Web mock 定时器模拟）+ stores/converter.ts（事件驱动任务状态、设置 localStorage 持久化、切页不丢状态）+ ConverterView 真实路径选择（pickAudioFiles/pickDirectory）、取消按钮、失败/取消态展示；四格式命令行参数已用项目 bin/ffmpeg.exe 实测通过；cargo check 与 npm run build 零错误）
 - [x] 队列项移除（2026-10-11 完成：`handle.rs` remove_from_queue（下标越界校验、当前曲下标修正、移除当前曲不打断播放、被移除项恰为预加载下一曲时失效标记）、新增 PlaybackEvent::Queue 事件推送最新上下文 + player_remove_from_queue 命令；前端 IPlayer.removeFromQueue 契约 + Tauri/Web 双实现 + store removeFromQueue 动作与 queue 事件同步；QueuePanel 行尾 hover × 移除按钮（绝对定位避免 button 嵌套）；队列跳播已有双击 playFromContext 覆盖，未另设 jumpTo 命令；cargo check 与 npm run build 零错误）
-- [ ] 在线模块真实通道（默认关闭，开启也不上报本地曲库；设置开关已就绪；歌词与封面通道已真实化）
-- [ ] 拖拽导入（§5.8）
-- [ ] 系统媒体控制 SMTC / MediaSession 集成
+- [x] 在线模块真实通道（2026-10-14 复核：默认关闭、开启也不上报本地曲库、设置开关已就绪；歌词与封面已走 Rust 后端真实联网受 `settings.online.enabled` 控制，通道闭环；`services/online.ts` 统一出口收敛为后续可选优化，见 ROADMAP §3.1）
+- [x] 拖拽导入（2026-10-14 完成：Tauri drag-drop 事件拿到真实路径，过滤音频扩展名（文件或目录递归），新增 `library_import_files` 命令复用 `scan::parse_track`/`discover_audio_files` 直接入库（不强制白名单校验，与 dialog 选择器同源可信）；前端 App.vue 注册 `onDragDropEvent` 显示全窗遮罩、松手后 `libraryStore.importDropped` 入库并刷新；`LibraryService.importFiles` 契约 + Tauri/Web 双实现；cargo check 与 npm run build / vue-tsc 零错误）
+- [x] 系统媒体控制 SMTC（2026-10-14 实现：Windows-only，内存 `MediaPlayer` 作 SMTC 代理，`SystemMediaTransportControls` 上报元数据/状态，专用 STA 线程消息泵 + channel 隔离所有 WinRT 调用；按钮事件经 `smtc://button` 转发前端 player store 控制（play/pause/next/previous/stop）；元数据/状态随 `playback://event` 同步；`#[cfg(windows)]` 隔离，非 Windows 编译透明；驱动封面（缩略图）为后续增强）
 - [x] 应用图标各平台生成（2026-10-01：按 public/logo-1024.svg 几何用 System.Drawing 绘制 1024 PNG（temp/gen-icon.ps1），`npx @tauri-apps/cli icon` 全量生成 32/64/128/ico/icns/Square 系列至 src-tauri/icons）
-- [ ] `ARCHITECTURE.md` / `ROADMAP.md`
+- [x] `ARCHITECTURE.md` / `ROADMAP.md`（2026-10-14 补：架构分层/命令契约/状态管理/安全边界/在线模块设计约束/平台约束/构建发布；里程碑回顾与 M3 状态、SMTC 决策、发布前待办）
 
 ### M4 性能与发布闭环（2026-10-06）
 - [x] 曲库持久化迁移 SQLite（rusqlite 0.32 bundled；`library/db.rs` PRAGMA WAL/busy_timeout/foreign_keys；tracks/track_artists/favorites/recent/playlists/playlist_tracks 全 SQL 化，聚合与封面候选查询下推 SQL；首次启动自动导入旧 library.json 并改名 .bak；扫描改增量 mtime diff + 单事务 upsert/删除；顺带修复 album_id 恒为 None 导致真实环境专辑聚合失效）
 - [x] 封面性能优化（单曲/分组封面改 asset 协议文件 URL，assetProtocol scope 放开 $APPDATA/cover-cache；useTrackCover 内存缓存改 LRU 240；播放条取色用封面保留 data URL 避免画布跨域污染）
 - [x] TrackList 虚拟滚动（vue-virtual-scroller RecycleScroller，行高随密度档 --size-row-h 实时同步，外层滚动容器实时测高，切歌定位改 scrollToItem，KeepAlive/sticky 表头/多选回归保留）
-- [x] 应用内自动升级（tauri-plugin-updater + process；minisign 密钥对在 src-tauri/.tauri-signing（已 gitignore），公钥写入 tauri.conf.json；设置-更新页真实检查/发布说明/下载进度/重启安装，启动 8s 静默检查；通道为 GitHub Releases latest.json，endpoint 中 <OWNER>/<REPO> 待发布前替换；旧 update 占位模块与命令已删除，capabilities 加 updater:default/process:default）
+- [x] 应用内自动升级（tauri-plugin-updater + process；minisign 密钥对在 src-tauri/.tauri-signing（已 gitignore），公钥写入 tauri.conf.json；设置-更新页真实检查/发布说明/下载进度/重启安装，启动 8s 静默检查；通道为 GitHub Releases latest.json，**endpoint 当前指向 `ChrisHcn1/TPlayer` 仓库；发布前请确认该仓库即本项目发版仓库且公钥匹配，否则自动更新校验失败**；旧 update 占位模块与命令已删除，capabilities 加 updater:default/process:default）
 - [x] 程序化打包（scripts/build-win.ps1 必须带 BOM 的 UTF-8 编码，回落本地密钥；npm run build:win；.github/workflows/release.yml 推 v* tag 触发 tauri-action 自动签名+latest.json+Release 草稿；README 增打包发布章节；版本三处对齐 2.0.0）
 - [x] 皮肤色三档分层（同一封面色相派生：皮肤色 brand 亮调（按钮/选中）、--color-cover-progress 饱和实色中调（进度条/拖块）、--color-cover-lyrics 近白（深主题）/近墨（浅主题）高亮 + 强调色辉光（歌词当前行，四处消费方带回落），多维拉开避免同色无法区分）
 - [x] 启动自动续播（player_init 恢复断点后播放列表非空即自动从断点位置继续播放，失败静默降级）
@@ -200,6 +200,19 @@ npm run typecheck  # 仅类型检查
 
 ---
 
+### 音频格式兼容补丁模块（2026-10-15 新增，独立模块，零侵入）
+
+- 目的：不改任何播放核心代码（tauriPlayer / webPlayer / WebPlayer / Rust 引擎），兜底 wma/aiff/ape/dts/dsf 等原生不支持、或后缀错配 / 冷门编码 / 轻微头损坏导致的「无法播放」。
+- 接入：`services/player.ts` 的 `playerService` 改为 `createCompatPlayer(basePlayer)`；`tauri.conf.json` CSP connect-src 加 `asset:`（兜底经 asset 协议读字节）。
+- 结构（`src/services/compat/`，纯前端 9 文件）：
+  - `index.ts` `CompatPlayer` 包裹 `IPlayer`——仅包一层 play：播放前用 `plugin-fs` 的 `open+read(64字节)` 精确读头做魔数预判（~1-3ms，不依赖后缀名、零 Rust 改动）；原生可播(mp3/flac/ogg)或 WAV 容器先试原生（失败再兜底），冷门格式(wma/aiff/ape/dts/dsf/amr 等)直接走兜底省去必败的原生探测；不持久化标记、每首实时判定（解码产物仍按 trackId:size:mtime 缓存复用）；`fallback-player.ts` 用隐藏 `<audio>` 播标准 WAV 并桥接进度事件。
+  - `magic.ts` 魔数识别真实格式（不依赖后缀名，含头损坏容错）：WAV/MP3/FLAC/AAC/AMR/OGG/WMA/AIFF/DSF/DFF/DTS/APE/WV/TTA/TAK/MIDI。
+  - `decoders.ts` 轻量 JS 解码器（L1，KB 级）：WAV 容错解析 + PCM 直提(8/16/24/32-bit) + G.711(μ/A-law) + IMA/MS ADPCM。
+  - `worker.ts` 解码调度（所有解码跑在 Web Worker，主线程零阻塞）+ `ffmpeg.ts` L2 兜底（FFmpeg.wasm 懒加载，默认关，变量名动态 import 规避构建依赖）。
+  - `cache.ts` 转码缓存（内存 + IndexedDB，按 `trackId:size:modifiedAt` 复用）；`config.ts` 远程开关 / 灰度 / 回滚；`telemetry.ts` 埋点（触发率 / 成功率 / 耗时）。
+- 性能：首屏零兼容资源加载；正常文件完全不受影响。风险隔离：所有异常捕获，兜底失败静默降级。
+- L2 启用前置：`npm i @ffmpeg/ffmpeg @ffmpeg/util` 并将 core 置于 `public/ffmpeg/`；远程开关 `ffmpegWasmEnabled` 控制。
+
 ## 6. 已知问题与决策备忘
 
 | 编号 | 问题 | 状态 |
@@ -211,7 +224,7 @@ npm run typecheck  # 仅类型检查
 | BUG-005 | 侧栏折叠按钮假入口 | ✅ 已修复（useLayout 接管，Ctrl+B） |
 | BUG-006 | 图标集未接入 | ✅ 已修复（icons.ts 内联 SVG 集 + Icon.vue，M1 全量替换占位） |
 | BUG-007 | node_modules 未安装 | ✅ 已解决（已安装 51 包） |
-| BUG-008 | 标题栏品牌名 | ✅ 已统一为「TPlayer Next」 |
+| BUG-008 | 标题栏品牌名 | ✅ 已统一为「TPlayer」 |
 | BUG-009 | 依赖安装越界 | ⚠️ 记录：vue-router 缺失 + node_modules 缺失导致编译阻塞，file-agent 已代为 `npm install`（含补装 vue-router），用户此前约束为「本阶段不做重量级安装」，需知悉 |
 | BUG-010 | `dist/` 构建产物 | ⚠️ 复核用产物，可删除；已确认在 `.gitignore` 内 |
 | BUG-011 | 启动即假死（窗口"未响应"） | ✅ 已修复（2026-10-11。根因：目录监控 setup 中 `state.watch.reconfigure(app, &state.config.lock().unwrap().library_dirs, state.config.lock().unwrap().watch.enabled)` —— 同一表达式两次 lock 同一把 config Mutex，第 1 个临时 MutexGuard 存活到语句结束导致同线程自死锁（std Mutex 不可重入），主线程卡死在 setup 内、事件循环永不启动。修复：先在独立作用域取出 (dirs, watch_enabled) 再调用。经验教训：同一调用表达式中不要对同一 Mutex 多次 lock。诊断记录：Tauri 2 中非 async 命令默认跑在主线程、窗口先于 setup 创建（假死但窗口可见）、GUI 子系统下 eprintln 不可见需文件插桩 |
@@ -255,9 +268,10 @@ E:\TPlayerNext\
 │   ├── views\                      14 个视图组件（M1 全部接入真实数据）
 │   ├── stores\                     library · player · lyrics · playlist · settings
 │   │                               · toast · dialog
-│   ├── services\                   player · library · lyrics · online · update · ipc · dialog · settings
+│   ├── services\                   player · library · lyrics · online · update · ipc · dialog · settings · converter
 │   │                               └── web\      dataset · library · player · lyrics（浏览器 mock 引擎）
-│   └── types\                      track · player · lyrics · api
+│   ├── stores\                     converter
+│   └── types\                      track · player · lyrics · api · converter
 └── src-tauri\
     ├── Cargo.toml                  rodio · lofty · sha2 · rand · chrono 依赖
     ├── tauri.conf.json             bundle.targets=["nsis"] · assetProtocol scope 限定音乐目录
@@ -269,7 +283,8 @@ E:\TPlayerNext\
         ├── config.rs               AppConfig（library_dirs/online/scanOnStartup/locale）→ config.json
         ├── error.rs                AppError / AppResult（code/message/detail 序列化）
         ├── security.rs             ensure_allowed 路径白名单校验
-        ├── commands\               player(14) · library(21) · lyrics(2) · update(1) · settings(2)
+        ├── commands\               player(14) · library(21) · lyrics(2) · update(1) · settings(2) · converter(3)
+        ├── converter.rs            ffmpeg 批量转码（专用线程、-progress 实时进度、取消 kill 子进程、同名 "(n)" 编号不覆盖）
         ├── player\
         │   ├── engine.rs           rodio 引擎 + EngineHandle（mpsc 通道，解决 OutputStream 非 Send）
         │   ├── handle.rs           状态机 + 自动连播 + playback://event 推送

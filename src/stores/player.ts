@@ -11,9 +11,10 @@
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import { createIdleSnapshot, playerService } from '../services/player'
-import { normalizeError } from '../services/ipc'
+import { isTauriRuntime, normalizeError } from '../services/ipc'
 import type {
   PlayContext,
   PlayMode,
@@ -46,6 +47,10 @@ export const usePlayerStore = defineStore('player', () => {
   const sleepTimer = ref<SleepTimerState>({ active: false, waitTrackEnd: false, endsAtMs: null })
   /** 取消后端事件订阅（init 时登记，dispose 时注销） */
   let unsubscribe: (() => void) | null = null
+  /** 取消 SMTC 按钮事件订阅（仅桌面端生效，浏览器预览无此事件） */
+  let smtcUnsub: UnlistenFn | null = null
+  /** 取消 compat-play 接管订阅（Rust 续播/连播到需 core 解码的曲目时发此事件） */
+  let compatUnsub: UnlistenFn | null = null
 
   /** 当前队列曲目 id 列表（无上下文时为空） */
   const queueTrackIds = computed(() => currentContext.value?.trackIds ?? [])
@@ -119,6 +124,9 @@ export const usePlayerStore = defineStore('player', () => {
       case 'mode':
         snapshot.value = { ...snapshot.value, mode: event.payload.mode }
         return
+      case 'rate':
+        snapshot.value = { ...snapshot.value, rate: event.payload.rate }
+        return
       case 'ended':
         // 自动连播时后端紧随其后会发 Loading/Track/Playing，
         // 这里只重置进度、不动 status，避免播放条在切歌瞬间闪烁为 stopped
@@ -141,6 +149,18 @@ export const usePlayerStore = defineStore('player', () => {
     await execute(async () => {
       // 先订阅再初始化：避免引擎就绪后的首个事件丢失（如恢复上次播放）
       unsubscribe = playerService.subscribe((event) => applyEvent(event))
+      // 注册 compat-play 接管监听：Rust 在「续播 / 连播 / 手动点歌」命中需 core 解码的曲目
+      // （DTS/DSD/APE 等）时 stage_compat 占位（同步队列/快照）后发此事件，
+      // 前端走 playCompat 静默接管（core 就绪后自动切播）。必须先于 playerService.init() 注册，
+      // 以捕获启动续播场景（仅 Tauri 运行时有效）。
+      if (isTauriRuntime()) {
+        compatUnsub = await listen<{ trackId: string; context: PlayContext }>(
+          'compat-play',
+          (e) => {
+            void playCompat(e.payload.trackId, e.payload.context)
+          },
+        )
+      }
       // 断点续播：后端恢复的上次播放上下文（队列显示据此还原）
       const restoredContext = await playerService.init()
       if (restoredContext) currentContext.value = restoredContext
@@ -148,6 +168,35 @@ export const usePlayerStore = defineStore('player', () => {
       sleepTimer.value = await playerService.sleepTimerStatus()
       initialized.value = true
     })
+    // 系统媒体控制按钮（任务栏/锁屏/耳机线控）：仅桌面端生效，
+    // 浏览器预览无此事件，listen 失败静默忽略
+    listen<{ action: string }>('smtc://button', (e) => {
+      switch (e.payload.action) {
+        case 'play':
+          void resume()
+          break
+        case 'pause':
+          void pause()
+          break
+        case 'next':
+          void next()
+          break
+        case 'previous':
+          void previous()
+          break
+        case 'stop':
+          void stop()
+          break
+        default:
+          break
+      }
+    })
+      .then((unsub) => {
+        smtcUnsub = unsub
+      })
+      .catch(() => {
+        smtcUnsub = null
+      })
   }
 
   /** 播放单曲；context 缺省时后端按"曲库全量"作为上下文 */
@@ -166,6 +215,17 @@ export const usePlayerStore = defineStore('player', () => {
       await playerService.play(trackId, context)
       applySnapshot(await playerService.snapshot())
     })
+  }
+
+  /**
+   * compat 层静默接管（后端 stage_compat 已同步队列/快照并发出 compat-play 事件）。
+   * 与 play 的区别：不走 playerService.play——那会对 compat 曲目再次触发后端占位，
+   * 形成 compat-play 事件回环。不调 applySnapshot：兜底通道的 track/playing 事件
+   * 会随后到达，若用后端 Loading 快照覆盖会令 UI 卡在加载态。
+   */
+  async function playCompat(trackId: string, context?: PlayContext): Promise<void> {
+    if (context) currentContext.value = context
+    await playerService.playCompat?.(trackId, context)
   }
 
   /**
@@ -249,6 +309,13 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  async function setRate(rate: number): Promise<void> {
+    await execute(async () => {
+      await playerService.setRate(Math.max(0.25, Math.min(4.0, rate)))
+      applySnapshot(await playerService.snapshot())
+    })
+  }
+
   /** 设置睡眠定时器（delayMs 毫秒后到期；waitTrackEnd=true 时播完当前曲目才停止） */
   async function setSleepTimer(delayMs: number, waitTrackEnd = false): Promise<void> {
     await execute(async () => {
@@ -286,6 +353,10 @@ export const usePlayerStore = defineStore('player', () => {
       await playerService.dispose()
       unsubscribe?.()
       unsubscribe = null
+      smtcUnsub?.()
+      smtcUnsub = null
+      compatUnsub?.()
+      compatUnsub = null
       initialized.value = false
     })
   }
@@ -313,6 +384,7 @@ export const usePlayerStore = defineStore('player', () => {
     setVolume,
     setMuted,
     setMode,
+    setRate,
     cycleMode,
     setSleepTimer,
     cancelSleepTimer,

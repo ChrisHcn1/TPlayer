@@ -7,6 +7,7 @@
 //!
 //! M0 状态：全部命令返回 `AppError::NotImplemented`，这是刻意行为（骨架不等于实现）。
 
+pub mod compat_fs;
 pub mod converter;
 pub mod library;
 pub mod lyrics;

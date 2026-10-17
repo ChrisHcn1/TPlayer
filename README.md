@@ -1,4 +1,4 @@
-# TPlayer Next (v2)
+# TPlayer (v2)
 
 > 桌面音乐播放器 TPlayer 的**下一代重设计版本**，与旧版 `E:\TPlayer` 完全隔离、可共存、不互相覆盖。
 > 旧版保持可用，待 v2 稳定后再进行版本迭代替换。
@@ -27,12 +27,12 @@
 
 | 项 | 旧版取值 | v2 取值 | 共存说明 |
 |---|---|---|---|
-| `productName`（安装名/开始菜单/注册表） | `TPlayer` | **`TPlayer Next`** | 安装目录、开始菜单项、卸载项互不覆盖 |
-| `identifier` | `D57E920A.TPlayer` | **`com.tplayer.next`** | 命名空间完全不同，MSIX/注册表不冲突 |
+| `productName`（安装名/开始菜单/注册表） | `TPlayer` | **`TPlayer`** | 对外名称已统一为 TPlayer |
+| `identifier` | `D57E920A.TPlayer` | **`com.tplayer`** | 命名空间不同，MSIX/注册表不冲突 |
 | 窗口标题 / UI 品牌 | `TPlayer` | **`TPlayer`**（保持一致） | 用户感知上仍是 TPlayer |
-| 应用数据目录 | `%APPDATA%\TPlayer` | **`%APPDATA%\TPlayer Next`** | 曲库/设置/缓存完全隔离 |
-| NSIS 安装包 | `TPlayer_1.0.4_x64-setup.exe` | **`TPlayerNext_2.0.0_x64-setup.exe`** | 文件名与安装路径均不同 |
-| MSIX 包 | `D57E920A.TPlayer_1.0.6.0_x64.msix` | **`com.tplayer.next_2.0.0.0_x64.msix`** | 商店包身份独立 |
+| 应用数据目录 | `%APPDATA%\TPlayer` | **`%APPDATA%\com.tplayer`** | 曲库/设置/缓存隔离（升级时自动迁移旧 TPlayer Next 数据） |
+| NSIS 安装包 | `TPlayer_1.0.4_x64-setup.exe` | **`TPlayer_2.0.0_x64-setup.exe`** | 文件名与安装路径均不同 |
+| MSIX 包 | `D57E920A.TPlayer_1.0.6.0_x64.msix` | **`com.tplayer_2.0.0.0_x64.msix`** | 商店包身份独立 |
 | 文件关联扩展名 | mp3/flac/wav/... | **与旧版相同** | 两版均注册为候选打开方式；v2 **不主动抢占系统默认**，由用户在「打开方式」中选择 |
 
 > 说明：Windows 上同一扩展名的「默认应用」全局唯一。v2 安装时仅注册候选处理程序（`FileAssociations`），不写入 `UserChoice` 强制默认，避免影响旧版既有行为。

@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
-// TPlayer Next — 前端构建配置
+// TPlayer — 前端构建配置
 // 约定：base 使用相对路径以适配 Tauri 打包后的本地加载
 export default defineConfig({
   plugins: [vue()],
@@ -31,4 +31,12 @@ export default defineConfig({
     ],
   },
   clearScreen: false,
+  // Vitest 单元测试配置（共享 Vite 的 alias / resolve）
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./vitest.setup.ts'],
+    css: true,
+    include: ['src/**/*.{test,spec}.{ts,tsx,vue}'],
+  },
 })

@@ -93,7 +93,9 @@ export function useTrackActions() {
     if (tracks.length === 0) return
     const ids = new Set(tracks.map((track) => track.id))
     const allFavorited = tracks.every((track) => libraryStore.isFavorite(track.id))
-    const title = tracks.length > 1 ? `已选 ${tracks.length} 首` : tracks[0]?.title
+    // 单曲：标题由菜单信息头承载（完整元数据 / 歌词 / 封面 / 路径），不再重复显示
+    const isSingle = tracks.length === 1
+    const title = isSingle ? undefined : `已选 ${tracks.length} 首`
 
     const items: MenuItem[] = [
       {
@@ -164,7 +166,7 @@ export function useTrackActions() {
       onClick: () => void removeFromLibrary(tracks),
     })
 
-    open(event, items, title)
+    open(event, items, title, isSingle ? { trackId: tracks[0]!.id } : undefined)
   }
 
   /** 批量收藏/取消收藏：以第一首当前状态为准统一取反 */

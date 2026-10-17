@@ -136,6 +136,13 @@ export class WebPlayer implements IPlayer {
     this.emit({ type: 'mode', payload: { mode } })
   }
 
+  async setRate(rate: number): Promise<void> {
+    const next = Math.max(0.25, Math.min(4.0, rate))
+    // Web 预览无真实变速能力，仅记录速率（snapshot 同步），供 UI 读取
+    this.patch({ rate: next })
+    this.emit({ type: 'rate', payload: { rate: next } })
+  }
+
   async setCrossfade(_enabled: boolean, _durationMs: number): Promise<void> {
     /* 浏览器 mock 引擎无真实音频输出，交叉淡化参数不生效，忽略即可 */
   }

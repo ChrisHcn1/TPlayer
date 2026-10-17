@@ -93,9 +93,14 @@ export const usePlaylistStore = defineStore('playlist', () => {
   async function addTracks(id: string, trackIds: string[]): Promise<void> {
     const target = playlists.value.find((playlist) => playlist.id === id)
     if (!target || target.isSystem || trackIds.length === 0) return
+    // 全量去重：trackId 由文件绝对路径哈希生成（唯一标识），已存在的自动过滤
+    const seen = new Set(target.trackIds)
     const merged = [...target.trackIds]
     for (const trackId of trackIds) {
-      if (!merged.includes(trackId)) merged.push(trackId)
+      if (!seen.has(trackId)) {
+        seen.add(trackId)
+        merged.push(trackId)
+      }
     }
     const previous = playlists.value
     playlists.value = playlists.value.map((playlist) =>

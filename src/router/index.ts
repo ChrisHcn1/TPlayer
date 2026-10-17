@@ -162,7 +162,7 @@ const routes: RouteRecordRaw[] = [
     path: '/settings/:tab',
     name: 'settings-tab',
     component: () => import('../views/SettingsView.vue'),
-    // tab 取值：playback / appearance / lyrics / online / update / about（§1.4、§2.4 图 2-4-5）
+    // tab 取值：appearance / playback / library / lyrics / online / tools / update / about
     meta: { nav: 'bottom', titleKey: 'nav.settings', parent: 'settings' },
   },
 

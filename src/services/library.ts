@@ -10,7 +10,7 @@
  */
 import { convertFileSrc } from '@tauri-apps/api/core'
 
-import type { Album, Artist, LibraryStats, Playlist, RecentEntry, Track } from '../types'
+import type { Album, Artist, LibraryStats, Playlist, RecentEntry, Track, TrackInfo } from '../types'
 
 import { callCommand, isTauriRuntime } from './ipc'
 import { webLibrary } from './web/library'
@@ -46,6 +46,10 @@ export interface LibraryService {
   recordPlayed(trackId: string): Promise<void>
   /** 从曲库索引移除（不删除磁盘文件），并清理收藏 / 歌单引用 */
   removeTracks(ids: string[]): Promise<void>
+  /** 拖拽导入：将给定文件/目录路径中的音频直接入库，返回成功导入的曲目 ID 列表（空表示无音频） */
+  importFiles(paths: string[]): Promise<string[]>
+  /** 获取指定曲目的完整元数据（含技术参数、内嵌歌词、封面 data URL）；曲目不存在返回 null */
+  trackInfo(trackId: string): Promise<TrackInfo | null>
   addLibraryDir(path: string): Promise<void>
   removeLibraryDir(path: string): Promise<void>
   listPlaylists(): Promise<Playlist[]>
@@ -77,6 +81,8 @@ const tauriLibrary: LibraryService = {
   recent: () => callCommand<RecentEntry[]>('library_recent'),
   recordPlayed: (trackId) => callCommand('library_record_played', { trackId }),
   removeTracks: (ids) => callCommand('library_remove_tracks', { ids }),
+  importFiles: (paths) => callCommand<string[]>('library_import_files', { paths }),
+  trackInfo: (trackId) => callCommand<TrackInfo | null>('library_track_info', { trackId }),
   addLibraryDir: (path) => callCommand('library_add_dir', { path }),
   removeLibraryDir: (path) => callCommand('library_remove_dir', { path }),
   listPlaylists: () => callCommand<Playlist[]>('library_list_playlists'),

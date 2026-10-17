@@ -27,6 +27,11 @@ interface MenuState {
   y: number
   title: string | null
   items: MenuItem[]
+  /**
+   * 曲目信息头（DESIGN §5.5 内容展示模块）：右键单曲目时传入 trackId，
+   * 宿主在菜单顶部渲染完整元数据 / 歌词 / 封面 / 文件路径；null 表示纯动作菜单。
+   */
+  trackId: string | null
 }
 
 const state = reactive<MenuState>({
@@ -35,6 +40,7 @@ const state = reactive<MenuState>({
   y: 0,
   title: null,
   items: [],
+  trackId: null,
 })
 
 /** 一级菜单键盘高亮（-1 表示无高亮） */
@@ -42,26 +48,34 @@ const activeIndex = ref(-1)
 /** 当前展开子菜单的父项 key */
 const openSubmenuKey = ref<string | null>(null)
 
-function openAt(x: number, y: number, items: MenuItem[], title?: string): void {
+/** 打开菜单的附加选项 */
+export interface MenuOpenOptions {
+  /** 传入曲目 id 时，菜单顶部渲染该曲目的完整信息头 */
+  trackId?: string | null
+}
+
+function openAt(x: number, y: number, items: MenuItem[], title?: string, options?: MenuOpenOptions): void {
   close()
   state.items = items
   state.title = title ?? null
+  state.trackId = options?.trackId ?? null
   state.x = x
   state.y = y
   state.open = true
   activeIndex.value = -1
 }
 
-function open(event: MouseEvent, items: MenuItem[], title?: string): void {
+function open(event: MouseEvent, items: MenuItem[], title?: string, options?: MenuOpenOptions): void {
   event.preventDefault()
   event.stopPropagation()
-  openAt(event.clientX, event.clientY, items, title)
+  openAt(event.clientX, event.clientY, items, title, options)
 }
 
 function close(): void {
   state.open = false
   state.items = []
   state.title = null
+  state.trackId = null
   openSubmenuKey.value = null
   activeIndex.value = -1
 }

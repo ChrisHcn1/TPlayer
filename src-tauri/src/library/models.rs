@@ -38,6 +38,17 @@ pub struct Track {
     /// 文件修改时间（Unix 秒），用于增量扫描
     #[serde(rename = "modifiedAt")]
     pub modified_at: i64,
+    /// 是否为 CUE 分轨曲目（整盘镜像中的某一轨）
+    #[serde(rename = "isCue", skip_serializing_if = "is_false")]
+    pub is_cue: bool,
+    /// CUE 分轨在镜像文件中的起始偏移（秒）；非 CUE 曲目为 None
+    #[serde(rename = "cueOffset", skip_serializing_if = "Option::is_none")]
+    pub cue_offset: Option<f64>,
+}
+
+/// serde skip 辅助：值为 false 时不序列化 isCue 字段
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 ///

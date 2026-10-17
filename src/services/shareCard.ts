@@ -244,7 +244,7 @@ export function buildShareCardSvg(data: ShareCardData): string {
   <text x="990" y="1316" text-anchor="end" font-size="30" font-weight="600" fill="${brand}">${xmlEscape(hourLabel(peak))} ${peak} 点</text>
   ${bars}
 
-  <text x="90" y="${CARD_HEIGHT - 40}" font-size="26" fill="${tertiary}">生成于 ${formatDate(data.generatedAt)} · TPlayer Next</text>
+  <text x="90" y="${CARD_HEIGHT - 40}" font-size="26" fill="${tertiary}">生成于 ${formatDate(data.generatedAt)} · TPlayer</text>
 </svg>`
 }
 

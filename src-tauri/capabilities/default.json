@@ -18,6 +18,10 @@
       "allow": [{ "path": "$AUDIO/**" }, { "path": "$HOME/Music/**" }]
     },
     {
+      "identifier": "fs:allow-open",
+      "allow": [{ "path": "$AUDIO/**" }, { "path": "$HOME/Music/**" }]
+    },
+    {
       "identifier": "fs:allow-read-dir",
       "allow": [{ "path": "$AUDIO/**" }, { "path": "$HOME/Music/**" }]
     }

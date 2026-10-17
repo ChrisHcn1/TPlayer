@@ -1,5 +1,4 @@
-﻿//! 播放状态机：管理当前播放状态、队列上下文、自动连播、事件推送
-//!
+//! 播放状态机：管理当前播放状态、队列上下文、自动连播、事件推送
 //! 位置追踪由本状态机负责（引擎线程不回传位置），通过 Instant 计时。
 
 use std::collections::{HashMap, HashSet};
@@ -62,6 +61,12 @@ pub struct PlayerHandle {
     is_paused: bool,
     /// 播放状态持久化文件路径（playback_state.json）
     persist_path: Option<PathBuf>,
+    /// 按曲目续播位置文件路径（track_positions.json，与 persist_path 同目录）
+    positions_path: Option<PathBuf>,
+    /// 按曲目记忆的播放位置（trackId → 毫秒）：再次播放同一曲目时精准接续
+    track_positions: HashMap<String, u64>,
+    /// 位置表是否有未落盘的变更（随 save_state 节流落盘）
+    positions_dirty: bool,
     /// 待恢复的断点（set_persist_path 时加载，apply_pending_restore 消费）
     pending_restore: Option<PersistedPlayback>,
     /// 上次持久化时间（tick 节流用）
@@ -91,6 +96,9 @@ impl PlayerHandle {
             play_started_at: None,
             is_paused: false,
             persist_path: None,
+            positions_path: None,
+            track_positions: HashMap::new(),
+            positions_dirty: false,
             pending_restore: None,
             last_state_save: Instant::now(),
             needs_engine_load: false,
@@ -101,10 +109,51 @@ impl PlayerHandle {
         }
     }
 
-    /// 设置持久化路径并加载上次会话的播放状态（待 player_init 应用）
+    /// 设置持久化路径并加载上次会话的播放状态（待 player_init 应用）；
+    /// 同时加载同目录下的按曲目续播位置表
     pub fn set_persist_path(&mut self, path: PathBuf) {
         self.pending_restore = persist::load(&path);
+        self.positions_path = path
+            .parent()
+            .map(|dir| dir.join(persist::POSITIONS_FILE));
+        if let Some(pos_path) = &self.positions_path {
+            self.track_positions = persist::load_positions(pos_path);
+        }
         self.persist_path = Some(path);
+    }
+
+    /// 记录某曲目的续播位置（值变化才标记脏，避免无谓落盘）
+    fn note_position(&mut self, track_id: &str, position_ms: u64) {
+        if track_id.is_empty() {
+            return;
+        }
+        if self.track_positions.get(track_id) != Some(&position_ms) {
+            self.track_positions.insert(track_id.to_string(), position_ms);
+            self.positions_dirty = true;
+        }
+    }
+
+    /// 位置表落盘（有变更时；失败静默不影响播放）
+    fn flush_positions(&mut self) {
+        if !self.positions_dirty {
+            return;
+        }
+        if let Some(path) = &self.positions_path {
+            persist::save_positions(path, &self.track_positions);
+        }
+        self.positions_dirty = false;
+    }
+
+    /// 查询曲目的有效续播位置（毫秒）；无记录/无效记录/CUE 分轨返回 0（从头播）。
+    /// CUE 分轨的位置语义是文件绝对偏移、与子轨时间轴不一致，不参与续播记忆。
+    fn resume_position_for(&self, track: &Track) -> u64 {
+        if track.cue_offset.is_some() {
+            return 0;
+        }
+        let Some(&pos) = self.track_positions.get(&track.id) else {
+            return 0;
+        };
+        persist::sanitize_resume_position(pos, (track.duration * 1000.0) as u64)
     }
 
     /// 刷新曲目缓存（曲库扫描完成后调用）
@@ -112,9 +161,11 @@ impl PlayerHandle {
         self.track_map = tracks.into_iter().map(|t| (t.id.clone(), t)).collect();
     }
 
-    /// 应用启动恢复：音量/静音/播放模式始终恢复；
-    /// 曲目仍在曲库中时恢复为 paused 态并定位到中断位置（引擎待首次 resume 装载）。
-    /// 返回恢复出的播放上下文（供前端还原队列显示）。
+    /// 应用启动恢复：音量/静音/播放模式与播放队列上下文始终恢复；
+    /// 断点曲目为原生可播的非 CUE 曲目时，恢复为 paused 态并定位到中断位置
+    /// （引擎待首次 resume 装载）。冷门格式在 FFmpeg 缺失时需前端 WASM 整文件
+    /// 解码（启动即长加载、体验差），CUE 分轨断点位置与子轨时间轴不一致——
+    /// 两类曲目跳过自动续播定位。返回恢复出的播放上下文（供前端还原队列显示）。
     pub fn apply_pending_restore(&mut self) -> Option<PlayContext> {
         let state = self.pending_restore.take()?;
 
@@ -125,59 +176,78 @@ impl PlayerHandle {
         let _ = self.engine.set_volume(self.snapshot.volume);
         let _ = self.engine.set_muted(self.snapshot.muted);
 
-        // 断点续播：曲目需仍在曲库中
-        let track_id = state.track_id?;
-        let track = self.track_map.get(&track_id)?.clone();
-        let mut position_ms = state.position_ms;
-        let duration_ms = (track.duration * 1000.0) as u64;
-        // 已播到结尾的曲目从头开始；时长未知（0）时按原样恢复
-        if duration_ms > 0 && position_ms >= duration_ms {
-            position_ms = 0;
-        }
-
-        self.context = state.context;
+        // 队列上下文始终还原（断点曲目失效时队列显示仍可用）
+        self.context = state.context.clone();
         self.index = state.index;
-        if let Some(ctx) = &self.context {
-            if let Some(idx) = ctx.track_ids.iter().position(|id| id == &track_id) {
-                self.index = idx;
+
+        // 断点续播：曲目需仍在曲库中
+        if let Some(track_id) = &state.track_id {
+            if let Some(track) = self.track_map.get(track_id).cloned() {
+                if !self.track_needs_compat(&track.id) && track.cue_offset.is_none() {
+                    let mut position_ms = state.position_ms;
+                    let duration_ms = (track.duration * 1000.0) as u64;
+                    // 剩余不足 3s 视为已播完，从头开始；时长未知（0）时按原样恢复
+                    if duration_ms > 0
+                        && duration_ms.saturating_sub(position_ms) < persist::RESUME_END_GUARD_MS
+                    {
+                        position_ms = 0;
+                    }
+                    if let Some(idx) = self
+                        .context
+                        .as_ref()
+                        .and_then(|c| c.track_ids.iter().position(|id| id == track_id))
+                    {
+                        self.index = idx;
+                    }
+                    self.snapshot.status = PlaybackStatus::Paused;
+                    self.snapshot.track_id = Some(track.id.clone());
+                    self.snapshot.position_ms = position_ms;
+                    self.snapshot.duration_ms = duration_ms;
+                    self.position_offset_ms = position_ms;
+                    self.play_started_at = None;
+                    self.is_paused = true;
+                    self.needs_engine_load = true;
+                }
             }
         }
-
-        self.snapshot.status = PlaybackStatus::Paused;
-        self.snapshot.track_id = Some(track_id);
-        self.snapshot.position_ms = position_ms;
-        self.snapshot.duration_ms = duration_ms;
-        self.position_offset_ms = position_ms;
-        self.play_started_at = None;
-        self.is_paused = true;
-        self.needs_engine_load = true;
 
         self.context.clone()
     }
 
-    /// 持久化当前播放状态（断点 + 播放习惯）；停止/空闲时不记录曲目
+    /// 持久化当前播放状态（断点 + 播放习惯）；停止/空闲时不记录曲目。
+    /// 同时把当前曲目位置写入按曲目续播位置表并落盘（切歌/暂停/seek/音量与
+    /// 模式变更/5s tick/退出均经过此处，保证"退出、切换曲目、关闭播放器"场景
+    /// 下位置记录实时且准确）。
     pub fn save_state(&mut self) {
-        let Some(path) = &self.persist_path else { return };
+        let Some(path) = self.persist_path.clone() else { return };
         let playing_track = match self.snapshot.status {
             PlaybackStatus::Playing | PlaybackStatus::Paused | PlaybackStatus::Loading => {
                 self.snapshot.track_id.clone()
             }
             _ => None,
         };
+        let position_ms = if self.snapshot.status == PlaybackStatus::Playing {
+            self.current_position()
+        } else {
+            self.position_offset_ms
+        };
+        // 按曲目续播记忆：Loading 态位置尚未就绪（恒为 0），不覆盖旧记录
+        if let Some(track_id) = &playing_track {
+            if self.snapshot.status != PlaybackStatus::Loading {
+                self.note_position(track_id, position_ms);
+            }
+        }
         let state = PersistedPlayback {
             track_id: playing_track,
-            position_ms: if self.snapshot.status == PlaybackStatus::Playing {
-                self.current_position()
-            } else {
-                self.position_offset_ms
-            },
+            position_ms,
             context: self.context.clone(),
             index: self.index,
             volume: self.snapshot.volume,
             muted: self.snapshot.muted,
             mode: self.snapshot.mode,
         };
-        persist::save(path, &state);
+        persist::save(&path, &state);
+        self.flush_positions();
         self.last_state_save = Instant::now();
     }
 
@@ -198,7 +268,7 @@ impl PlayerHandle {
         EngineCapabilities {
             seek: true,
             volume_control: true,
-            rate_control: false,
+            rate_control: true,
             supported_formats: formats,
         }
     }
@@ -208,8 +278,11 @@ impl PlayerHandle {
             return self.position_offset_ms;
         }
         if let Some(started) = self.play_started_at {
-            let elapsed = started.elapsed().as_millis() as u64;
-            self.position_offset_ms + elapsed
+            let wall_elapsed_ms = started.elapsed().as_millis() as u64;
+            let rate = self.snapshot.rate.max(0.25);
+            // 倍速下播放位置 = 位置偏移 + 墙钟流逝 * 速率
+            let accelerated = (wall_elapsed_ms as f64 * rate as f64) as u64;
+            self.position_offset_ms + accelerated
         } else {
             self.position_offset_ms
         }
@@ -222,23 +295,60 @@ impl PlayerHandle {
         context: Option<PlayContext>,
         app: &AppHandle,
     ) -> AppResult<()> {
-        self.play_or_skip(track, context, app)
+        self.play_or_skip(track, context, app, true)
+    }
+
+    /// 切歌前把上一曲的播放位置写入续播记忆（"切换曲目"捕获点）。
+    /// 仅记录 Playing/Paused 态的实际位置；Loading 态位置未就绪不覆盖。
+    fn note_prev_position_before_switch(&mut self, next_track_id: &str) {
+        let Some(prev_id) = self.snapshot.track_id.clone() else {
+            return;
+        };
+        if prev_id == next_track_id {
+            return;
+        }
+        if !matches!(
+            self.snapshot.status,
+            PlaybackStatus::Playing | PlaybackStatus::Paused
+        ) {
+            return;
+        }
+        let pos = if self.is_paused {
+            self.position_offset_ms
+        } else {
+            self.current_position()
+        };
+        self.note_position(&prev_id, pos);
     }
 
     /// 尝试播放一首曲目。
     /// `quiet=true` 时不向前端推送任何事件（自动跳过链中的试探性播放），
     /// 由调用方在最终成功/失败时统一播报，避免错误 toast 风暴与中间态闪烁。
+    /// `resume_memory=false`（自动连播）时不读取按曲目续播记忆，一律从头播放。
     fn play_once(
         &mut self,
         track: &Track,
         context: Option<PlayContext>,
         app: &AppHandle,
         quiet: bool,
+        resume_memory: bool,
     ) -> AppResult<()> {
         // 任何主动播放都会改变"下一曲"计划：使既有预加载失效
         // （引擎 play() 会按路径匹配自动复用同曲预加载链路，其余情况丢弃）
         self.preloaded_track_id = None;
         self.preload_attempted = None;
+        // 切歌前记录上一曲位置（自然播完的曲目已在 on_track_ended 记 0，
+        // 且末尾位置经 sanitize 后同样回到 0，不会误存）
+        self.note_prev_position_before_switch(&track.id);
+        // 续播记忆读取规则：仅"切换到另一首曲目"的用户播放生效；
+        // 重播当前曲目=用户意图从头开始，自动连播由调用方以 resume_memory=false 排除
+        let resume_ms = if !resume_memory
+            || self.snapshot.track_id.as_deref() == Some(track.id.as_str())
+        {
+            0
+        } else {
+            self.resume_position_for(track)
+        };
 
         if let Some(ctx) = context {
             self.index = ctx
@@ -277,9 +387,20 @@ impl PlayerHandle {
             emit(app, PlaybackEvent::Status { status: PlaybackStatus::Loading });
         }
 
-        // 引擎线程播放（异步），UI 立即切到 playing 态
+        // 引擎线程播放（异步），UI 立即切到 playing 态。
+        // 命中有效续播记忆（非 CUE、剩余 ≥3s）时用 play_at 精准接续：
+        // FFmpeg 管道曲目由解码进程直接从目标位置起流（无跳秒），
+        // 原生解码曲目先起流再定位（~150ms 内完成，听感无感知）
         let gain = self.replaygain_of(track);
-        match self.engine.play(std::path::PathBuf::from(&track.file_path), gain) {
+        let cue_range = track.cue_offset.map(|start| (start, track.duration));
+        let play_result = if resume_ms > 0 {
+            self.engine
+                .play_at(std::path::PathBuf::from(&track.file_path), resume_ms, gain)
+        } else {
+            self.engine
+                .play(std::path::PathBuf::from(&track.file_path), gain, cue_range)
+        };
+        match play_result {
             Ok(_) => {
                 self.snapshot.status = PlaybackStatus::Playing;
                 self.snapshot.duration_ms = (track.duration * 1000.0) as u64;
@@ -294,6 +415,8 @@ impl PlayerHandle {
                         eprintln!("[play] ffprobe 时长探测失败: {}", track.file_path);
                     }
                 }
+                self.position_offset_ms = resume_ms;
+                self.snapshot.position_ms = resume_ms;
                 self.play_started_at = Some(Instant::now());
                 self.is_paused = false;
                 // ReplayGain 兜底：曲目无内嵌/已算增益时，后台用 ffmpeg ebur128
@@ -335,23 +458,105 @@ impl PlayerHandle {
         Ok(())
     }
 
+    /// 兜底解码曲目（DTS/DSD/APE 等冷门格式）的占位接管：
+    /// 不进原生引擎（硬解必败/噪声），仅同步状态机上下文与快照，
+    /// 并发 compat-play 事件交由前端 compat 层完成解码与播放。
+    /// 手动点歌 / 自动连播 / 断点续播统一经此路径，保证队列 index 与"下一曲"推进一致。
+    fn stage_compat(&mut self, track: &Track, context: Option<PlayContext>, app: &AppHandle) {
+        // 任何主动播放都会改变"下一曲"计划：使既有预加载失效
+        self.preloaded_track_id = None;
+        self.preload_attempted = None;
+        // 切歌前记录上一曲位置（与原生播放路径同规则）
+        self.note_prev_position_before_switch(&track.id);
+        if let Some(ctx) = context {
+            self.index = ctx
+                .track_ids
+                .iter()
+                .position(|id| id == &track.id)
+                .unwrap_or(0);
+            self.context = Some(ctx);
+        } else if self.context.is_none() {
+            let ids: Vec<String> = self.track_map.keys().cloned().collect();
+            self.context = Some(PlayContext {
+                source: super::state::PlayContextSource::Library,
+                source_id: None,
+                track_ids: ids,
+            });
+            self.index = self
+                .context
+                .as_ref()
+                .unwrap()
+                .track_ids
+                .iter()
+                .position(|id| id == &track.id)
+                .unwrap_or(0);
+        } else if let Some(idx) = self
+            .context
+            .as_ref()
+            .and_then(|c| c.track_ids.iter().position(|id| id == &track.id))
+        {
+            // 上下文已存在：按曲目 id 重定位 index（兜底曲目不经 play_once，index 不会自动推导）
+            self.index = idx;
+        }
+
+        // 停掉原生引擎（可能仍有上一首在响），避免双声叠加
+        let _ = self.engine.stop();
+
+        self.snapshot.status = PlaybackStatus::Loading;
+        self.snapshot.track_id = Some(track.id.clone());
+        self.snapshot.position_ms = 0;
+        self.snapshot.duration_ms = 0;
+        self.position_offset_ms = 0;
+        self.play_started_at = None;
+        self.is_paused = false;
+        self.snapshot.error = None;
+        self.needs_engine_load = false;
+        // 时长探测：供 UI 先行展示（前端兜底接管后会以 loadedmetadata 真值覆盖）
+        if let Some(secs) = super::engine::probe_duration(std::path::Path::new(&track.file_path)) {
+            self.snapshot.duration_ms = (secs * 1000.0) as u64;
+        }
+        emit(
+            app,
+            PlaybackEvent::Track {
+                track_id: track.id.clone(),
+                duration_ms: self.snapshot.duration_ms,
+            },
+        );
+        emit(app, PlaybackEvent::Status { status: PlaybackStatus::Loading });
+        let ctx = self.context.clone();
+        let _ = app.emit(
+            "compat-play",
+            serde_json::json!({ "trackId": track.id, "context": ctx, "force": true }),
+        );
+        self.save_state();
+    }
+
     /// 播放；失败时自动按队列顺序跳过无法播放的曲目（忽略单曲循环/随机模式）。
     /// 最多尝试 MAX_AUTO_SKIP 首，全部失败时只播报一次最终错误。
+    /// `resume_memory=false`（自动连播）时不读取按曲目续播记忆。
     fn play_or_skip(
         &mut self,
         track: &Track,
         context: Option<PlayContext>,
         app: &AppHandle,
+        resume_memory: bool,
     ) -> AppResult<()> {
+        // 兜底解码曲目：不进原生引擎（必败触发 skip 会错误跳曲），
+        // 占位同步状态后交由前端 compat 层接管（含自动连播路径）
+        if self.track_needs_compat(&track.id) {
+            self.stage_compat(track, context, app);
+            return Ok(());
+        }
         let mut tried: HashSet<String> = HashSet::new();
         let mut current = track.clone();
         let mut pending_ctx = context;
+        #[allow(unused_assignments)]
         let mut last_err: Option<AppError> = None;
         let mut skipped = 0usize;
 
         loop {
             tried.insert(current.id.clone());
-            match self.play_once(&current, pending_ctx.take(), app, true) {
+            match self.play_once(&current, pending_ctx.take(), app, true, resume_memory) {
                 Ok(()) => {
                     if skipped > 0 {
                         eprintln!("[play] 已自动跳过 {skipped} 首无法播放的曲目");
@@ -455,8 +660,9 @@ impl PlayerHandle {
             .get(&track_id)
             .cloned()
             .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", track_id)))?;
-        // context 已由 apply_pending_restore 恢复，传 None 沿用
-        self.play_or_skip(&track, None, app)
+        // context 已由 apply_pending_restore 恢复，传 None 沿用；
+        // 目标即当前断点曲目（同曲重播规则下从头尝试，不读续播记忆）
+        self.play_or_skip(&track, None, app, true)
     }
 
     /// 自动跳过专用：始终按队列顺序向后取未尝试过的下一首索引
@@ -561,7 +767,11 @@ impl PlayerHandle {
                 .cloned()
                 .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", track_id)))?;
             self.engine
-                .play(std::path::PathBuf::from(&track.file_path), self.replaygain_of(&track))?;
+                .play(
+                    std::path::PathBuf::from(&track.file_path),
+                    self.replaygain_of(&track),
+                    None,
+                )?;
             self.needs_engine_load = false;
         }
         self.engine.seek(position_ms)?;
@@ -607,6 +817,28 @@ impl PlayerHandle {
         self.snapshot.mode = mode;
         emit(app, PlaybackEvent::Mode { mode });
         self.save_state();
+        Ok(())
+    }
+
+    /// 设置播放倍速（有效区间 0.25 ~ 4.0）；引擎立即生效，暂停后下次 resume 也沿用
+    pub fn set_rate(&mut self, rate: f32, app: &AppHandle) -> AppResult<()> {
+        let r = rate.clamp(0.25, 4.0);
+        let prev = self.snapshot.rate;
+        if (r - prev).abs() < 1e-3 {
+            return Ok(());
+        }
+        // 切换倍速瞬间：把墙钟累计位置按旧速率折算，把 play_started_at 重置，
+        // 让 current_position 从这一时刻起按新速率继续累加，避免倍速切换时位置跳变
+        let now = Instant::now();
+        if let Some(started) = self.play_started_at {
+            let wall_elapsed_ms = now.duration_since(started).as_millis() as u64;
+            let old_rate = prev.max(0.25);
+            self.position_offset_ms += (wall_elapsed_ms as f64 * old_rate as f64) as u64;
+            self.play_started_at = Some(now);
+        }
+        self.snapshot.rate = r;
+        self.engine.set_rate(r);
+        emit(app, PlaybackEvent::Rate { rate: r });
         Ok(())
     }
 
@@ -744,7 +976,9 @@ impl PlayerHandle {
                 }
             }
 
-            let reached_duration = dur > 0 && pos + 300 >= dur;
+            // 正常播完：位置达到时长即结束（旧版 pos+300>=dur 会导致无损曲目被提前
+            // 截断 ~300ms；现在严格 >= dur，时长未精确匹配时由 sink_drained 兜底）
+            let reached_duration = dur > 0 && pos >= dur;
             // 兜底：时长未知（0）或解码器中途退出（如 ffmpeg 缺失/秒退）时，
             // sink 已排空即视为结束。600ms 宽限避免起流瞬间误判。
             let grace_passed = self
@@ -858,7 +1092,8 @@ impl PlayerHandle {
 
         if let Some(next_id) = self.next_track_id() {
             if let Some(track) = self.track_map.get(&next_id).cloned() {
-                let _ = self.play(&track, None, app);
+                // 自动连播：不读取续播记忆，一律从头播放
+                let _ = self.play_or_skip(&track, None, app, false);
             }
         } else {
             let _ = self.engine.stop();
@@ -887,10 +1122,17 @@ impl PlayerHandle {
             self.preload_attempted = Some(next_id);
             return;
         }
+        // 兜底解码曲目不进原生预加载链路（解码必败，且 swap_to_next 可能误接管）
+        if self.track_needs_compat(&next_id) {
+            self.preload_attempted = Some(next_id);
+            return;
+        }
         self.preload_attempted = Some(next_id.clone());
+        let cue_range = track.cue_offset.map(|start| (start, track.duration));
         match self.engine.preload(
             std::path::PathBuf::from(&track.file_path),
             self.replaygain_of(&track),
+            cue_range,
         ) {
             Ok(()) => {
                 self.preloaded_track_id = Some(next_id.clone());
@@ -953,6 +1195,34 @@ impl PlayerHandle {
         self.context
             .as_ref()
             .and_then(|c| c.track_ids.get(idx).cloned())
+    }
+
+    /// 当前播放上下文（队列）快照，供命令层判断续播/连播目标
+    pub fn current_context(&self) -> Option<PlayContext> {
+        self.context.clone()
+    }
+
+    /// 该曲目是否需要前端 wasm 兜底解码（不进原生引擎）。
+    /// ffmpeg 可用时，冷门格式（ape/dsd/dts/wma/wv/tta/tak/aiff 等）由引擎内
+    /// ffmpeg 子进程流式解码为 PCM 管道播放——秒级出声、可 seek、支持预加载；
+    /// 仅 ffmpeg 缺失时才交给前端 wasm 整文件解码兜底。
+    pub fn track_needs_compat(&self, id: &str) -> bool {
+        let Some(track) = self.track_map.get(id) else {
+            return false;
+        };
+        let ext = std::path::Path::new(&track.file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        let native = matches!(
+            ext.as_str(),
+            "mp3" | "flac" | "ogg" | "oga" | "opus" | "aac" | "m4a" | "wav"
+        );
+        if native {
+            return false;
+        }
+        !super::engine::ffmpeg_available()
     }
 
     pub fn next(&mut self) -> Option<String> {

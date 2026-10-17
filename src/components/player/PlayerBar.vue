@@ -59,6 +59,9 @@ const modeMeta = computed(() => MODE_META[snapshot.value.mode] ?? MODE_META.orde
 /** 睡眠定时器预设（分钟） */
 const SLEEP_PRESETS = [15, 30, 45, 60, 90]
 
+/** 倍速预设（有效区间 0.25 ~ 4.0） */
+const RATE_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2]
+
 /** 每秒刷新的当前时刻：驱动剩余时长倒计时显示 */
 const nowMs = ref(Date.now())
 let nowTimer: ReturnType<typeof setInterval> | null = null
@@ -108,6 +111,21 @@ function openSleepMenu(event: MouseEvent): void {
     })
   }
   openAt(event.clientX, event.clientY, items, '睡眠定时器')
+}
+
+/** 格式化倍速：1 → "1.0x"，0.75 → "0.75x"，2 → "2.0x" */
+function formatRate(r: number): string {
+  return `${r.toFixed(r === Math.round(r) ? 1 : 2).replace(/\.?0+$/, '')}x`
+}
+
+function openRateMenu(event: MouseEvent): void {
+  const items: MenuItem[] = RATE_PRESETS.map((rate) => ({
+    key: `rate-${rate}`,
+    label: formatRate(rate),
+    icon: Math.abs(snapshot.value.rate - rate) < 0.001 ? 'check' : undefined,
+    onClick: () => void playerStore.setRate(rate),
+  }))
+  openAt(event.clientX, event.clientY, items, '播放速度')
 }
 
 function onSeek(positionMs: number): void {
@@ -294,6 +312,16 @@ function openArtist(): void {
         @click="openSleepMenu($event)"
       >
         <Icon name="moon" :size="18" />
+      </button>
+      <button
+        type="button"
+        class="side-btn side-btn--rate"
+        :class="{ 'side-btn--active': Math.abs(snapshot.rate - 1) > 0.001 }"
+        aria-label="播放速度"
+        :title="`播放速度 ${formatRate(snapshot.rate)}`"
+        @click="openRateMenu($event)"
+      >
+        <span class="side-btn__rate-label">{{ formatRate(snapshot.rate) }}</span>
       </button>
       <VolumeControl />
     </div>
@@ -536,5 +564,18 @@ function openArtist(): void {
 
 .side-btn--active {
   color: var(--color-brand);
+}
+
+/* 倍速按钮：与 icon 按钮同尺寸，文字 label 居中 */
+.side-btn--rate {
+  min-width: 44px;
+  padding: 0 var(--space-1);
+}
+
+.side-btn__rate-label {
+  font-size: 11px;
+  font-weight: var(--font-weight-semibold, 600);
+  line-height: 1;
+  letter-spacing: 0.02em;
 }
 </style>
