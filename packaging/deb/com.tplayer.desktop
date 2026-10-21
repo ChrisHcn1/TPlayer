@@ -1,0 +1,25 @@
+[Desktop Entry]
+# 桌面入口（freedesktop.org Desktop Entry Specification 1.5）
+# @BIN_NAME@ / @WM_CLASS@ 由 scripts/build-deb.sh 在打包时替换（render）。
+# StartupWMClass 必须与窗口实际 WM_CLASS 一致，任务栏才能把窗口关联到本 .desktop
+# 并显示下方 Icon；Wayland/X11 下窗口 set_icon 对任务栏基本无效，关联靠的就是它。
+# Tauri 应用的 WM_CLASS 可能是标识符（com.tplayer）、主二进制名（TPlayer）或
+# cargo 产物名（tplayer-next），故一并列出，命中任一即关联成功。
+Type=Application
+Version=1.0
+Name=TPlayer
+Name[zh_CN]=TPlayer 音乐播放器
+GenericName=Music Player
+GenericName[zh_CN]=音乐播放器
+Comment=本地优先的桌面音乐播放器
+Comment[zh_CN]=本地优先的桌面音乐播放器，曲库与在线能力解耦
+Exec=@BIN_NAME@ %U
+TryExec=@BIN_NAME@
+Icon=tplayer
+Terminal=false
+StartupNotify=true
+StartupWMClass=@WM_CLASS@;TPlayer;tplayer-next
+SingleMainWindow=true
+Categories=AudioVideo;Audio;Player;Music;
+Keywords=music;audio;player;本地音乐;播放器;
+MimeType=audio/mpeg;audio/mp3;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/vnd.wave;audio/aac;audio/mp4;audio/ogg;audio/opus;audio/x-m4a;audio/x-ape;audio/x-monkeys-audio;audio/x-dsf;audio/x-dff;audio/x-dts;audio/x-wma;audio/x-wvpack;audio/x-tta;audio/x-tak;audio/x-aiff;audio/aiff;

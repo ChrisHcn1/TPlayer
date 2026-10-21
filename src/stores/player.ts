@@ -41,8 +41,6 @@ export const usePlayerStore = defineStore('player', () => {
   const initialized = ref(false)
   /** 最近一次播放的上下文（决定队列与“下一首”语义）；RightPanel 队列据此渲染 */
   const currentContext = ref<PlayContext | null>(null)
-  /** 下一首是否已预解码完成（P2 自动连播预加载；PlayerBar 展示"下一首准备中"） */
-  const nextReady = ref(false)
   /** 睡眠定时器状态（后端为唯一真相源，事件 + 主动查询同步） */
   const sleepTimer = ref<SleepTimerState>({ active: false, waitTrackEnd: false, endsAtMs: null })
   /** 取消后端事件订阅（init 时登记，dispose 时注销） */
@@ -98,14 +96,9 @@ export const usePlayerStore = defineStore('player', () => {
           positionMs: 0,
           error: null,
         }
-        nextReady.value = false
         return
       case 'progress':
         snapshot.value = { ...snapshot.value, positionMs: event.payload.positionMs }
-        return
-      case 'nextPreloaded':
-        // 下一曲已预解码到引擎待命链路：切歌将无缝衔接
-        nextReady.value = true
         return
       case 'sleepTimer':
         sleepTimer.value = event.payload
@@ -253,7 +246,6 @@ export const usePlayerStore = defineStore('player', () => {
   async function stop(): Promise<void> {
     await execute(async () => {
       await playerService.stop()
-      nextReady.value = false
       applySnapshot(await playerService.snapshot())
     })
   }
@@ -367,7 +359,6 @@ export const usePlayerStore = defineStore('player', () => {
     currentContext,
     queueTrackIds,
     currentIndex,
-    nextReady,
     sleepTimer,
     applySnapshot,
     applyEvent,

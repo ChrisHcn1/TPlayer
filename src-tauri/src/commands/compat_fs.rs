@@ -37,7 +37,7 @@ fn ensure_library_path(state: &AppState, path: &str) -> AppResult<std::path::Pat
         let r = normalize_path_str(root);
         !r.is_empty()
             && norm.starts_with(&r)
-            && (norm.len() == r.len() || norm.as_bytes()[r.len()] == b'\\')
+            && (norm.len() == r.len() || norm.as_bytes()[r.len()] == PATH_SEP)
     });
     if allowed {
         return Ok(normalized);
@@ -48,15 +48,47 @@ fn ensure_library_path(state: &AppState, path: &str) -> AppResult<std::path::Pat
     )))
 }
 
-/// Windows 路径归一化（小写 + 统一分隔符），仅用于白名单前缀比较
+/// 白名单前缀比较用的路径归一化 + 分隔符边界字符（平台隔离）。
+///
+/// Windows：反斜杠语义 + 大小写折叠（NTFS 语义）。
+/// Linux：POSIX 语义——路径分隔符本就是 `/`、大小写敏感。旧实现把 `/` 统一
+///   替换为 `\\` 虽因两侧一致仍能工作，但属于 Windows 语义硬编码，且大小写
+///   折叠会把 `/Music` 与 `/music` 视为同一目录，与 Linux 文件系统语义不符。
+///   平台分支修齐（NTFS 挂载点在 Linux 同样以 POSIX 路径暴露）：Linux 原样
+///   比较（文件名中合法出现的 `\` 字符不受影响），边界字符取 `/`。
+#[cfg(windows)]
 fn normalize_path_str(s: &str) -> String {
     s.replace('/', "\\").to_lowercase()
+}
+
+#[cfg(windows)]
+const PATH_SEP: u8 = b'\\';
+
+#[cfg(not(windows))]
+fn normalize_path_str(s: &str) -> String {
+    s.to_string()
+}
+
+#[cfg(not(windows))]
+const PATH_SEP: u8 = b'/';
+
+/// Linux：把入库时写入的容错路径字符串还原为文件系统真实路径。
+///
+/// NTFS 上的非常规文件名（非 UTF-8）扫描入库时使用 `to_string_lossy()` 容错
+/// 编码，直接按该字符串打开会 ENOENT。合法路径零成本（一次 exists 探测），
+/// 仅对确实无法直连的路径回父目录反查真实条目（见 `library::scan_linux`）。
+#[cfg(target_os = "linux")]
+fn real_path(path: &std::path::Path) -> std::path::PathBuf {
+    crate::library::scan_linux::resolve_path_str(&path.to_string_lossy())
 }
 
 /// 读曲库内音频文件头（前 len 字节，1..=4096）——兼容层魔数预判用
 #[tauri::command]
 pub fn compat_read_head(state: State<'_, AppState>, path: String, len: u32) -> AppResult<Response> {
     let path = ensure_library_path(&state, &path)?;
+    // Linux：还原非 UTF-8 文件名的容错编码路径（合法路径零成本直连）
+    #[cfg(target_os = "linux")]
+    let path = real_path(&path);
     let take = len.clamp(1, 4096) as usize;
     let mut file = std::fs::File::open(&path)
         .map_err(|e| AppError::Library(format!("无法打开音频文件 {}: {}", path.display(), e)))?;
@@ -78,6 +110,9 @@ pub fn compat_read_head(state: State<'_, AppState>, path: String, len: u32) -> A
 #[tauri::command]
 pub fn compat_read_full(state: State<'_, AppState>, path: String) -> AppResult<Response> {
     let path = ensure_library_path(&state, &path)?;
+    // Linux：还原非 UTF-8 文件名的容错编码路径（合法路径零成本直连）
+    #[cfg(target_os = "linux")]
+    let path = real_path(&path);
     let bytes = std::fs::read(&path)
         .map_err(|e| AppError::Library(format!("无法读取音频文件 {}: {}", path.display(), e)))?;
     Ok(Response::new(bytes))

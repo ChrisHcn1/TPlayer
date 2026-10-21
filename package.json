@@ -13,7 +13,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
-    "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1"
+    "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
+    "build:deb": "bash scripts/build-deb.sh",
+    "install:deb": "sudo bash scripts/install-deb.sh",
+    "uninstall:deb": "sudo bash scripts/uninstall-deb.sh"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",

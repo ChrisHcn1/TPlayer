@@ -78,8 +78,12 @@ pub struct PlayerHandle {
     abrupt_end_streak: usize,
     /// 已预解码到引擎待命链路的下一曲 id（P2 自动连播预加载）
     preloaded_track_id: Option<String>,
-    /// 最近一次尝试预加载的曲目 id（成功/失败都记录，避免 250ms 时钟重复尝试）
+    /// 最近一次尝试预加载的曲目 id（成功/失败都记录，避免时钟重复尝试）
     preload_attempted: Option<String>,
+    /// 交叉淡化开关：自动连播时按淡出时长提前换曲，与手动切歌体验一致
+    crossfade_enabled: bool,
+    /// 交叉淡化时长（ms）
+    crossfade_ms: u64,
     /// 睡眠定时器（None = 未启用）
     sleep_timer: Option<SleepTimer>,
 }
@@ -105,6 +109,9 @@ impl PlayerHandle {
             abrupt_end_streak: 0,
             preloaded_track_id: None,
             preload_attempted: None,
+            // 与前端设置默认值一致（设置 → 播放 → 交叉淡化：启用、1s）
+            crossfade_enabled: true,
+            crossfade_ms: 1000,
             sleep_timer: None,
         }
     }
@@ -145,9 +152,10 @@ impl PlayerHandle {
     }
 
     /// 查询曲目的有效续播位置（毫秒）；无记录/无效记录/CUE 分轨返回 0（从头播）。
-    /// CUE 分轨的位置语义是文件绝对偏移、与子轨时间轴不一致，不参与续播记忆。
+    /// CUE 分轨的位置语义是文件绝对偏移、与子轨时间轴不一致，不参与续播记忆；
+    /// 且统一走 ffmpeg 输入 seek 精确定位（含首轨 cue_offset=None 但 is_cue=true）。
     fn resume_position_for(&self, track: &Track) -> u64 {
-        if track.cue_offset.is_some() {
+        if track.is_cue || track.is_sacd {
             return 0;
         }
         let Some(&pos) = self.track_positions.get(&track.id) else {
@@ -183,7 +191,7 @@ impl PlayerHandle {
         // 断点续播：曲目需仍在曲库中
         if let Some(track_id) = &state.track_id {
             if let Some(track) = self.track_map.get(track_id).cloned() {
-                if !self.track_needs_compat(&track.id) && track.cue_offset.is_none() {
+                if !self.track_needs_compat(&track.id) && track.cue_offset.is_none() && !track.is_sacd {
                     let mut position_ms = state.position_ms;
                     let duration_ms = (track.duration * 1000.0) as u64;
                     // 剩余不足 3s 视为已播完，从头开始；时长未知（0）时按原样恢复
@@ -252,6 +260,19 @@ impl PlayerHandle {
     }
 
     pub fn capabilities(&self) -> EngineCapabilities {
+        // 与 engine::NATIVE_EXT 保持一致的原生格式表。
+        // Linux：rodio 0.19 无 aac/m4a/opus 解码器，这三个扩展名不属原生
+        // （ffmpeg 可用时经 ffmpeg_formats 补入，见 engine::FFMPEG_EXT）；
+        // Windows：保持原表，行为零变化。
+        #[cfg(target_os = "linux")]
+        let mut formats = vec![
+            "mp3".to_string(),
+            "flac".to_string(),
+            "wav".to_string(),
+            "ogg".to_string(),
+            "oga".to_string(),
+        ];
+        #[cfg(not(target_os = "linux"))]
         let mut formats = vec![
             "mp3".to_string(),
             "flac".to_string(),
@@ -392,13 +413,25 @@ impl PlayerHandle {
         // FFmpeg 管道曲目由解码进程直接从目标位置起流（无跳秒），
         // 原生解码曲目先起流再定位（~150ms 内完成，听感无感知）
         let gain = self.replaygain_of(track);
-        let cue_range = track.cue_offset.map(|start| (start, track.duration));
+        // CUE 分轨：每轨都带上 (起点, 时长) 区间。首轨 cue_offset 为 None，但起点即 0，
+        // 仍需时长——引擎据此用 ffmpeg 的 -ss/-t 精确播放该轨并在轨末自动连播；
+        // 缺了时长首轨会把整个镜像播完。普通曲目 / SACD 不设区间。
+        let cue_range = if track.is_cue {
+            Some((track.cue_offset.unwrap_or(0.0), track.duration))
+        } else {
+            None
+        };
+        let sacd_idx = if track.is_sacd {
+            Some(track.sacd_track_index)
+        } else {
+            None
+        };
         let play_result = if resume_ms > 0 {
             self.engine
                 .play_at(std::path::PathBuf::from(&track.file_path), resume_ms, gain)
         } else {
             self.engine
-                .play(std::path::PathBuf::from(&track.file_path), gain, cue_range)
+                .play(std::path::PathBuf::from(&track.file_path), gain, cue_range, sacd_idx)
         };
         match play_result {
             Ok(_) => {
@@ -766,11 +799,26 @@ impl PlayerHandle {
                 .get(&track_id)
                 .cloned()
                 .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", track_id)))?;
+            let sacd_idx = if track.is_sacd {
+                Some(track.sacd_track_index)
+            } else {
+                None
+            };
+            // CUE 分轨恢复：以"cue_offset + 当前拖动位置"为起点、剩余时长为时长，
+            // 避免从整张镜像开头播放；SACD 不设区间（整轨 DSF 由引擎 seek 定位）。
+            let range = if track.is_cue {
+                let start = track.cue_offset.unwrap_or(0.0) + position_ms as f64 / 1000.0;
+                let dur = (track.duration - position_ms as f64 / 1000.0).max(0.0);
+                Some((start, dur))
+            } else {
+                None
+            };
             self.engine
                 .play(
                     std::path::PathBuf::from(&track.file_path),
                     self.replaygain_of(&track),
-                    None,
+                    range,
+                    sacd_idx,
                 )?;
             self.needs_engine_load = false;
         }
@@ -842,8 +890,12 @@ impl PlayerHandle {
         Ok(())
     }
 
-    /// 下发交叉淡化参数到引擎线程（启用开关 + 时长毫秒）
+    /// 下发交叉淡化参数到引擎线程（启用开关 + 时长毫秒）。
+    /// 状态机同时留存该配置：自动连播据此提前一个淡出时长换曲，
+    /// 使新曲淡入与旧曲淡出重叠，消除续播静音间隔。
     pub fn set_crossfade(&mut self, enabled: bool, duration_ms: u64) -> AppResult<()> {
+        self.crossfade_enabled = enabled;
+        self.crossfade_ms = duration_ms;
         self.engine.set_crossfade(enabled, duration_ms);
         Ok(())
     }
@@ -968,17 +1020,32 @@ impl PlayerHandle {
 
             let dur = self.snapshot.duration_ms;
 
-            // P2 自动连播预加载：剩余时长 < 提前量且尚未预加载下一曲时提前解码
+            // P2 自动连播预加载：在交叉淡化窗口开始之前完成下一曲解码
+            // （提前量取「3s」与「淡出时长 + 1s」的较大值，保证换曲点时待命链路已就绪）
             if self.preloaded_track_id.is_none() {
                 let remaining = dur.saturating_sub(pos);
-                if remaining <= PRELOAD_LEAD_MS {
-                    self.maybe_preload_next(app);
+                let lead = PRELOAD_LEAD_MS.max(self.crossfade_ms.saturating_add(1000));
+                if remaining <= lead {
+                    self.maybe_preload_next();
                 }
             }
 
-            // 正常播完：位置达到时长即结束（旧版 pos+300>=dur 会导致无损曲目被提前
-            // 截断 ~300ms；现在严格 >= dur，时长未精确匹配时由 sink_drained 兜底）
-            let reached_duration = dur > 0 && pos >= dur;
+            // 自动连播换曲点：启用交叉淡化时提前一个淡出时长触发，让新曲淡入与
+            // 旧曲淡出重叠——与手动切歌走同一引擎路径（swap_to_next / play 的交叉淡化），
+            // 从而消除自动续播的静音间隔；未启用时仍在曲末触发，残余间隔由 50ms
+            // 时钟压在感知阈值内。淡出时长按半曲长封顶，避免短曲被过早切走。
+            // 例外：睡眠定时器"播完当前曲目后停止"已触发时按真实曲末结束，
+            // 保证语义（不会提前 ~1s 停止）。
+            let sleep_waiting = matches!(
+                &self.sleep_timer,
+                Some(st) if st.fired && st.wait_track_end
+            );
+            let crossfade_ms = if self.crossfade_enabled && !sleep_waiting {
+                self.crossfade_ms.min(dur / 2)
+            } else {
+                0
+            };
+            let reached_duration = dur > 0 && pos >= dur.saturating_sub(crossfade_ms);
             // 兜底：时长未知（0）或解码器中途退出（如 ffmpeg 缺失/秒退）时，
             // sink 已排空即视为结束。600ms 宽限避免起流瞬间误判。
             let grace_passed = self
@@ -1105,9 +1172,10 @@ impl PlayerHandle {
         }
     }
 
-    /// 预加载下一曲：仅读取下一曲 id（不推进 index），成功则记录 preloaded_track_id 并推送事件。
-    /// preload_attempted 记录最近一次尝试（含失败），避免 250ms 时钟重复尝试同一曲目。
-    fn maybe_preload_next(&mut self, app: &AppHandle) {
+    /// 预加载下一曲：仅读取下一曲 id（不推进 index），成功则记录 preloaded_track_id。
+    /// 预加载是内部优化（无缝衔接），不向前端推送任何事件。
+    /// preload_attempted 记录最近一次尝试（含失败），避免时钟重复尝试同一曲目。
+    fn maybe_preload_next(&mut self) {
         let Some(next_id) = self.peek_next_track_id() else {
             return;
         };
@@ -1128,20 +1196,28 @@ impl PlayerHandle {
             return;
         }
         self.preload_attempted = Some(next_id.clone());
-        let cue_range = track.cue_offset.map(|start| (start, track.duration));
+        // 与 play 保持一致：CUE 分轨每轨都带 (起点, 时长) 区间（首轨起点为 0 也带时长），
+        // 使预加载/无缝衔接同样走 ffmpeg 输入 seek，避免 rodio try_seek 竞态导致从头播。
+        let cue_range = if track.is_cue {
+            Some((track.cue_offset.unwrap_or(0.0), track.duration))
+        } else {
+            None
+        };
+        let sacd_idx = if track.is_sacd {
+            Some(track.sacd_track_index)
+        } else {
+            None
+        };
         match self.engine.preload(
             std::path::PathBuf::from(&track.file_path),
             self.replaygain_of(&track),
             cue_range,
+            sacd_idx,
         ) {
             Ok(()) => {
-                self.preloaded_track_id = Some(next_id.clone());
-                emit(
-                    app,
-                    PlaybackEvent::NextPreloaded {
-                        track_id: next_id,
-                    },
-                );
+                // 预加载成功即进入待命链路；不向前端推送事件——
+                // 预加载是内部优化，无需在界面上提示「正在准备下一首」
+                self.preloaded_track_id = Some(next_id);
             }
             Err(e) => {
                 // 预加载失败：切歌时走普通 play（play_or_skip 会处理跳过）
@@ -1255,14 +1331,17 @@ impl Default for PlayerHandle {
     }
 }
 
-/// 启动 250ms 进度时钟线程
+/// 启动进度时钟线程。
+///
+/// 步进 50ms：自动连播的换曲判定精度直接决定续播间隔（250ms 步进会在曲末留下
+/// 可感知的静音），50ms 已低于人耳对「接缝」的感知阈值，开销可忽略。
 pub fn spawn_progress_clock(
     handle: Arc<Mutex<PlayerHandle>>,
     app: AppHandle,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(std::time::Duration::from_millis(50));
             {
                 if let Ok(mut h) = handle.lock() {
                     h.tick(&app);

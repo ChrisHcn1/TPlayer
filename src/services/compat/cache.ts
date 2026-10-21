@@ -3,7 +3,13 @@
  *
  * 两级：会话内内存 Map（最快）+ IndexedDB（跨会话持久）。
  * 正常文件根本不进入兜底流程，因此缓存只承载「被兜底过」的稀有文件，体积可控。
+ *
+ * 命名隔离（Linux 桌面端）：数据库名按平台分支——Linux 桌面端为
+ * `tplayer-compat`，Windows 桌面端与浏览器预览保持 `tplayer-next-compat`，
+ * 与旧缓存天然隔离、互不影响（见 utils/platform）。
  */
+import { STORAGE_KEY_PREFIX } from '../../utils/platform'
+
 export interface CacheEntry {
   wav: Blob
   sampleRate: number
@@ -13,7 +19,7 @@ export interface CacheEntry {
   modifiedAt: number
 }
 
-const DB_NAME = 'tplayer-next-compat'
+const DB_NAME = `${STORAGE_KEY_PREFIX}-compat`
 const STORE = 'wav'
 // v4: 丢弃 durationMs=0 的坏缓存（fallback 路径 Worker 曾在部分格式上计算出 0 时长）
 const DB_VERSION = 4

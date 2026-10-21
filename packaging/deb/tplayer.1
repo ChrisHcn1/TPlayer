@@ -1,0 +1,44 @@
+.TH TPLAYER 1 "2026-10-17" "@VERSION@" "TPlayer Manual"
+.SH NAME
+tplayer \- 本地优先的桌面音乐播放器
+.SH SYNOPSIS
+.B tplayer
+[\fIFILE\fR\ ...]
+.SH DESCRIPTION
+TPlayer 是本地优先的桌面音乐播放器：曲库数据与在线能力解耦，在线模块默认关闭，
+且默认不上传本地曲库信息。原生支持 MP3/FLAC/WAV/AAC/OGG/Opus 等格式；
+APE/DSD/DTS/WMA/WV/TTA/TAK/AIFF 等经由 FFmpeg 解码。
+.PP
+所有曲库数据（曲目库、设置、播放进度、歌词偏移）仅保存在本机用户目录，不上传。
+.SH OPTIONS
+.TP
+\fIFILE\fR\ ...
+可选：启动时直接打开（播放）给定的音频文件。
+.SH FILES
+.TP
+.I ~/.local/share/com.tplayer/library.db
+曲库数据库（SQLite）。
+.TP
+.I ~/.local/share/com.tplayer/config.json
+应用设置。
+.TP
+.I ~/.local/share/com.tplayer/playback_state.json
+播放状态与断点（音量/播放模式/队列/进度）。
+.TP
+.I ~/.local/share/com.tplayer/track_positions.json
+按曲目的续播位置表。
+.TP
+.I ~/.local/share/com.tplayer/cover-cache/
+封面磁盘缓存。
+.SH ENVIRONMENT
+.TP
+.B PATH
+未随包分发 FFmpeg 时，按 \fBPATH\fR 查找系统 \fBffmpeg\fR/\fBffprobe\fR
+用于解码 APE/DSD/DTS 等格式与探测时长。
+.SH EXIT STATUS
+.TP
+.B 0
+正常退出。
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR dpkg (8)

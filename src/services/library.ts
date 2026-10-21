@@ -40,6 +40,8 @@ export interface LibraryService {
   stats(): Promise<LibraryStats>
   /** CUE 分轨专辑（普通专辑视图之外的独立集合） */
   cueAlbums(): Promise<Album[]>
+  /** SACD ISO 分轨专辑（普通专辑视图之外的独立集合） */
+  sacdAlbums(): Promise<Album[]>
   favoriteIds(): Promise<string[]>
   setFavorite(trackId: string, favorite: boolean): Promise<void>
   recent(): Promise<RecentEntry[]>
@@ -75,6 +77,7 @@ const tauriLibrary: LibraryService = {
   artists: () => callCommand<Artist[]>('library_artists'),
   stats: () => callCommand<LibraryStats>('library_stats'),
   cueAlbums: () => callCommand<Album[]>('library_cue_albums'),
+  sacdAlbums: () => callCommand<Album[]>('library_sacd_albums'),
   favoriteIds: () => callCommand<string[]>('library_favorite_ids'),
   setFavorite: (trackId, favorite) =>
     callCommand('library_set_favorite', { trackId, favorite }),

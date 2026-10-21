@@ -17,6 +17,8 @@ interface AlbumSeed {
   year: number
   /** CUE 分轨专辑（id 以 cue- 开头，CueAlbums 视图据此与普通专辑区分） */
   cue?: boolean
+  /** SACD ISO 虚拟专辑（id 以 sacd- 开头，SacdAlbums 视图据此与普通专辑区分） */
+  sacd?: boolean
   titles: string[]
 }
 
@@ -104,6 +106,14 @@ const ALBUM_SEEDS: AlbumSeed[] = [
     cue: true,
     titles: ['Intro — 调音', '林墨 / 夜航（Live）', '苏野 / 折叠城市（Live）', '陈栖 / 溪声（Live）', 'Aurora Lane / Blue Hour（Live）', '合奏 / 无名灯塔', 'Outro — 谢幕'],
   },
+  {
+    id: 'sacd-1',
+    name: 'Black Rain（SACD）',
+    artist: 'Kenji Moreau',
+    year: 2023,
+    sacd: true,
+    titles: ['Overture', 'Black Rain', 'Neon Drift', 'Silent Circuit', 'Afterglow', 'Resonance'],
+  },
 ]
 
 const FORMATS = ['flac', 'mp3', 'm4a', 'wav', 'ogg'] as const
@@ -137,6 +147,7 @@ function buildTracks(): Track[] {
         hasCover: seq % 4 !== 0,
         addedAt: BASE_TIME + seq * 86_400,
         modifiedAt: BASE_TIME + seq * 86_400,
+        isSacd: seed.sacd === true,
       })
     })
   }
@@ -153,6 +164,9 @@ const ALL_TRACKS = buildTracks()
 
 /** CUE 专辑 id 集合（mock 约定：以 cue- 前缀标识） */
 export const CUE_ALBUM_IDS = new Set(ALBUM_SEEDS.filter((seed) => seed.cue).map((seed) => seed.id))
+
+/** SACD 专辑 id 集合（mock 约定：以 sacd- 前缀标识） */
+export const SACD_ALBUM_IDS = new Set(ALBUM_SEEDS.filter((seed) => seed.sacd).map((seed) => seed.id))
 
 export function getAllTracks(): Track[] {
   return ALL_TRACKS

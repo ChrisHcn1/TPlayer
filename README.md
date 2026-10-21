@@ -85,11 +85,12 @@ npm run build:win
 
 **FFmpeg 运行时依赖（已内置，用户零配置）**
 
-`bin/ffmpeg.exe`、`bin/ffprobe.exe` 为 gyan.dev ffmpeg 6.1.1 **essentials
-静态构建**（单文件、零外部 DLL 依赖，合计约 158MB；安装包经 NSIS 压缩后
-增量约 60MB），覆盖 wma/ape/wv/tta/tak/dsf/dff/dts/aiff 等 rodio 原生格式
-之外的解码与时长探测。两个 exe 通过 `bundle.resources` 随安装包释放到安装
-目录 `bin/`，用户无需自行安装 FFmpeg。
+`bin/ffmpeg.exe`、`bin/ffprobe.exe` 为 **完整**静态构建（含 `dff` 解复用器与
+`dsd` 滤镜，故 DSD/DFF 均可解码；若改用 gyan.dev essentials 等精简构建则缺
+这两项，DFF 将不可用），单文件、零外部 DLL 依赖，合计约 158MB；安装包经 NSIS
+压缩后增量约 60MB，覆盖 wma/ape/wv/tta/tak/dsf/dff/dts/aiff 等 rodio 原生
+格式之外的解码与时长探测。两个 exe 通过 `bundle.resources` 随安装包释放到
+安装目录 `bin/`，用户无需自行安装 FFmpeg。
 
 > 必须使用**静态构建**（static build）。共享库构建（shared build）的
 > `ffmpeg.exe` 仅约 0.6MB，但运行时依赖同目录 `avcodec-*.dll`、
@@ -113,6 +114,45 @@ GitHub Actions（`.github/workflows/release.yml`）会自动构建、签名、
 
 > 三处版本号发布前保持一致：`package.json` / `src-tauri/Cargo.toml` /
 > `src-tauri/tauri.conf.json`。
+
+## 打包与发布（Linux，DEB）
+
+产物为 Debian/Ubuntu 原生 `.deb`（dpkg 原生工具链，不依赖第三方打包技术）：
+
+```bash
+./scripts/build-deb.sh                 # amd64/arm64，默认前缀 /usr，版本取 package.json
+sudo ./scripts/install-deb.sh          # 安装（apt 自动解析依赖）
+sudo ./scripts/uninstall-deb.sh        # 卸载（purge，保留用户数据）
+```
+
+安装后命令为 `tplayer`（包名 `tplayer`，桌面入口 `com.tplayer.desktop`）。
+
+**FFmpeg 运行时依赖（Linux）**
+
+Linux 侧 FFmpeg 不能使用 `bin/` 下的 Windows 版 `ffmpeg.exe`。二选一：
+
+1. **随包分发（推荐，用户零配置）**：把 Linux 版静态构建放到 `bin/linux/`
+   （`ffmpeg` + `ffprobe` 两个 ELF 文件）——
+
+   ```bash
+   ./scripts/fetch-linux-ffmpeg.sh     # 自动下载静态构建并校验 ELF/架构/解码器
+   ```
+
+   `build-deb.sh` 检测到该目录即默认随包分发（安装到 `/usr/lib/tplayer/bin`），
+   覆盖 ape/wv/tta/dsf/dts/aiff 等 rodio 原生格式之外的解码与时长探测
+   （含封装于 .m4a 的 Apple Lossless）。开发期从源码树运行时，引擎沿可执行
+   文件祖先目录查找 `bin/linux`，无需安装系统 ffmpeg。
+
+   默认源为 PyPI 的 imageio-ffmpeg（内含 johnvansickle **完整**静态构建，
+   经 pypi.org 可达），完全静态链接、无 glibc 依赖、各发行版直接运行，约 70MB。
+   该构建含 `dff` 解复用器与 `dsd` 滤镜，因此 **DFF（DSDIFF）可正常解码播放**；
+   引擎对 DSD 文件（dff/dsf）会自动注入 `ffmpeg -af dsd` 完成 DSD→PCM 转换
+   （见 src-tauri/src/player/engine.rs 的 is_dsd_format / spawn_ffmpeg_decoder）。
+2. **系统 ffmpeg**：不放置 `bin/linux` 时，DEB 自动 `Depends: ffmpeg`，
+   由 apt 安装解决。
+
+> `bin/linux/` 与其它运行时资源一样按需注入、默认不入库；需要随仓库分发时
+> 再自行提交（注意体积约 130MB）。
 
 ## 文档索引
 

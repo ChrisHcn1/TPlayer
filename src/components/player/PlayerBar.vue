@@ -43,7 +43,7 @@ const {
   openNowPlaying,
 } = useLayout()
 const { openAt } = useContextMenu()
-const { snapshot, nextReady, sleepTimer } = storeToRefs(playerStore)
+const { snapshot, sleepTimer } = storeToRefs(playerStore)
 const { coverUrl } = useTrackCover(() => snapshot.value.trackId)
 
 const track = computed(() => libraryStore.getTrack(snapshot.value.trackId))
@@ -153,9 +153,10 @@ function openModeMenu(event: MouseEvent): void {
 
 function openAlbum(): void {
   if (!track.value?.albumId) return
-  const cueIds = new Set(libraryStore.cueAlbums.map((album) => album.id))
-  if (cueIds.has(track.value.albumId)) router.push(`/cue/${track.value.albumId}`)
-  else router.push(`/albums/${track.value.albumId}`)
+  const id = track.value.albumId
+  if (libraryStore.cueAlbums.some((album) => album.id === id)) router.push(`/cue/${id}`)
+  else if (libraryStore.sacdAlbums.some((album) => album.id === id)) router.push(`/cue/${id}`)
+  else router.push(`/albums/${id}`)
 }
 
 function openArtist(): void {
@@ -257,10 +258,6 @@ function openArtist(): void {
           <Icon name="next" :size="20" />
         </button>
       </div>
-      <p v-if="nextReady" class="transport__preload" role="status" aria-live="polite">
-        <Icon name="loader" :size="10" spin />
-        下一首准备中
-      </p>
       <div class="transport__timeline">
         <ProgressBar
           :position-ms="snapshot.positionMs"
@@ -515,23 +512,6 @@ function openArtist(): void {
   gap: 1px;
   align-self: stretch;
   min-width: 0;
-}
-
-.transport__preload {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 2px 0 0;
-  padding: 2px 8px;
-  font-size: 10px;
-  line-height: 1;
-  color: var(--color-text-tertiary);
-  background-color: var(--color-bg-hover);
-  border-radius: var(--radius-full);
-}
-
-.transport__preload :deep(.icon) {
-  display: inline-flex;
 }
 
 .transport__timeline :deep(.progress) {

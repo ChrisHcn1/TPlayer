@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 
 use super::db;
-use super::models::{album_id_of, Album, Artist, LibraryStats, Playlist, RecentEntry, Track};
+use super::models::{
+    album_id_of, Album, Artist, LibraryStats, Playlist, RecentEntry, Track,
+};
 
 /// 旧版 library.json 的完整结构（仅用于首次迁移反序列化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,57 @@ pub struct LibraryStore {
     conn: Connection,
 }
 
+/// SQL 表达式：`file_path` 的目录部分（统一 '/' 分隔符）
+fn sql_dir_expr(path_expr: &str) -> String {
+    let norm = format!("replace({path_expr}, '\\', '/')");
+    format!("rtrim({norm}, replace({norm}, '/', ''))")
+}
+
+/// SQL 表达式：`file_path` 的文件名部分（去掉最后一个扩展名）
+fn sql_stem_expr(path_expr: &str) -> String {
+    let dir = sql_dir_expr(path_expr);
+    let rest = format!("substr({path_expr}, length({dir}) + 1)");
+    format!("rtrim({rest}, replace({rest}, '.', ''))")
+}
+
+/// 「CUE 结构大文件」去重条件（作用于 `tracks` 的别名 `t`）。
+///
+/// CUE 会在「分轨专辑」页展示整碟镜像拆出的分轨；同一张碟的整碟大文件
+/// （ape / flac 等）不应再作为独立曲目出现在「全部歌曲 / 专辑 / 艺术家」等
+/// 普通列表里，否则用户看到的是同一张碟的两份条目。
+///
+/// 判定「属于同一张碟」的三种依据（任一命中即视为重复）：
+///  1. 路径完全相同（CUE 直接引用的那个镜像文件）；
+///  2. 同目录 + 同基名（`Album.flac` / `Album.ape` 这类同碟副本）；
+///  3. 同目录 + 同专辑名（镜像文件名与 CUE 源文件不同名的情况，
+///     如 `Mozart.-.[…].ape` 与 `Volume 1(CD6).flac`）。
+///
+/// 分轨本身（`is_cue = 1`）始终保留；比较忽略大小写
+/// （Windows / macOS 文件系统不区分大小写）。
+fn not_cue_source() -> String {
+    let c_dir = sql_dir_expr("c.file_path");
+    let t_dir = sql_dir_expr("t.file_path");
+    let c_stem = sql_stem_expr("c.file_path");
+    let t_stem = sql_stem_expr("t.file_path");
+    format!(
+        "(
+    t.is_cue = 1
+    OR NOT EXISTS (
+        SELECT 1 FROM tracks c
+        WHERE c.is_cue = 1
+          AND c.id <> t.id
+          AND (
+                c.file_path = t.file_path COLLATE NOCASE
+             OR ({c_dir} = {t_dir} COLLATE NOCASE AND {c_stem} = {t_stem} COLLATE NOCASE)
+             OR ({c_dir} = {t_dir} COLLATE NOCASE
+                 AND trim(c.album) <> '' AND trim(t.album) <> ''
+                 AND lower(trim(c.album)) = lower(trim(t.album)))
+          )
+    )
+)"
+    )
+}
+
 impl LibraryStore {
     /// 打开数据库；首次运行（无 schema_version）时从旧 library.json 迁移
     pub fn open(db_path: PathBuf, legacy_json_path: PathBuf) -> AppResult<Self> {
@@ -72,10 +125,12 @@ impl LibraryStore {
     }
 
     pub fn tracks(&self) -> Vec<Track> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM tracks ORDER BY added_at, id")
-            .expect("prepare tracks");
+        // 过滤被 CUE 分轨引用的整碟大文件（同一张碟不重复展示）
+        let cue_cond = not_cue_source();
+        let sql = format!(
+                "SELECT t.* FROM tracks t WHERE {cue_cond} ORDER BY t.added_at, t.id"
+        );
+        let mut stmt = self.conn.prepare(&sql).expect("prepare tracks");
         let rows = stmt
             .query_map([], row_to_track)
             .expect("query tracks");
@@ -106,13 +161,13 @@ impl LibraryStore {
 
     /// 专辑（含 CUE 分轨专辑）下全部曲目，按音轨号升序
     pub fn tracks_of_album(&self, album_id: &str) -> Vec<Track> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT * FROM tracks WHERE album_id = ?1
-                 ORDER BY COALESCE(track_number, 2147483647), id",
-            )
-            .expect("prepare tracks_of_album");
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            "SELECT t.* FROM tracks t
+                  WHERE t.album_id = ?1 AND {cue_cond}
+             ORDER BY COALESCE(t.track_number, 2147483647), t.id"
+        );
+        let mut stmt = self.conn.prepare(&sql).expect("prepare tracks_of_album");
         stmt.query_map([album_id], row_to_track)
             .expect("query tracks_of_album")
             .flatten()
@@ -121,15 +176,14 @@ impl LibraryStore {
 
     /// 艺术家参与（任一阵位）的全部曲目，与前端 artists.includes 口径一致
     pub fn tracks_of_artist(&self, artist: &str) -> Vec<Track> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT t.* FROM tracks t
-                 JOIN track_artists ta ON ta.track_id = t.id
-                 WHERE ta.artist = ?1
-                 ORDER BY t.album, COALESCE(t.track_number, 2147483647), t.id",
-            )
-            .expect("prepare tracks_of_artist");
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            "SELECT t.* FROM tracks t
+             JOIN track_artists ta ON ta.track_id = t.id
+                  WHERE ta.artist = ?1 AND {cue_cond}
+             ORDER BY t.album, COALESCE(t.track_number, 2147483647), t.id"
+        );
+        let mut stmt = self.conn.prepare(&sql).expect("prepare tracks_of_artist");
         stmt.query_map([artist], row_to_track)
             .expect("query tracks_of_artist")
             .flatten()
@@ -140,13 +194,16 @@ impl LibraryStore {
     /// 分组封面候选曲目（封面聚合命令用）：
     /// 扫描期确认带内嵌封面的优先，其次音轨号升序，上限 30 首。
     pub fn cover_candidates_of_album(&self, album_id: &str, limit: usize) -> Vec<Track> {
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            "SELECT t.* FROM tracks t
+                  WHERE t.album_id = ?1 AND {cue_cond}
+             ORDER BY t.has_cover DESC, COALESCE(t.track_number, 2147483647), t.id
+             LIMIT ?2"
+        );
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT * FROM tracks WHERE album_id = ?1
-                 ORDER BY has_cover DESC, COALESCE(track_number, 2147483647), id
-                 LIMIT ?2",
-            )
+            .prepare(&sql)
             .expect("prepare cover_candidates_of_album");
         stmt.query_map(params![album_id, limit as i64], row_to_track)
             .expect("query cover_candidates_of_album")
@@ -155,15 +212,17 @@ impl LibraryStore {
     }
 
     pub fn cover_candidates_of_artist(&self, artist: &str, limit: usize) -> Vec<Track> {
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            "SELECT DISTINCT t.* FROM tracks t
+             JOIN track_artists ta ON ta.track_id = t.id
+                  WHERE ta.artist = ?1 AND {cue_cond}
+             ORDER BY t.has_cover DESC, COALESCE(t.track_number, 2147483647), t.id
+             LIMIT ?2"
+        );
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT DISTINCT t.* FROM tracks t
-                 JOIN track_artists ta ON ta.track_id = t.id
-                 WHERE ta.artist = ?1
-                 ORDER BY t.has_cover DESC, COALESCE(t.track_number, 2147483647), t.id
-                 LIMIT ?2",
-            )
+            .prepare(&sql)
             .expect("prepare cover_candidates_of_artist");
         stmt.query_map(params![artist, limit as i64], row_to_track)
             .expect("query cover_candidates_of_artist")
@@ -223,26 +282,31 @@ impl LibraryStore {
     }
 
     pub fn stats(&self) -> LibraryStats {
+        // 统计口径与列表一致：排除被 CUE 分轨引用的整碟大文件
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(duration), 0.0),
+                                COUNT(DISTINCT album_id) FROM tracks t WHERE {cue_cond}"
+        );
         let (track_count, total_duration, album_count) = self
             .conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(duration), 0.0),
-                        COUNT(DISTINCT album_id) FROM tracks",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as u32,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, i64>(2)? as u32,
-                    ))
-                },
-            )
+            .query_row(&sql, [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u32,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(2)? as u32,
+                ))
+            })
             .unwrap_or((0, 0.0, 0));
+        let cue_cond = not_cue_source();
+        let artist_count_sql = format!(
+            "SELECT COUNT(DISTINCT ta.artist) FROM track_artists ta
+             JOIN tracks t ON t.id = ta.track_id
+                  WHERE {cue_cond}"
+        );
         let artist_count = self
             .conn
-            .query_row("SELECT COUNT(DISTINCT artist) FROM track_artists", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(&artist_count_sql, [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) as u32;
         let last_scan_at = db::get_meta(&self.conn, "last_scan_at")
             .and_then(|value| value.parse::<i64>().ok());
@@ -259,35 +323,50 @@ impl LibraryStore {
     /// 按专辑聚合：每组取音轨号最小者为代表（artists/year）。
     /// `cue_only = true` 时只返回 CUE 分轨专辑，否则只返回普通专辑，
     /// 二者互不重叠（由 tracks.is_cue 区分）。
-    fn albums_filtered(&self, cue_only: bool) -> Vec<Album> {
-        let sql = r#"
-            WITH ranked AS (
+    /// 专辑聚合模式：normal=普通专辑（排除 CUE / SACD 虚拟专辑），
+    /// cue=CUE 分轨专辑，sacd=SACD ISO 分轨专辑（三者互不重叠）。
+    fn albums_filtered(&self, mode: &str) -> Vec<Album> {
+        // normal 模式额外排除「被 CUE 分轨引用的整碟大文件」所在专辑，
+        // 避免同一张碟既出现在分轨专辑页、又以整碟形式出现在普通专辑页。
+        let cue_cond = not_cue_source();
+        let where_clause = match mode {
+            "cue" => "t.is_cue = 1".to_string(),
+            "sacd" => "t.is_sacd = 1".to_string(),
+            _ => format!("t.is_cue = 0 AND t.is_sacd = 0 AND {cue_cond}"),
+        };
+        let sql = format!(
+            r#"
+            WITH base AS (
+                SELECT t.* FROM tracks t
+                WHERE t.album_id IS NOT NULL AND {where_clause}
+            ),
+            ranked AS (
                 SELECT
-                    album_id, album, artists_json, year, is_cue,
+                    album_id, album, artists_json, year, is_cue, is_sacd,
                     ROW_NUMBER() OVER (
                         PARTITION BY album_id
                         ORDER BY COALESCE(track_number, 2147483647), id
                     ) AS rn,
                     COUNT(*)     OVER (PARTITION BY album_id) AS tc,
                     MAX(has_cover) OVER (PARTITION BY album_id) AS hc
-                FROM tracks
-                WHERE album_id IS NOT NULL
+                FROM base
             )
-            SELECT album_id, album, artists_json, year, is_cue, tc, hc
+            SELECT album_id, album, artists_json, year, is_cue, is_sacd, tc, hc
             FROM ranked
-            WHERE rn = 1 AND is_cue = ?1
+            WHERE rn = 1
             ORDER BY album
-        "#;
-        let flag = if cue_only { 1i64 } else { 0i64 };
-        let mut stmt = self.conn.prepare(sql).expect("prepare albums");
-        stmt.query_map([flag], |row| {
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql).expect("prepare albums");
+        stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let artists_json: String = row.get(2)?;
             let year: Option<i64> = row.get(3)?;
             let is_cue: i64 = row.get(4)?;
-            let track_count: i64 = row.get(5)?;
-            let has_cover: i64 = row.get(6)?;
+            let is_sacd: i64 = row.get(5)?;
+            let track_count: i64 = row.get(6)?;
+            let has_cover: i64 = row.get(7)?;
             let artists = serde_json::from_str::<Vec<String>>(&artists_json).unwrap_or_default();
             Ok(Album {
                 id,
@@ -297,6 +376,7 @@ impl LibraryStore {
                 track_count: track_count as u32,
                 has_cover: has_cover != 0,
                 is_cue: is_cue != 0,
+                is_sacd: is_sacd != 0,
             })
         })
         .expect("query albums")
@@ -304,28 +384,37 @@ impl LibraryStore {
         .collect()
     }
 
-    /// 普通专辑（不含 CUE 分轨专辑；CUE 由独立入口承载）
+    /// 普通专辑（不含 CUE / SACD 分轨专辑；虚拟专辑由独立入口承载）
     pub fn albums(&self) -> Vec<Album> {
-        self.albums_filtered(false)
+        self.albums_filtered("normal")
     }
 
     /// CUE 分轨专辑（整盘镜像拆出的虚拟专辑）
     pub fn cue_albums(&self) -> Vec<Album> {
-        self.albums_filtered(true)
+        self.albums_filtered("cue")
+    }
+
+    /// SACD ISO 分轨专辑（整张 ISO 拆出的虚拟多轨专辑）
+    pub fn sacd_albums(&self) -> Vec<Album> {
+        self.albums_filtered("sacd")
     }
 
     /// 按艺术家聚合（曲目数 / 去重专辑数）
     pub fn artists(&self) -> Vec<Artist> {
-        let sql = r#"
+        let cue_cond = not_cue_source();
+        let sql = format!(
+            r#"
             SELECT ta.artist,
                    COUNT(DISTINCT ta.track_id) AS track_count,
                    COUNT(DISTINCT t.album_id)  AS album_count
             FROM track_artists ta
             JOIN tracks t ON t.id = ta.track_id
+                WHERE {cue_cond}
             GROUP BY ta.artist
             ORDER BY ta.artist
-        "#;
-        let mut stmt = self.conn.prepare(sql).expect("prepare artists");
+        "#
+        );
+        let mut stmt = self.conn.prepare(&sql).expect("prepare artists");
         stmt.query_map([], |row| {
             let name: String = row.get(0)?;
             let track_count: i64 = row.get(1)?;
@@ -681,6 +770,14 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         modified_at: row.get("modified_at")?,
         is_cue: row.get::<_, i64>("is_cue").unwrap_or(0) != 0,
         cue_offset: row.get::<_, Option<f64>>("cue_offset")?,
+        is_sacd: row.get::<_, i64>("is_sacd").unwrap_or(0) != 0,
+        sacd_track_index: row
+            .get::<_, Option<i64>>("sacd_track_index")?
+            .unwrap_or(0) as u32,
+        sacd_area: row
+            .get::<_, Option<String>>("sacd_area")?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        sacd_dsd_rate: row.get::<_, Option<String>>("sacd_dsd_rate")?,
     })
 }
 
@@ -696,8 +793,8 @@ fn upsert_track(
             id, title, album, album_id, duration, track_number, year,
             file_path, file_size, format, bitrate, sample_rate,
             has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json,
-            is_cue, cue_offset
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+            is_cue, cue_offset, is_sacd, sacd_track_index, sacd_area, sacd_dsd_rate
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
         ON CONFLICT(id) DO UPDATE SET
             title       = excluded.title,
             album       = excluded.album,
@@ -716,7 +813,11 @@ fn upsert_track(
             modified_at = excluded.modified_at,
             artists_json= excluded.artists_json,
             is_cue      = excluded.is_cue,
-            cue_offset  = excluded.cue_offset
+            cue_offset  = excluded.cue_offset,
+            is_sacd     = excluded.is_sacd,
+            sacd_track_index = excluded.sacd_track_index,
+            sacd_area   = excluded.sacd_area,
+            sacd_dsd_rate = excluded.sacd_dsd_rate
         "#,
         params![
             track.id,
@@ -739,6 +840,10 @@ fn upsert_track(
             artists_json,
             track.is_cue as i64,
             track.cue_offset,
+            track.is_sacd as i64,
+            track.sacd_track_index as i64,
+            track.sacd_area.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default()),
+            track.sacd_dsd_rate,
         ],
     )
     .map_err(|e| AppError::Library(format!("写入曲目失败: {e}")))?;
@@ -870,4 +975,100 @@ fn migrate_legacy_json(conn: &mut Connection, legacy_json_path: &std::path::Path
         eprintln!("[library] 备份旧 library.json 失败: {e}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 内存库（建表 + 结构迁移，与真实库一致）
+    fn test_store() -> LibraryStore {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::init_schema(&conn).expect("init schema");
+        db::migrate(&conn).expect("migrate schema");
+        LibraryStore { conn }
+    }
+
+    /// 插入一条曲目（仅测试所需字段）
+    fn insert_track(store: &LibraryStore, id: &str, path: &str, album: &str, is_cue: bool) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(id, title, album, duration, file_path, file_size, format,
+                                    added_at, modified_at, artists_json, is_cue)
+                 VALUES(?1, ?2, ?3, 0.0, ?4, 0, 'flac', 0, 0, '[]', ?5)",
+                params![id, id, album, path, is_cue as i64],
+            )
+            .expect("insert track");
+    }
+
+    fn ids(store: &LibraryStore) -> Vec<String> {
+        let mut stmt = store.conn.prepare("SELECT id FROM tracks ORDER BY id").unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.flatten().collect()
+    }
+
+    /// 「全部歌曲」查询应隐藏整碟镜像
+    fn visible_ids(store: &LibraryStore) -> Vec<String> {
+        store.tracks().into_iter().map(|t| t.id).collect()
+    }
+
+    /// 同目录同基名的整碟副本（.ape / .flac）不应出现在普通列表
+    #[test]
+    fn tracks_query_hides_same_stem_mirror() {
+        let store = test_store();
+        insert_track(&store, "cue1", r"G:\music\Album.flac", "Album", true);
+        insert_track(&store, "mirror", r"G:\music\Album.ape", "Album", false);
+        insert_track(&store, "other", r"G:\music\Other.mp3", "Other", false);
+
+        assert_eq!(visible_ids(&store), vec!["cue1".to_string(), "other".to_string()]);
+    }
+
+    /// 镜像文件名与 CUE 源文件不同名、但同目录同专辑名 → 同样隐藏
+    #[test]
+    fn tracks_query_hides_same_album_mirror() {
+        let store = test_store();
+        insert_track(&store, "cue1", r"G:\music\Volume 1(CD6).flac", "Volume 1(CD6)", true);
+        insert_track(
+            &store,
+            "mirror",
+            r"G:\music\Mozart.-.[Brilliant].ape",
+            "Volume 1(CD6)",
+            false,
+        );
+
+        assert_eq!(visible_ids(&store), vec!["cue1".to_string()]);
+    }
+
+    /// 同名专辑但不同目录 → 视为不同专辑，保留
+    #[test]
+    fn tracks_query_keeps_same_album_other_dir() {
+        let store = test_store();
+        insert_track(&store, "cue1", r"G:\music\Album.flac", "Album", true);
+        insert_track(&store, "other", r"G:\other\Album.ape", "Album", false);
+
+        assert_eq!(visible_ids(&store).len(), 2);
+    }
+
+    /// CUE 分轨本身必须保留（不能把自己当成镜像隐藏）
+    #[test]
+    fn tracks_query_keeps_cue_tracks() {
+        let store = test_store();
+        insert_track(&store, "cue1", r"G:\music\Album.flac", "Album", true);
+        insert_track(&store, "cue2", r"G:\music\Album.flac", "Album", true);
+
+        assert_eq!(visible_ids(&store).len(), 2);
+    }
+
+    /// 统计口径与列表一致：镜像条目不计入曲目数
+    #[test]
+    fn stats_excludes_cue_mirror() {
+        let store = test_store();
+        insert_track(&store, "cue1", r"G:\music\Album.flac", "Album", true);
+        insert_track(&store, "mirror", r"G:\music\Album.ape", "Album", false);
+
+        assert_eq!(store.stats().track_count, 1);
+    }
 }

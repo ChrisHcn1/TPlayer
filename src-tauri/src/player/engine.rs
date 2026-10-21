@@ -12,12 +12,54 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::library::sacd::{cached_dsf_path, ensure_sacd_cache_fresh, SacdDisc};
 
-/// symphonia 原生可解码的扩展名；其余格式走 ffmpeg 子进程解码为 PCM
+/// symphonia 原生可解码的扩展名；其余格式走 ffmpeg 子进程解码为 PCM。
+///
+/// 平台差异（Linux，rodio 0.19 原生解码器实际构成）：
+///  - mp3  → symphonia-bundle-mp3；
+///  - flac → claxon；wav → hound；ogg/oga(vorbis) → lewton；
+///  - **aac / m4a / opus 在 rodio 0.19 中没有对应解码器**（symphonia 仅启用
+///    mp3 bundle；lewton 仅支持 Vorbis）。这三个扩展名留在原生表会直达
+///    `rodio::Decoder::new` 并解码失败（"不支持的音频格式或文件损坏"），
+///    连累封装于 .m4a 的 Apple Lossless（ALAC）无损曲目也无法播放。
+///
+/// 因此 Linux 将 aac/m4a/opus 分流到 ffmpeg 管道：ffmpeg 可用时秒级出声、
+/// 可 seek、支持预加载（与 ape/dsd 等冷门格式同一链路）；不可用时不进原生
+/// 引擎（避免必败探测），由 `track_needs_compat` 交前端 WASM 兜底。
+///
+/// Windows 侧保持原表不变——其 aac/m4a/opus 走既有链路（原生失败后由前端
+/// 兼容层兜底），行为零变化。
+#[cfg(target_os = "linux")]
+const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga"];
+
+#[cfg(not(target_os = "linux"))]
 const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga", "opus", "aac", "m4a"];
 
-/// ffmpeg 可解码的补充格式（ape/dsd/dts/wma/wv/tta/tak/aiff 等）
-const FFMPEG_EXT: &[&str] = &["wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts"];
+/// ffmpeg 可解码的补充格式（ape/dsd/dts/wma/wv/tta/tak/aiff 等）。
+/// Linux 追加 aac/m4a/opus：rodio 无对应原生解码器，改由 ffmpeg 管道解码
+/// （含 Apple Lossless 封装于 .m4a 的无损曲目）；ffmpeg 可用时这些格式
+/// 计入 `player_capabilities` 的 supportedFormats。
+#[cfg(target_os = "linux")]
+const FFMPEG_EXT: &[&str] = &[
+    "wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts", "aac", "m4a", "opus",
+    "iso-dsd",
+];
+
+#[cfg(not(target_os = "linux"))]
+const FFMPEG_EXT: &[&str] = &["wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts", "iso-dsd"];
+
+/// DSD（SACD / .dsf / .dff）解码时追加的低通截止频率（Hz）。
+///
+/// 背景：部分 SACD 母带的 DSD 噪声底偏高（4-24kHz 有台阶式能量，实测比干净重制 DSF
+/// 高数倍，且与音量无关 = 固定噪声底），ffmpeg 的 `dsd_lsbf` 多级抽取又会把 >20kHz 的
+/// 超声噪声混叠回可闻段，二者叠加表现为盖住音乐的"嘶声/噪音"。在抽取前加一级 lowpass
+/// 抑制。取值在"抑制嘶声"与"保留高频细节"间权衡：
+///   10k 更干净（默认， SACD 噪声底主要在 4-10k 以上）
+///   16k 更亮/细节更多但噪声更明显
+///   8k  极干净但偏闷（损失更多高频空气感）
+/// 不同 SACD 噪声强度不同，可依听感调整本常量。
+const DSD_LOWPASS_HZ: u32 = 10000;
 
 /// DTS 位流同步字表（与 ffmpeg dca_parser 一致，按大端 32-bit 读入后比较）
 const DTS_SYNC_WORDS: &[u32] = &[
@@ -100,29 +142,126 @@ fn is_native_format(path: &Path) -> bool {
     true
 }
 
-/// 定位 bin 目录下的工具（ffmpeg/ffprobe）：覆盖开发期与安装期多种布局。
+/// 外部工具的可执行文件名候选：Windows 带 `.exe`，Linux/macOS 不带。
+/// 两个候选都保留，便于同一 `bin/` 目录跨平台复用。
+fn tool_names(base: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![format!("{base}.exe"), base.to_string()]
+    } else {
+        vec![base.to_string(), format!("{base}.exe")]
+    }
+}
+
+/// 候选外部工具是否可在本平台执行（平台隔离）。
 ///
-/// - 沿可执行文件祖先目录查找 `<ancestor>/bin/<name>`（开发期 `src-tauri/bin`、
-///   构建产物目录下的 `bin/` 等）；
-/// - 安装包下 Tauri 把资源放到 `<app>/resources/bin/<name>`，单独补查该路径与
-///   同目录 `<app>/<name>`（避免 Release 版本找不到 ffmpeg 导致 DSD/APE/DTS 等
-///   依赖第三方解码的格式无法播放、进度与拖动失效）。
-fn resolve_bin_tool(name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    for ancestor in exe.ancestors().skip(1) {
-        let cand = ancestor.join("bin").join(name);
-        if cand.is_file() {
-            return Some(cand);
+/// Linux：必须是 ELF 可执行文件。仓库 `bin/ffmpeg.exe` / `bin/ffprobe.exe` 是
+///   Windows 程序（随 Windows 安装包分发），而 `resolve_bin_tool` 会沿可执行
+///   文件祖先目录查找 `bin/`——开发期（源码树内运行）与任何把 Windows 版
+///   工具放在查找路径内的布局都会命中它。直接 spawn 一个 PE 文件会得到
+///   `ExecFormatError`（表现为"无法启动 ffmpeg"而非"未找到 ffmpeg"），
+///   且 `ffmpeg_available()` 误报 true，把 ape/dsf/wv/tta/tak/dts/aiff/alac
+///   等格式的路由引向死路。读取文件头魔数 `\x7fELF` 甄别（不依赖 file 命令）。
+/// Windows：保持原语义（候选存在即可，`.exe` 由 tool_names 优先给出）。
+#[cfg(target_os = "linux")]
+fn tool_runnable(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == *b"\x7fELF"
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tool_runnable(_path: &Path) -> bool {
+    true
+}
+
+/// Linux 追加的随仓库/发行版分发布局：`bin/linux`（Linux 版 ffmpeg/ffprobe 的
+/// 存放位；Windows 侧不识别该子目录，`EXTRA_TOOL_SUBDIRS` 为空、行为不变）。
+///
+/// 背景：仓库 `bin/` 下只有 Windows 版 `ffmpeg.exe`/`ffprobe.exe`（随 NSIS
+/// 安装包分发），Linux 版 ELF 二进制放在 `bin/linux/`——开发期从源码树运行时
+/// 沿可执行文件祖先目录即可命中；DEB 打包脚本也会把该目录整体装进
+/// `/usr/lib/tplayer/bin`（固定安装路径，见下方第 3 类查找）。
+#[cfg(target_os = "linux")]
+const EXTRA_TOOL_SUBDIRS: &[&str] = &["bin/linux"];
+
+#[cfg(not(target_os = "linux"))]
+const EXTRA_TOOL_SUBDIRS: &[&str] = &[];
+
+/// 定位外部工具（ffmpeg/ffprobe），覆盖开发期、Tauri 打包与系统安装三种布局：
+///  1. 沿可执行文件祖先目录查 `<ancestor>/{bin,bin/linux,lib/tplayer/bin,libexec/tplayer}/<name>`
+///     （开发期 `src-tauri/bin`、`bin/linux`、构建产物 `bin/`、DEB 的 `/usr/lib/tplayer/bin`）；
+///  2. exe 同级、`bin/`、`bin/linux`、`resources/bin/`（Tauri bundle 布局）；
+///  3. 安装包固定位置 `/usr/lib/tplayer/bin`、`/usr/local/lib/tplayer/bin`、`/usr/libexec/tplayer`；
+///  4. 系统 PATH（Debian/Ubuntu 的 `ffmpeg` 包）。
+/// Linux 侧所有候选都经 ELF 魔数校验（见 tool_runnable），Windows 版 .exe 不会被误用。
+fn resolve_bin_tool(base: &str) -> Option<PathBuf> {
+    let names = tool_names(base);
+    // Linux 追加 ELF 魔数校验：避免把 Windows 版 ffmpeg.exe 当成本机可用工具
+    let found = |cand: &Path| (cand.is_file() && tool_runnable(cand)).then(|| cand.to_path_buf());
+
+    if let Ok(exe) = std::env::current_exe() {
+        // 1) 祖先目录
+        for ancestor in exe.ancestors().skip(1) {
+            for sub in ["bin", "lib/tplayer/bin", "libexec/tplayer"]
+                .iter()
+                .chain(EXTRA_TOOL_SUBDIRS)
+            {
+                for name in &names {
+                    if let Some(hit) = found(&ancestor.join(sub).join(name)) {
+                        return Some(hit);
+                    }
+                }
+            }
+        }
+        // 2) exe 同级 / Tauri 资源目录
+        if let Some(parent) = exe.parent() {
+            for rel in ["", "bin", "resources/bin", "../lib/tplayer/bin", "../libexec/tplayer"]
+                .iter()
+                .chain(EXTRA_TOOL_SUBDIRS)
+            {
+                for name in &names {
+                    if let Some(hit) = found(&parent.join(rel).join(name)) {
+                        return Some(hit);
+                    }
+                }
+            }
         }
     }
-    if let Some(parent) = exe.parent() {
-        for rel in [
-            std::path::Path::new("resources/bin").join(name),
-            std::path::Path::new("bin").join(name),
-            std::path::Path::new(name).to_path_buf(),
-        ] {
-            let cand = parent.join(rel);
-            if cand.is_file() {
+
+    // 3) 安装包固定位置
+    for root in [
+        "/usr/lib/tplayer/bin",
+        "/usr/local/lib/tplayer/bin",
+        "/usr/libexec/tplayer",
+    ] {
+        for name in &names {
+            if let Some(hit) = found(Path::new(root).join(name).as_path()) {
+                return Some(hit);
+            }
+        }
+    }
+
+    // 4) 系统 PATH
+    resolve_on_path(&names)
+}
+
+/// 在 PATH 中按候选顺序查找可执行文件（跳过空目录项）
+fn resolve_on_path(names: &[String]) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for name in names {
+            let cand = dir.join(name);
+            // 与 resolve_bin_tool 同一判定：Linux 校验 ELF 魔数
+            if cand.is_file() && tool_runnable(&cand) {
                 return Some(cand);
             }
         }
@@ -131,11 +270,41 @@ fn resolve_bin_tool(name: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_ffmpeg() -> Option<PathBuf> {
-    resolve_bin_tool("ffmpeg.exe")
+    resolve_bin_tool("ffmpeg")
 }
 
 pub fn resolve_ffprobe() -> Option<PathBuf> {
-    resolve_bin_tool("ffprobe.exe")
+    resolve_bin_tool("ffprobe")
+}
+
+/// 探测音频流参数（是否 DSD、采样率、声道数），用于动态构建 ffmpeg 解码命令，
+/// 避免写死 `-ar/-ac`（不同格式/文件的采样率与声道数各异）。ffprobe 缺失或解析
+/// 失败返回 None，由调用方回退到扩展名判定与安全默认值。
+fn probe_audio_stream(path: &Path) -> Option<(bool, u32, u16)> {
+    let ffprobe = resolve_ffprobe()?;
+    let out = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let f: Vec<&str> = s.trim().split(',').collect();
+    if f.len() < 3 {
+        return None;
+    }
+    let is_dsd = f[0].trim().starts_with("dsd");
+    let rate: u32 = f[1].trim().parse().ok()?;
+    let ch: u16 = f[2].trim().parse().ok()?;
+    Some((is_dsd, rate, ch))
 }
 
 pub fn ffmpeg_available() -> bool {
@@ -143,34 +312,99 @@ pub fn ffmpeg_available() -> bool {
 }
 
 /// 用 ffprobe 探测音频时长（秒）。
-/// 用于 lofty 无法解析的格式（dsf/dff/dts/tta/tak 等）在扫描与播放时的兜底；
+/// 用于 lofty 无法解析的格式（dsf/dts/tta/tak/dff 等）在扫描与播放时的兜底；
 /// 失败（工具缺失/输出异常/时长非正）返回 None。
+///
+/// 探测顺序（跨平台一致）：
+///  1. ffprobe（机器可读输出、开销最小）——随包分发或系统安装时优先；
+///  2. 回退 `ffmpeg -i` 解析 stderr 的 `Duration:` 行（依赖 ffmpeg 含对应解复用器，
+///     如 dff/dsf 的 DSD 时长也能探测）。ffprobe 缺失或解析失败时自动走此路径，
+///     使仅随包分发 ffmpeg（如 arm64 无 ffprobe 二进制）或精简版 ffprobe 的场景
+///     也能完成时长探测。
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    let ffprobe = resolve_ffprobe()?;
-    let mut cmd = Command::new(ffprobe);
-    cmd.arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("csv=p=0")
+    // Linux：曲库路径可能是非 UTF-8 文件名的容错编码，先还原真实路径
+    // （合法路径零成本直连），否则 dsf/dff/tta/tak 等时长探测全部失败、
+    // 进度条不推进、自动连播失效。
+    #[cfg(target_os = "linux")]
+    let path = &crate::library::scan_linux::resolve_path_str(&path.to_string_lossy());
+
+    // 1) ffprobe 首选
+    if let Some(ffprobe) = resolve_ffprobe() {
+        let mut cmd = Command::new(ffprobe);
+        cmd.arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("csv=p=0")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            // CREATE_NO_WINDOW：避免探测时弹出控制台窗口
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Some(secs) = text.trim().parse::<f64>().ok().filter(|s| *s > 0.0) {
+                    return Some(secs);
+                }
+            }
+        }
+    }
+
+    // 2) 回退：ffprobe 不存在或解析失败时，经 `ffmpeg -i` 解析 stderr 的 `Duration:` 行。
+    // 跨平台生效（依赖 ffmpeg 含对应解复用器，如 dff/dsf 的 DSD 时长也能探测）。
+    probe_duration_via_ffmpeg(path)
+}
+
+/// 回退探测：`ffmpeg -i <file>` 的 stderr 含输入信息（含 `Duration:` 行），跨平台生效。
+/// 解析之得到时长。未指定输出时 ffmpeg 以非零码退出属预期，忽略退出码；
+/// `-t 0.001` 使 ffmpeg 读够输入信息后立即退出，避免大文件全量解码。
+fn probe_duration_via_ffmpeg(path: &Path) -> Option<f64> {
+    let ffmpeg = resolve_ffmpeg()?;
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-hide_banner")
+        .arg("-i")
         .arg(path)
+        .arg("-t")
+        .arg("0.001")
+        .arg("-f")
+        .arg("null")
+        .arg("-")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        // CREATE_NO_WINDOW：避免探测时弹出控制台窗口
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
     let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_duration_line(&stderr)
+}
+
+/// 从 `ffmpeg -i` 的 stderr 中解析 `Duration: HH:MM:SS.ss`。
+/// 行格式：`  Duration: 00:02:00.65, start: 0.000000, bitrate: ...`；
+/// 无 Duration 行、值为 N/A 或段数异常时返回 None。
+fn parse_duration_line(stderr: &str) -> Option<f64> {
+    for line in stderr.lines() {
+        let Some(rest) = line.trim().strip_prefix("Duration:") else {
+            continue;
+        };
+        // 取逗号前的时间值（"00:02:00.65"）
+        let value = rest.trim().split(',').next()?.trim();
+        let mut parts = value.split(':');
+        let hours: f64 = parts.next()?.trim().parse().ok()?;
+        let minutes: f64 = parts.next()?.trim().parse().ok()?;
+        let seconds: f64 = parts.next()?.trim().parse().ok()?;
+        if parts.next().is_some() {
+            return None; // 段数异常，防御
+        }
+        let secs = hours * 3600.0 + minutes * 60.0 + seconds;
+        return (secs > 0.0).then_some(secs);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let secs = text.trim().parse::<f64>().ok()?;
-    (secs > 0.0).then_some(secs)
+    None
 }
 
 /// ffmpeg 解码输出的后端支持格式清单（供 capabilities 使用）
@@ -194,7 +428,7 @@ pub struct EngineCapabilities {
 enum EngineCommand {
     /// 播放（附回执通道：打开/解码是否成功同步回传，失败可转为 error 事件）
     /// 末参为可选 CUE 分轨区间 (start_sec, duration_sec)：非 None 时按偏移定位播放
-    Play(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, mpsc::Sender<AppResult<()>>),
+    Play(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, Option<u32>, mpsc::Sender<AppResult<()>>),
     /// 播放并定位到指定毫秒（断点续播专用：等混音线程起流后再 seek，规避启动竞态）
     PlayAt(PathBuf, u64, Option<(f32, f32)>, mpsc::Sender<AppResult<()>>),
     Pause,
@@ -209,7 +443,7 @@ enum EngineCommand {
     SetCrossfade(bool, u64),
     /// 预解码下一曲到待命链路（不发声；切歌时 SwapToNext 无缝接管）
     /// 末参为可选 CUE 分轨区间 (start_sec, duration_sec)
-    Preload(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, mpsc::Sender<AppResult<()>>),
+    Preload(PathBuf, Option<(f32, f32)>, Option<(f64, f64)>, Option<u32>, mpsc::Sender<AppResult<()>>),
     /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
     SwapToNext(mpsc::Sender<AppResult<()>>),
     /// 更新音量归一化 ReplayGain 开关（开启时当前曲目立即应用增益）
@@ -225,10 +459,16 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn play(&self, path: PathBuf, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
+    pub fn play(
+        &self,
+        path: PathBuf,
+        gain: Option<(f32, f32)>,
+        range: Option<(f64, f64)>,
+        sacd_track_index: Option<u32>,
+    ) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::Play(path, gain, range, ack_tx))
+            .send(EngineCommand::Play(path, gain, range, sacd_track_index, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
@@ -288,10 +528,16 @@ impl EngineHandle {
     }
 
     /// 预解码下一曲到待命链路（不发声；切歌时 swap_to_next 无缝接管）
-    pub fn preload(&self, path: std::path::PathBuf, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
+    pub fn preload(
+        &self,
+        path: std::path::PathBuf,
+        gain: Option<(f32, f32)>,
+        range: Option<(f64, f64)>,
+        sacd_track_index: Option<u32>,
+    ) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
         self.tx
-            .send(EngineCommand::Preload(path, gain, range, ack_tx))
+            .send(EngineCommand::Preload(path, gain, range, sacd_track_index, ack_tx))
             .map_err(|_| AppError::Player("引擎线程已退出".into()))?;
         ack_rx
             .recv()
@@ -334,8 +580,8 @@ pub fn spawn_engine() -> EngineHandle {
             loop {
                 match rx.recv_timeout(Duration::from_millis(20)) {
                     Ok(cmd) => match cmd {
-                        EngineCommand::Play(path, gain, range, ack) => {
-                            let _ = ack.send(engine.play(&path, gain, range));
+                        EngineCommand::Play(path, gain, range, sacd, ack) => {
+                            let _ = ack.send(engine.play(&path, gain, range, sacd));
                         }
                         EngineCommand::PlayAt(path, pos_ms, gain, ack) => {
                             let _ = ack.send(engine.play_at(&path, pos_ms, gain));
@@ -366,8 +612,8 @@ pub fn spawn_engine() -> EngineHandle {
                             fade_duration_ms = duration_ms;
                             engine.fade_ms = duration_ms;
                         }
-                        EngineCommand::Preload(path, gain, range, ack) => {
-                            let _ = ack.send(engine.preload(&path, gain, range));
+                        EngineCommand::Preload(path, gain, range, sacd, ack) => {
+                            let _ = ack.send(engine.preload(&path, gain, range, sacd));
                         }
                         EngineCommand::SwapToNext(ack) => {
                             let _ = ack.send(engine.swap_to_next());
@@ -404,6 +650,11 @@ struct Playback {
     ffmpeg_child: Option<Child>,
     /// 本曲目生效的 ReplayGain 音量倍率（用户音量之外的乘数）
     gain_scale: f32,
+    /// SACD 解码导出的临时 DSF 路径；seek 时直接对该 DSF 重启 ffmpeg 进程定位
+    temp_file: Option<PathBuf>,
+    /// CUE 分轨范围 (起始毫秒, 时长毫秒)；seek 时用于叠加基址并以剩余时长限长，
+    /// 避免越界到下一轨
+    range: Option<(u64, u64)>,
 }
 
 impl Playback {
@@ -593,7 +844,19 @@ impl RodioEngine {
             .ok_or_else(|| AppError::Player("音频输出设备不可用".into()))
     }
 
-    fn play(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
+    fn play(
+        &mut self,
+        path: &std::path::Path,
+        gain: Option<(f32, f32)>,
+        range: Option<(f64, f64)>,
+        sacd_track_index: Option<u32>,
+    ) -> AppResult<()> {
+        // Linux：还原非 UTF-8 文件名的容错编码路径（合法路径零成本直连），
+        // 保证 NTFS 上的这类曲目可被打开、解码、播放（含后续 ffmpeg 管道）。
+        #[cfg(target_os = "linux")]
+        let resolved = crate::library::scan_linux::resolve_path_str(&path.to_string_lossy());
+        #[cfg(target_os = "linux")]
+        let path: &std::path::Path = &resolved;
         let handle = self.ensure_stream()?.clone();
         let gain_scale = self.gain_scale_for(gain);
 
@@ -633,29 +896,34 @@ impl RodioEngine {
             .map_err(|e| AppError::Player(format!("无法创建音频 sink: {}", e)))?;
 
         let start_ms = range.map(|(s, _)| (s * 1000.0) as u64).unwrap_or(0);
+        let stored_range = range
+            .map(|(s, d)| ((s * 1000.0) as u64, if d > 0.0 { (d * 1000.0) as u64 } else { 0 }));
         let duration_ms = range
             .and_then(|(_, d)| if d > 0.0 { Some((d * 1000.0) as u64) } else { None });
 
-        let is_ffmpeg = !is_native_format(path);
-        let ffmpeg_child = if is_ffmpeg {
-            let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
-            sink.append(source);
-            Some(child)
-        } else {
-            let file = std::fs::File::open(path).map_err(|e| {
-                AppError::Player(format!("无法打开音频文件 {}: {}", path.display(), e))
-            })?;
-            let decoder = rodio::Decoder::new(BufReader::new(file))
-                .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
-            sink.append(decoder);
-            // CUE 分轨：原生解码路径按起始偏移 seek（时长由播放状态机按 per-track duration 推进）
-            if let Some((start, _)) = range {
-                if start > 0.0 {
-                    let _ = sink.try_seek(std::time::Duration::from_secs_f64(start));
-                }
-            }
-            None
-        };
+        // 解码源路由：
+        // - SACD 轨：导出临时 DSF 后走 ffmpeg 管道（每轨独立 DSF，无需 seek）；
+        // - 非原生格式，或 CUE 分轨（range 有值，需从偏移处起播并限定时长）：走 ffmpeg
+        //   的输入 seek（-ss 位于 -i 前）——起点/时长确定，规避 rodio try_seek 的竞态/卡死；
+        // - 其余整曲（无区间）：rodio 原生解码，低延迟直连。
+        let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
+            if let Some(idx) = sacd_track_index {
+                let (child, source, temp) = spawn_sacd_decoder(path, idx)?;
+                sink.append(source);
+                (Some(child), Some(temp))
+            } else if !is_native_format(path) || range.is_some() {
+                let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
+                sink.append(source);
+                (Some(child), None)
+            } else {
+                let file = std::fs::File::open(path).map_err(|e| {
+                    AppError::Player(format!("无法打开音频文件 {}: {}", path.display(), e))
+                })?;
+                let decoder = rodio::Decoder::new(BufReader::new(file))
+                    .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
+                sink.append(decoder);
+                (None, None)
+            };
 
         // 新曲目从静默开始淡入
         sink.set_volume(0.0);
@@ -665,16 +933,32 @@ impl RodioEngine {
             sink,
             ffmpeg_child,
             gain_scale,
+            temp_file,
+            range: stored_range,
         });
         self.fade_in_started = Some(Instant::now());
         self.current_path = Some(path.to_path_buf());
-        self.current_is_ffmpeg = is_ffmpeg;
+        self.current_is_ffmpeg = self.current.as_ref().map_or(false, |p| p.ffmpeg_child.is_some());
+
+        // CUE 分轨的起点/时长已由上面的 ffmpeg 输入 seek（-ss/-t）精确定位，无需再 seek；
+        // rodio 原生分支仅在无区间（整曲）时进入，天然从 0 播放。
         Ok(())
     }
 
     /// 预解码下一曲到待命链路：创建 sink + 解码器/ffmpeg 子进程，
     /// 但 sink 立即暂停不发声，等待 SwapToNext 或 play 路径一致时复用。
-    fn preload(&mut self, path: &std::path::Path, gain: Option<(f32, f32)>, range: Option<(f64, f64)>) -> AppResult<()> {
+    fn preload(
+        &mut self,
+        path: &std::path::Path,
+        gain: Option<(f32, f32)>,
+        range: Option<(f64, f64)>,
+        sacd_track_index: Option<u32>,
+    ) -> AppResult<()> {
+        // Linux：还原非 UTF-8 文件名的容错编码路径（同 play）
+        #[cfg(target_os = "linux")]
+        let resolved = crate::library::scan_linux::resolve_path_str(&path.to_string_lossy());
+        #[cfg(target_os = "linux")]
+        let path: &std::path::Path = &resolved;
         // 新预加载前先回收旧预加载链路
         if let Some(stale) = self.next.take() {
             stale.halt();
@@ -686,29 +970,30 @@ impl RodioEngine {
             .map_err(|e| AppError::Player(format!("无法创建音频 sink: {}", e)))?;
 
         let start_ms = range.map(|(s, _)| (s * 1000.0) as u64).unwrap_or(0);
+        let stored_range = range
+            .map(|(s, d)| ((s * 1000.0) as u64, if d > 0.0 { (d * 1000.0) as u64 } else { 0 }));
         let duration_ms = range
             .and_then(|(_, d)| if d > 0.0 { Some((d * 1000.0) as u64) } else { None });
 
-        let is_ffmpeg = !is_native_format(path);
-        let ffmpeg_child = if is_ffmpeg {
-            let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
-            sink.append(source);
-            Some(child)
-        } else {
-            let file = std::fs::File::open(path).map_err(|e| {
-                AppError::Player(format!("无法打开音频文件 {}: {}", path.display(), e))
-            })?;
-            let decoder = rodio::Decoder::new(BufReader::new(file))
-                .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
-            sink.append(decoder);
-            // CUE 分轨：原生解码路径按起始偏移 seek（时长由播放状态机按 per-track duration 推进）
-            if let Some((start, _)) = range {
-                if start > 0.0 {
-                    let _ = sink.try_seek(std::time::Duration::from_secs_f64(start));
-                }
-            }
-            None
-        };
+        // 解码源路由（同 play）：CUE 分轨/非原生走 ffmpeg 输入 seek，确保起点/时长可靠
+        let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
+            if let Some(idx) = sacd_track_index {
+                let (child, source, temp) = spawn_sacd_decoder(path, idx)?;
+                sink.append(source);
+                (Some(child), Some(temp))
+            } else if !is_native_format(path) || range.is_some() {
+                let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
+                sink.append(source);
+                (Some(child), None)
+            } else {
+                let file = std::fs::File::open(path).map_err(|e| {
+                    AppError::Player(format!("无法打开音频文件 {}: {}", path.display(), e))
+                })?;
+                let decoder = rodio::Decoder::new(BufReader::new(file))
+                    .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
+                sink.append(decoder);
+                (None, None)
+            };
 
         // 待命：暂停不发声，避免预加载期间泄漏音频
         sink.pause();
@@ -718,6 +1003,8 @@ impl RodioEngine {
             sink,
             ffmpeg_child,
             gain_scale,
+            temp_file,
+            range: stored_range,
         });
         self.next_path = Some(path.to_path_buf());
         Ok(())
@@ -766,7 +1053,7 @@ impl RodioEngine {
     /// 播放并定位到断点（断点续播专用）
     fn play_at(&mut self, path: &std::path::Path, position_ms: u64, gain: Option<(f32, f32)>) -> AppResult<()> {
         if position_ms == 0 {
-            return self.play(path, gain, None);
+            return self.play(path, gain, None, None);
         }
         // 带位置起播时预加载链路不可复用（swap_to_next 只能从 0 开始），先回收
         if let Some(stale) = self.next.take() {
@@ -775,7 +1062,7 @@ impl RodioEngine {
         self.next_path = None;
 
         if is_native_format(path) {
-            self.play(path, gain, None)?;
+            self.play(path, gain, None, None)?;
             // sink 新建后混音线程可能还没拉到首帧；此时立即 seek 在个别时序下
             // 会让 Sink::try_seek 永久等待（引擎线程卡死、进度冻结）。
             // 先让出 ~150ms 等输出线程开始消费，再定位（原生解码仅此路径可实现）。
@@ -784,7 +1071,7 @@ impl RodioEngine {
         } else {
             // FFmpeg 管道：解码进程以 -ss 直接从目标位置起流，
             // 无"先播开头再跳转"的听感跳秒，也无 150ms 等待
-            self.play(path, gain, Some((position_ms as f64 / 1000.0, 0.0)))
+            self.play(path, gain, Some((position_ms as f64 / 1000.0, 0.0)), None)
         }
     }
 
@@ -824,13 +1111,10 @@ impl RodioEngine {
             return Ok(());
         };
 
-        if self.current_is_ffmpeg {
-            // ffmpeg 后端：PCM 管道不可 seek，带 -ss 重启解码进程
-            let path = self
-                .current_path
-                .clone()
-                .ok_or_else(|| AppError::Player("没有正在播放的曲目".into()))?;
-            let (child, source) = spawn_ffmpeg_decoder(&path, position_ms, None)?;
+        // SACD：临时 DSF 已在磁盘，直接带 -ss 重启 ffmpeg 进程定位到轨内偏移
+        // （整轨 DSF，无需叠加基址；音频自然终止于该轨末尾）。
+        if let Some(dsf) = playback.temp_file.clone() {
+            let (child, source) = spawn_ffmpeg_decoder(&dsf, position_ms, None)?;
             if let Some(old) = playback.ffmpeg_child.take() {
                 let mut old = old;
                 let _ = old.kill();
@@ -840,7 +1124,41 @@ impl RodioEngine {
             playback.sink.clear();
             playback.sink.append(source);
             playback.sink.play();
-            // ffmpeg 后端 seek 重启后重新应用倍速
+            playback.sink.set_speed(self.rate);
+            self.fade_in_started = Some(Instant::now());
+            return Ok(());
+        }
+
+        if self.current_is_ffmpeg {
+            // ffmpeg 后端：PCM 管道不可 seek，带 -ss 重启解码进程。
+            // CUE 分轨需叠加基址（cue_offset）并以剩余时长限长，避免越界到下一轨；
+            // 普通文件直接用相对位置（无基址）。
+            let path = self
+                .current_path
+                .clone()
+                .ok_or_else(|| AppError::Player("没有正在播放的曲目".into()))?;
+            let (abs_ms, dur_ms) = match playback.range {
+                Some((base, dur)) => {
+                    let abs = base + position_ms;
+                    let rem = if dur > position_ms {
+                        Some(dur - position_ms)
+                    } else {
+                        None
+                    };
+                    (abs, rem)
+                }
+                None => (position_ms, None),
+            };
+            let (child, source) = spawn_ffmpeg_decoder(&path, abs_ms, dur_ms)?;
+            if let Some(old) = playback.ffmpeg_child.take() {
+                let mut old = old;
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            playback.ffmpeg_child = Some(child);
+            playback.sink.clear();
+            playback.sink.append(source);
+            playback.sink.play();
             playback.sink.set_speed(self.rate);
         } else {
             playback
@@ -909,6 +1227,119 @@ impl Drop for RodioEngine {
     }
 }
 
+/// SACD ISO → 临时 DSF → ffmpeg 管道。
+///
+/// 打开 ISO 取出指定音轨，用 ffmpeg 把 DSD 位流（DSF）转成 PCM 送进 rodio；
+/// 临时 DSF 缓存在系统临时目录（按 ISO 路径哈希），重复播放不重复导出。
+/// 返回（ffmpeg 子进程, PCM 音源, 临时 DSF 路径）。临时 DSF 在 Playback 生命周期
+/// 内保留（seek 时用于识别 SACD 链路），缓存本身跨播放持久以加速后续重播。
+/// 防白噪兜底：导出 DSF 后解码其头部约 0.5s，确认 ffmpeg 确实把 DSD 解成了 PCM、
+/// 且解码结果不是宽带白噪（DST 压缩被误当原始 DSD、或去交错/位序参数错误都会产出白噪）。
+///
+/// 判据（无需 FFT，廉价可靠）：
+/// - ffmpeg 解码失败或无足够输出 → DSD 未被正确解码（DST/格式不支持）→ 拒绝；
+/// - `hf = Σ(x_i-x_{i-1})² / Σx_i²`：白噪≈2（相邻样本不相关），音乐远低于 2（相邻相关）；
+/// - 配合 `rms > 0.2` 过滤静音前导，避免误伤；两者同时成立才判定为异常音频。
+fn guard_sacd_dsf(dsf_path: &Path) -> AppResult<()> {
+    let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
+        AppError::Player("SACD 解码校验需要 FFmpeg：未找到 ffmpeg".into())
+    })?;
+    let out = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(dsf_path)
+        .args([
+            "-t", "0.5", "-af", "aresample=44100", "-f", "f32le", "-acodec", "pcm_f32le", "-",
+        ])
+        .output()
+        .map_err(|e| AppError::Player(format!("SACD 解码校验进程启动失败: {e}")))?;
+    // 0.5s @44.1k*2ch*4B(f32le) ≈ 176400 字节；至少要有 ~0.25s 才作数
+    if !out.status.success() || out.stdout.len() < 88_200 {
+        return Err(AppError::Player(
+            "SACD 解码失败：该音轨可能是 DST 压缩或区域格式不支持，已阻止播放".into(),
+        ));
+    }
+    let samples: Vec<f32> = out
+        .stdout
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    if samples.len() < 2000 {
+        return Err(AppError::Player("SACD 解码输出异常（样本不足）".into()));
+    }
+    let mut sum_sq = 0.0f64;
+    let mut diff_sq = 0.0f64;
+    for i in 0..samples.len() {
+        let x = samples[i] as f64;
+        sum_sq += x * x;
+        if i > 0 {
+            let prev = samples[i - 1] as f64;
+            let d = x - prev;
+            diff_sq += d * d;
+        }
+    }
+    let n = samples.len() as f64;
+    let rms = (sum_sq / n).sqrt();
+    let hf = diff_sq / sum_sq.max(1e-9);
+    if rms > 0.2 && hf > 1.3 {
+        return Err(AppError::Player(format!(
+            "SACD 解码异常（疑似 DST/参数错误导致白噪），已阻止播放以免输出白噪 [rms={:.2} hf={:.2}]",
+            rms, hf
+        )));
+    }
+    Ok(())
+}
+
+fn spawn_sacd_decoder(
+    iso_path: &Path,
+    track_index: u32,
+) -> AppResult<(Child, PcmStreamSource, PathBuf)> {
+    let disc = SacdDisc::open(iso_path).ok_or_else(|| {
+        AppError::Player(format!("无法解析 SACD ISO: {}", iso_path.display()))
+    })?;
+    let track_index = track_index as usize;
+    if track_index >= disc.tracks.len() {
+        return Err(AppError::Player(format!(
+            "SACD 曲目索引越界：{}/{}",
+            track_index,
+            disc.tracks.len()
+        )));
+    }
+    if disc.tracks[track_index].is_dst {
+        return Err(AppError::Player(
+            "该曲目使用 DST 压缩，当前版本暂不支持；请选择 SACD 立体声 2ch 区未压缩音轨".into(),
+        ));
+    }
+
+    let dsf_path = cached_dsf_path(iso_path, track_index).ok_or_else(|| {
+        AppError::Player("无法创建 SACD 临时缓存目录".into())
+    })?;
+
+    // 解包前确保缓存为当前导出逻辑版本：版本变化则整体清空旧解包文件，
+    // 杜绝读取到早期（错误参数）导出的 DSD 噪声数据。
+    if let Some(dir) = dsf_path.parent() {
+        ensure_sacd_cache_fresh(dir);
+    }
+    // 复用缓存的前提是文件大小与当前导出一致；旧版/损坏/截断的缓存字节数不符，
+    // 会被检测到并重新导出。导出前清理可能残留的历史文件，仅读取最新正确参数数据。
+    let expected_len = disc.exported_dsf_len(track_index);
+    let cache_valid = dsf_path
+        .metadata()
+        .map(|m| m.len() == expected_len)
+        .unwrap_or(false);
+    if !cache_valid {
+        let _ = std::fs::remove_file(&dsf_path);
+        disc.export_track_to_dsf(track_index, &dsf_path)
+            .map_err(|e| AppError::Player(format!("导出 SACD 分轨为 DSF 失败: {}", e)))?;
+    }
+
+    // 防白噪兜底：校验导出 DSF 确为可正常解码的 PCM（非 DST/参数错误导致的白噪），
+    // 一旦检出异常立即拒绝播放，绝不把白噪轰到声卡（对应"运行期自检 & 防白噪兜底"）。
+    guard_sacd_dsf(&dsf_path)?;
+    // 复用 ffmpeg 管道解码 DSF（ffmpeg 原生支持 DSF，由 dsd_lsbf 解码器直接输出 PCM）
+    let (child, source) = spawn_ffmpeg_decoder(&dsf_path, 0, None)?;
+    Ok((child, source, dsf_path))
+}
+
 /// 启动 ffmpeg 将任意格式解码为 PCM s16le（44.1kHz 双声道）并输出到管道，
 /// 返回（子进程, rodio 音源）。seek 通过 -ss 在输入端定位实现。
 fn spawn_ffmpeg_decoder(
@@ -917,8 +1348,45 @@ fn spawn_ffmpeg_decoder(
     duration_ms: Option<u64>,
 ) -> AppResult<(Child, PcmStreamSource)> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
-        AppError::Player("该格式需要 FFmpeg 解码，未找到 bin/ffmpeg.exe".into())
+        AppError::Player(
+            "该格式需要 FFmpeg 解码：未找到 ffmpeg（请随包分发 ffmpeg 或安装系统 ffmpeg）".into(),
+        )
     })?;
+
+    // 动态探测音频流参数，避免写死采样率/声道（不同格式/文件参数各异）。
+    let (codec_dsd, src_rate, src_ch) = probe_audio_stream(path).unwrap_or((false, 44100, 2));
+    let ext_dsd = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "dsf" | "dff"))
+        .unwrap_or(false);
+    let is_dsd = codec_dsd || ext_dsd;
+    // 输出声道：单声道/立体声原样，多声道下混为立体声（rodio 友好）。
+    let out_ch = src_ch.clamp(1, 2);
+    // 输出采样率：DSD 统一到 44.1kHz 标准率；PCM 透传源速率（探测失败回退 44.1kHz）。
+    let out_rate = if is_dsd {
+        44100
+    } else if src_rate > 0 {
+        src_rate
+    } else {
+        44100
+    };
+    // DSD：ffmpeg 8.x 对 DSD 直接输出 s16le 存在缺陷（解出的 PCM 为白噪），故先以 f32le 浮点
+    // 输出（本机 ffmpeg 此路径正常），再由 Rust 量化回 i16 喂给 rodio。同时先 resample 到 44.1k
+    // 再 lowpass，避免"高采样率直接低通后由 -ar 抽取"导致的混叠白噪。
+    let audio_filter = if is_dsd {
+        Some(format!("aresample=44100,lowpass=f={}", DSD_LOWPASS_HZ))
+    } else {
+        None
+    };
+
+    // 诊断日志（终端可见）：仅对 SACD(DSD) 记录实际解码命令与判定，便于排查白噪/无法播放。
+    if is_dsd {
+        eprintln!(
+            "SACD_DECODE ffmpeg={:?} codec_dsd={} ext_dsd={} out_ch={} out_rate={} filter={:?}",
+            ffmpeg, codec_dsd, ext_dsd, out_ch, out_rate, audio_filter
+        );
+    }
 
     let mut cmd = Command::new(ffmpeg);
     if offset_ms > 0 {
@@ -934,19 +1402,41 @@ fn spawn_ffmpeg_decoder(
     cmd.arg("-v")
         .arg("error")
         .arg("-i")
-        .arg(path)
-        .arg("-f")
-        .arg("s16le")
-        .arg("-acodec")
-        .arg("pcm_s16le")
-        .arg("-ar")
-        .arg("44100")
-        .arg("-ac")
-        .arg("2")
-        .arg("-")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .arg(path);
+    // DSD（dff/dsf）：现代 ffmpeg 的 `dsd_lsbf` 解码器已在解码阶段直接把 DSD 位流转换为
+    // PCM（旧版需显式 `-af dsd` 滤镜，该滤镜已在当前 ffmpeg 主线中被移除），因此这里
+    // 不再注入 `-af dsd`，交由解码器完成 DSD→PCM；缺 `dff` 解复用器的 DSDIFF 文件
+    // 当前无法解码（属格式不支持），SACD 走 .dsf 链路不受影响。
+    // DSD 追加 lowpass（见 audio_filter）：抑制抽取过程混叠回可闻段的超声噪声底。
+    if let Some(af) = &audio_filter {
+        cmd.arg("-af").arg(af);
+    }
+    if is_dsd {
+        // DSD→PCM 经 ffmpeg 解码：ffmpeg 8.x 直接输出 s16le 会解出白噪，必须以 f32le 浮点输出
+        // （本机 ffmpeg 此路径正常），再由 PcmStreamSource 量化回 i16 喂给 rodio。
+        // 输出不再指定 -ar/-ac（filter 已 resample 到 44.1k/2ch），避免 -ar 叠加抽取消音。
+        cmd.arg("-f")
+            .arg("f32le")
+            .arg("-acodec")
+            .arg("pcm_f32le")
+            .arg("-")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+    } else {
+        cmd.arg("-f")
+            .arg("s16le")
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg("-ar")
+            .arg(out_rate.to_string())
+            .arg("-ac")
+            .arg(out_ch.to_string())
+            .arg("-")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+    }
     #[cfg(windows)]
     {
         // CREATE_NO_WINDOW：避免解码期间弹出控制台窗口
@@ -964,18 +1454,23 @@ fn spawn_ffmpeg_decoder(
 
     Ok((
         child,
-        PcmStreamSource::new(BufReader::new(stdout), 2, 44100),
+        PcmStreamSource::new(BufReader::new(stdout), out_ch, out_rate, is_dsd),
     ))
 }
 
-/// ffmpeg PCM 管道音源（s16le 交错样本 → rodio::Source）
+/// ffmpeg PCM 管道音源（s16le / f32le 交错样本 → rodio::Source）
 ///
-/// 内部缓冲大块样本（默认 8192 样本 = 16384 字节），避免逐样本 read 导致的
-/// 高频 syscall 与混音线程欠载（表现为爆音/杂音）。
+/// 内部缓冲大块样本（默认 8192 样本），避免逐样本 read 导致的高频 syscall 与混音线程欠载
+/// （表现为爆音/杂音）。
+///
+/// `float_input`：ffmpeg 8.x 对 DSD 直接输出 `s16le` 存在缺陷（解出的 PCM 为白噪），须以
+/// `f32le` 浮点输出（本机 ffmpeg 此路径正常），此处再把 f32 量化回 i16 喂给 rodio。
 struct PcmStreamSource {
     reader: BufReader<ChildStdout>,
     channels: u16,
     sample_rate: u32,
+    /// 解码输出是否为 f32le（DSD 解码走此路径以避免 s16le 白噪缺陷）
+    float_input: bool,
     /// 解码输出的样本缓冲（i16 交错）
     buffer: Vec<i16>,
     /// 当前缓冲读取位置
@@ -987,11 +1482,17 @@ struct PcmStreamSource {
 impl PcmStreamSource {
     const CHUNK_SAMPLES: usize = 8192;
 
-    fn new(reader: BufReader<ChildStdout>, channels: u16, sample_rate: u32) -> Self {
+    fn new(
+        reader: BufReader<ChildStdout>,
+        channels: u16,
+        sample_rate: u32,
+        float_input: bool,
+    ) -> Self {
         Self {
             reader,
             channels,
             sample_rate,
+            float_input,
             buffer: Vec::with_capacity(Self::CHUNK_SAMPLES),
             pos: 0,
             eof: false,
@@ -1003,23 +1504,41 @@ impl PcmStreamSource {
         if self.eof {
             return;
         }
-        let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * 2];
-        match self.reader.read(&mut bytes) {
-            Ok(0) => {
-                self.eof = true;
+        if self.float_input {
+            // f32le：每个样本 4 字节；读到后量化回 i16（rodio 按 i16 消费）。
+            let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * 4];
+            match self.reader.read(&mut bytes) {
+                Ok(0) => self.eof = true,
+                Ok(n) => {
+                    let sample_bytes = n - (n % 4);
+                    self.buffer.clear();
+                    self.buffer.extend(bytes[..sample_bytes].chunks_exact(4).map(|c| {
+                        let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(-1.0, 1.0);
+                        (f * 32767.0) as i16
+                    }));
+                    self.pos = 0;
+                }
+                Err(_) => self.eof = true,
             }
-            Ok(n) => {
-                let sample_bytes = n - (n % 2);
-                self.buffer.clear();
-                self.buffer.extend(
-                    bytes[..sample_bytes]
-                        .chunks_exact(2)
-                        .map(|c| i16::from_le_bytes([c[0], c[1]])),
-                );
-                self.pos = 0;
-            }
-            Err(_) => {
-                self.eof = true;
+        } else {
+            let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * 2];
+            match self.reader.read(&mut bytes) {
+                Ok(0) => {
+                    self.eof = true;
+                }
+                Ok(n) => {
+                    let sample_bytes = n - (n % 2);
+                    self.buffer.clear();
+                    self.buffer.extend(
+                        bytes[..sample_bytes]
+                            .chunks_exact(2)
+                            .map(|c| i16::from_le_bytes([c[0], c[1]])),
+                    );
+                    self.pos = 0;
+                }
+                Err(_) => {
+                    self.eof = true;
+                }
             }
         }
     }
@@ -1061,6 +1580,56 @@ impl rodio::Source for PcmStreamSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// 端到端验证 SACD 播放链路（导出 DSF → ffmpeg 解码 → PcmStreamSource f32→i16）不会解出白噪。
+    /// 直接用真实播放代码路径，避免只测导出/只测 ffmpeg 命令导致的盲区。
+    #[test]
+    fn sacd_playback_pipeline_not_white_noise() {
+        let iso = match std::env::var("SACD_TEST_ISO") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("SACD_TEST_ISO unset; skipping");
+                return;
+            }
+        };
+        let (mut child, mut source, _dsf) = match spawn_sacd_decoder(Path::new(&iso), 0) {
+            Ok(x) => x,
+            Err(e) => panic!("spawn_sacd_decoder 拒绝播放（可能是 DST/格式）: {:?}", e),
+        };
+        // 跳过开头 1s（前导），取之后约 4s 的 i16 样本
+        const SKIP: usize = 44_100 * 2 * 1;
+        const TAKE: usize = 44_100 * 2 * 4;
+        let mut taken: Vec<i16> = Vec::with_capacity(TAKE);
+        let mut skipped = 0usize;
+        for s in source.by_ref() {
+            if skipped < SKIP {
+                skipped += 1;
+                continue;
+            }
+            taken.push(s);
+            if taken.len() >= TAKE {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let n = taken.len() as f64;
+        assert!(n > 1000.0, "解码样本过少（ffmpeg 未产出）: {}", n);
+        let mut sum_sq = 0.0f64;
+        let mut diff_sq = 0.0f64;
+        for i in 0..taken.len() {
+            let x = taken[i] as f64 / 32768.0;
+            sum_sq += x * x;
+            if i > 0 {
+                let d = x - taken[i - 1] as f64 / 32768.0;
+                diff_sq += d * d;
+            }
+        }
+        let rms = (sum_sq / n).sqrt();
+        let hf = diff_sq / sum_sq.max(1e-9);
+        eprintln!("SACD PIPELINE rms={:.3} hf={:.3}（白噪≈2，音乐远低于2）", rms, hf);
+        assert!(hf < 1.3, "播放链路解出白噪 hf={:.3}", hf);
+    }
 
     /// 构造 WAV 文件字节：RIFF + WAVE + fmt(16B, PCM 44.1kHz/16bit/stereo) + 可选前置 chunk + data
     fn wav_bytes(data: &[u8], pre_chunk: Option<(&[u8], &[u8])>) -> Vec<u8> {
@@ -1173,5 +1742,48 @@ mod tests {
         assert_eq!(off, 44);
         assert_eq!(&bytes[off..off + 4], &[0x7F, 0xFE, 0x80, 0x01]);
         assert!(head_data_has_dts(&bytes));
+    }
+}
+
+/// Linux 回退探测的 Duration 行解析测试（仅 Linux 目标编译；
+/// parse_duration_line 本身为纯函数，无平台副作用）
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn dsd_extensions_are_routed_to_ffmpeg() {
+        // DSD 扩展名需进入 ffmpeg 管道（dsd_lsbf 解码器负责 DSD→PCM）
+        assert!(FFMPEG_EXT.contains(&"dsf"));
+        assert!(FFMPEG_EXT.contains(&"dff"));
+    }
+
+    fn approx(got: Option<f64>, want: f64) {
+        let got = got.expect("应解析出时长");
+        assert!((got - want).abs() < 1e-6, "got={got} want={want}");
+    }
+
+    #[test]
+    fn parses_typical_line() {
+        let stderr = "ffmpeg version N-127579\nInput #0, flac, from 'x.flac':\n  Duration: 00:02:00.65, start: 0.000000, bitrate: 611 kb/s\n    Stream #0:0: Audio: flac, 44100 Hz\nAt least one output file must be specified\n";
+        approx(parse_duration_line(stderr), 2.0 * 60.0 + 0.65);
+    }
+
+    #[test]
+    fn parses_hours_and_missing_start() {
+        // WAV 无 start 字段；跨小时时长
+        let stderr = "Input #0, wav, from 'x.wav':\n  Duration: 01:30:05.50, bitrate: 1411 kb/s\n";
+        approx(parse_duration_line(stderr), 3600.0 + 30.0 * 60.0 + 5.5);
+    }
+
+    #[test]
+    fn none_when_missing_or_na_or_malformed() {
+        assert_eq!(
+            parse_duration_line("Input #0 ...\nAt least one output file must be specified\n"),
+            None
+        );
+        assert_eq!(parse_duration_line("  Duration: N/A, bitrate: N/A\n"), None);
+        assert_eq!(parse_duration_line("  Duration: 12:34\n"), None); // 段数不足
+        assert_eq!(parse_duration_line("  Duration: 00:00:00.00, start: 0\n"), None); // 零时长
     }
 }

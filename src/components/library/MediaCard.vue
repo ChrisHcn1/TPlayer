@@ -8,7 +8,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import Icon from '../common/Icon.vue'
 import { loadCover } from '../../composables/useTrackCover'
 
-type CardVariant = 'album' | 'artist' | 'playlist' | 'cue'
+type CardVariant = 'album' | 'artist' | 'playlist' | 'cue' | 'sacd'
 
 interface Props {
   variant: CardVariant
@@ -43,6 +43,8 @@ const variantIcon = computed(() => {
       return 'list-music'
     case 'cue':
       return 'layers'
+    case 'sacd':
+      return 'disc'
     case 'album':
     default:
       return 'disc'

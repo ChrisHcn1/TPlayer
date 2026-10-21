@@ -33,6 +33,10 @@ pub struct AppConfig {
     /// 目录自动监控配置（旧配置缺省时回落默认：开启）
     #[serde(default)]
     pub watch: WatchConfig,
+    /// 关闭窗口时的行为：false（默认）= 隐藏到托盘驻留（既有行为）；
+    /// true = 点击右上角 X 直接退出程序，不驻留托盘。
+    #[serde(rename = "quitOnClose", default)]
+    pub quit_on_close: bool,
 }
 
 /// 目录自动监控配置
@@ -125,6 +129,7 @@ impl Default for AppConfig {
             crossfade: CrossfadeConfig::default(),
             replaygain: ReplayGainConfig::default(),
             watch: WatchConfig::default(),
+            quit_on_close: false,
         }
     }
 }

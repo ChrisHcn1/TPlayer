@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::sacd::SacdArea;
+
 /// 单曲
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -44,6 +46,50 @@ pub struct Track {
     /// CUE 分轨在镜像文件中的起始偏移（秒）；非 CUE 曲目为 None
     #[serde(rename = "cueOffset", skip_serializing_if = "Option::is_none")]
     pub cue_offset: Option<f64>,
+    // —— SACD ISO 分轨字段（与 CUE 同构的虚拟分轨）——
+    #[serde(rename = "isSacd", default)]
+    pub is_sacd: bool,
+    #[serde(rename = "sacdTrackIndex", default)]
+    pub sacd_track_index: u32,
+    #[serde(rename = "sacdArea", default, skip_serializing_if = "Option::is_none")]
+    pub sacd_area: Option<SacdArea>,
+    #[serde(rename = "sacdDsdRate", default, skip_serializing_if = "Option::is_none")]
+    pub sacd_dsd_rate: Option<String>,
+}
+
+/// 整碟镜像判定键：(所在目录, 去掉扩展名的文件名)
+///
+/// 同一张碟往往有多个镜像副本（同一目录下同基名、不同扩展名，如
+/// `Album.flac` / `Album.ape`），CUE 只引用其中之一。这些副本描述的是同一张碟，
+/// 若都以普通曲目入库，会与 CUE 分轨重复。
+///
+/// 路径分隔符统一为 `/`；Windows / macOS 文件系统不区分大小写，键统一转小写，
+/// Linux 区分大小写则保持原样，避免误伤 `Album.flac` 与 `album.flac` 这类共存文件。
+pub fn disc_key(file_path: &str) -> Option<(String, String)> {
+    let norm = file_path.replace('\\', "/");
+    let name = norm.rsplit('/').next().unwrap_or_default();
+    if name.is_empty() {
+        return None;
+    }
+    let dir = match norm.rfind('/') {
+        Some(idx) => &norm[..idx],
+        None => "",
+    };
+    // 去掉最后一个扩展名（`.` 在开头时不算扩展名，如 `.hidden`）
+    let stem = match name.rfind('.') {
+        Some(idx) if idx > 0 => &name[..idx],
+        _ => name,
+    };
+    Some((norm_case(dir), norm_case(stem)))
+}
+
+/// 平台相关的大小写归一（Linux 区分大小写，其余不区分）
+fn norm_case(s: &str) -> String {
+    if cfg!(target_os = "linux") {
+        s.to_string()
+    } else {
+        s.to_lowercase()
+    }
 }
 
 /// serde skip 辅助：值为 false 时不序列化 isCue 字段
@@ -73,6 +119,9 @@ pub struct Album {
     /// 是否为 CUE 分轨专辑
     #[serde(rename = "isCue")]
     pub is_cue: bool,
+    /// 是否为 SACD ISO 分轨专辑
+    #[serde(rename = "isSacd")]
+    pub is_sacd: bool,
 }
 
 /// 歌手（聚合视图）

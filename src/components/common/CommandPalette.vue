@@ -31,7 +31,7 @@ const playlistStore = usePlaylistStore()
 const playerStore = usePlayerStore()
 const { theme, toggleTheme } = useTheme()
 const { isOpen, close } = useCommandPalette()
-const { tracks, albums, cueAlbums, artists } = storeToRefs(libraryStore)
+const { tracks, albums, cueAlbums, sacdAlbums, artists } = storeToRefs(libraryStore)
 const { playlists } = storeToRefs(playlistStore)
 
 const query = ref('')
@@ -83,12 +83,14 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
       icon,
       run: () => {
         if (base === 'cue') router.push(`/cue/${album.id}`)
+        else if (base === 'sacd') router.push(`/cue/${album.id}`)
         else router.push(`/albums/${album.id}`)
       },
     })
   }
   albums.value.slice(0, 4).forEach((album) => pushAlbum(album, 'album', 'disc'))
   cueAlbums.value.slice(0, 3).forEach((album) => pushAlbum(album, 'cue', 'layers'))
+  sacdAlbums.value.slice(0, 3).forEach((album) => pushAlbum(album, 'sacd', 'disc'))
   if (albumEntries.length > 0) result.push({ title: '专辑', entries: albumEntries.slice(0, 6) })
 
   // ---- 艺术家 ----

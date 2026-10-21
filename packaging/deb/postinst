@@ -1,0 +1,83 @@
+#!/bin/sh
+# postinst — TPlayer（Debian 原生打包）
+#
+# 安装后处理逻辑：
+#   1) 刷新桌面数据库 / MIME 数据库 / 图标缓存 / man 索引（缺失工具则静默跳过）；
+#   2) 完整性自检：二进制存在且可执行、为 ELF、架构与包声明一致、内置 ffmpeg 可执行；
+#   3) 自检失败仅告警，不阻断安装（无头环境/交叉架构场景仍应允许装上新包）。
+set -e
+
+PREFIX=@PREFIX@
+BIN=@BIN_NAME@
+PKG=@PACKAGE@
+PKG_ARCH=@ARCHITECTURE@
+LIB_BIN_DIR=@LIB_DIR@/bin
+
+refresh_caches() {
+  command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database -q "$PREFIX/share/applications" 2>/dev/null || true
+  command -v update-mime-database >/dev/null 2>&1 && \
+    update-mime-database "$PREFIX/share/mime/packages" >/dev/null 2>&1 || true
+  command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+    gtk-update-icon-cache -q -t -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+  command -v update-man-db >/dev/null 2>&1 && \
+    update-man-db --quiet >/dev/null 2>&1 || true
+}
+
+case "$1" in
+  configure)
+    : # 常规配置（安装 / 升级后）
+    ;;
+  triggered)
+    : # 其它包更新了 MIME / 图标 / applications 目录（见 DEBIAN/triggers）
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    : # 升级/卸载中止：无需回滚
+    ;;
+esac
+
+refresh_caches
+
+# ---------------------------------------------------------------- 完整性自检
+status=0
+if [ ! -x "$PREFIX/bin/$BIN" ]; then
+  echo "$PKG: 警告：未找到可执行文件 $PREFIX/bin/$BIN" >&2
+  status=1
+elif command -v file >/dev/null 2>&1; then
+  desc=$(file -b "$PREFIX/bin/$BIN" 2>/dev/null || true)
+  case "$desc" in
+    *ELF*)
+      case "$PKG_ARCH" in
+        amd64) want="x86-64" ;;
+        arm64) want="ARM aarch64" ;;
+        *)     want="" ;;
+      esac
+      if [ -n "$want" ]; then
+        case "$desc" in
+          *"$want"*) : ;;
+          *) echo "$PKG: 警告：二进制架构（$desc）与包架构（$PKG_ARCH）不符" >&2; status=1 ;;
+        esac
+      fi
+      ;;
+    *)
+      echo "$PKG: 警告：$PREFIX/bin/$BIN 不是 ELF 可执行文件（$desc）" >&2
+      status=1
+      ;;
+  esac
+fi
+
+# 内置 FFmpeg 工具的可执行性（未随包分发时目录不存在，自动跳过）
+if [ -d "$LIB_BIN_DIR" ]; then
+  for tool in ffmpeg ffprobe; do
+    if [ -e "$LIB_BIN_DIR/$tool" ] && [ ! -x "$LIB_BIN_DIR/$tool" ]; then
+      echo "$PKG: 警告：$LIB_BIN_DIR/$tool 不可执行" >&2
+      status=1
+    fi
+  done
+fi
+
+if [ "$status" -eq 0 ]; then
+  echo "$PKG: 安装完成。命令行执行 '$BIN' 启动，或从应用菜单 / 文件管理器打开音频。"
+fi
+
+exit 0

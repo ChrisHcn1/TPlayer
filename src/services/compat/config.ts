@@ -9,10 +9,14 @@
  * 远程拉取结果会缓存到 localStorage（带 TTL），拉取失败不影响主播放器。
  */
 import { DEFAULT_COMPAT_CONFIG, type CompatConfig } from './types'
+import { STORAGE_KEY_PREFIX } from '../../utils/platform'
 
-const LOCAL_OVERRIDE_KEY = 'tplayer-next.compat.config.override'
-const LOCAL_URL_KEY = 'tplayer-next.compat.config.url'
-const LOCAL_CACHE_KEY = 'tplayer-next.compat.config.cache'
+// 命名隔离（Linux 桌面端）：键前缀按平台分支——Linux 桌面端为 `tplayer.*`，
+// Windows 桌面端与浏览器预览保持历史前缀 `tplayer-next.*`（线上用户数据零影响，
+// 与 src/constants.ts 的持久化键同一策略，见 utils/platform）。
+const LOCAL_OVERRIDE_KEY = `${STORAGE_KEY_PREFIX}.compat.config.override`
+const LOCAL_URL_KEY = `${STORAGE_KEY_PREFIX}.compat.config.url`
+const LOCAL_CACHE_KEY = `${STORAGE_KEY_PREFIX}.compat.config.cache`
 const TTL_MS = 10 * 60 * 1000
 
 function remoteUrl(): string | null {

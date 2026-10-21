@@ -12,9 +12,10 @@
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { listen } from '@tauri-apps/api/event'
 
 import { libraryService } from '../services/library'
-import { normalizeError } from '../services/ipc'
+import { isTauriRuntime, normalizeError } from '../services/ipc'
 import { useToastStore } from './toast'
 import type { Album, Artist, LibraryStats, RecentEntry, ScanProgress, Track } from '../types'
 
@@ -39,6 +40,7 @@ export const useLibraryStore = defineStore('library', () => {
   const tracks = ref<Track[]>([])
   const albums = ref<Album[]>([])
   const cueAlbums = ref<Album[]>([])
+  const sacdAlbums = ref<Album[]>([])
   const artists = ref<Artist[]>([])
   const stats = ref<LibraryStats | null>(null)
   const favoriteIds = ref<string[]>([])
@@ -89,7 +91,9 @@ export const useLibraryStore = defineStore('library', () => {
 
   function albumById(id: string | null | undefined): Album | undefined {
     if (!id) return undefined
-    return [...albums.value, ...cueAlbums.value].find((album) => album.id === id)
+    return [...albums.value, ...cueAlbums.value, ...sacdAlbums.value].find(
+      (album) => album.id === id,
+    )
   }
 
   function artistByName(name: string | null | undefined): Artist | undefined {
@@ -129,11 +133,12 @@ export const useLibraryStore = defineStore('library', () => {
     loading.value = true
     error.value = null
     try {
-      const [trackList, albumList, cueList, artistList, libraryStats, favs, recent] =
+      const [trackList, albumList, cueList, sacdList, artistList, libraryStats, favs, recent] =
         await Promise.all([
           libraryService.tracks(),
           libraryService.albums(),
           libraryService.cueAlbums(),
+          libraryService.sacdAlbums(),
           libraryService.artists(),
           libraryService.stats(),
           libraryService.favoriteIds(),
@@ -142,6 +147,7 @@ export const useLibraryStore = defineStore('library', () => {
       tracks.value = trackList
       albums.value = albumList
       cueAlbums.value = cueList
+      sacdAlbums.value = sacdList
       artists.value = artistList
       stats.value = libraryStats
       favoriteIds.value = favs
@@ -156,13 +162,38 @@ export const useLibraryStore = defineStore('library', () => {
   /** 触发一次扫描（扫描根目录取 settings.libraryDirs，由 Rust 侧读取配置） */
   async function scan(): Promise<void> {
     error.value = null
+    // 监听一次后端扫描进度事件：
+    //  - 中间态写入 scanProgress（既有能力，此前无人订阅，顺带接通）；
+    //  - Linux：NTFS 分区上的目录可能因挂载权限无法读取，后端在完成事件里
+    //    带回聚合错误（progress.error）。这里捕获并向用户明示，避免
+    //    「部分目录被静默跳过、曲目缺失但无任何提示」。Windows 该字段恒为
+    //    null，不产生任何提示，行为零变化。
+    let scanError: string | null = null
+    let unlisten: (() => void) | null = null
+    if (isTauriRuntime()) {
+      try {
+        unlisten = await listen<ScanProgress>('library://scan-progress', (e) => {
+          applyScanProgress(e.payload)
+          if (e.payload.stage === 'done' && e.payload.error) {
+            scanError = e.payload.error
+          }
+        })
+      } catch {
+        /* 事件订阅失败不阻断扫描本身 */
+      }
+    }
     try {
       await libraryService.scan()
       await refresh()
       scanProgress.value = { ...scanProgress.value, stage: 'done' }
+      if (scanError) {
+        toast.warning(scanError)
+      }
     } catch (cause) {
       error.value = normalizeError(cause).message
       scanProgress.value = { ...scanProgress.value, stage: 'failed', error: error.value }
+    } finally {
+      unlisten?.()
     }
   }
 
@@ -260,6 +291,7 @@ export const useLibraryStore = defineStore('library', () => {
     tracks.value = []
     albums.value = []
     cueAlbums.value = []
+    sacdAlbums.value = []
     artists.value = []
     stats.value = null
     favoriteIds.value = []
@@ -273,6 +305,7 @@ export const useLibraryStore = defineStore('library', () => {
     tracks,
     albums,
     cueAlbums,
+    sacdAlbums,
     artists,
     stats,
     favoriteIds,

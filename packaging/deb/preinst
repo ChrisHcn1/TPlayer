@@ -1,0 +1,19 @@
+#!/bin/sh
+# preinst — TPlayer（Debian 原生打包）
+#
+# 安装前处理逻辑。升级场景无需干预：dpkg 先解包新文件、后运行 postinst，
+# 旧文件由新包同名路径直接覆盖（本包不含 /etc 配置文件，故无 conffiles 迁移）。
+#
+# 如需在安装/升级前主动停止运行中的实例，可取消下方 stop_running 调用的注释。
+set -e
+
+BIN=@BIN_NAME@
+
+case "$1" in
+  install|upgrade)
+    # 预留：安装前环境预检（磁盘空间、架构等由 dpkg 自身保证）
+    :
+    ;;
+esac
+
+exit 0

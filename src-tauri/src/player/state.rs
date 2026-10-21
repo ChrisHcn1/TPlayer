@@ -151,12 +151,6 @@ pub enum PlaybackEvent {
         #[serde(rename = "trackId")]
         track_id: String,
     },
-    /// 下一曲已预解码到待命链路（自动连播预加载完成）
-    #[serde(rename = "nextPreloaded")]
-    NextPreloaded {
-        #[serde(rename = "trackId")]
-        track_id: String,
-    },
     /// 睡眠定时器状态变更（设置 / 到期触发 / 取消）
     SleepTimer {
         active: bool,

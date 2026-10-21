@@ -20,6 +20,7 @@ import {
   buildStats,
   CUE_ALBUM_IDS,
   getAllTracks,
+  SACD_ALBUM_IDS,
 } from './dataset'
 
 const RECENT_LIMIT = 200
@@ -154,13 +155,20 @@ export const webLibrary = {
 
   async albums(): Promise<Album[]> {
     const tracks = visibleTracks()
-    // 普通专辑视图排除 CUE 专辑（CUE 由独立入口承载）
-    return aggregateAlbums(tracks).filter((album) => !CUE_ALBUM_IDS.has(album.id))
+    // 普通专辑视图排除 CUE / SACD 专辑（均由独立入口承载）
+    return aggregateAlbums(tracks).filter(
+      (album) => !CUE_ALBUM_IDS.has(album.id) && !SACD_ALBUM_IDS.has(album.id),
+    )
   },
 
   async cueAlbums(): Promise<Album[]> {
     const tracks = visibleTracks()
     return aggregateAlbums(tracks).filter((album) => CUE_ALBUM_IDS.has(album.id))
+  },
+
+  async sacdAlbums(): Promise<Album[]> {
+    const tracks = visibleTracks()
+    return aggregateAlbums(tracks).filter((album) => SACD_ALBUM_IDS.has(album.id))
   },
 
   async artists(): Promise<Artist[]> {

@@ -1,0 +1,31 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: tplayer
+Upstream-Contact: TPlayer Contributors <noreply@tplayer.local>
+Source: @HOMEPAGE@
+
+Files: *
+Copyright: 2024-2026 TPlayer Contributors
+License: ISC
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+License: ISC
+ See above.
+
+Files: lib/tplayer/bin/ffmpeg lib/tplayer/bin/ffprobe
+Copyright: FFmpeg developers
+License: GPL-3.0-or-later
+ 随包分发的 Linux 版 FFmpeg 为上游静态构建（BtbN/FFmpeg-Builds，GPL 启用），
+ 以独立可执行文件形式分发、未与本项目静态链接，其自身仍受 GPL 约束；
+ 本项目源码不受影响。构建时未放置 bin/linux（改用系统 ffmpeg）时不涉及本段。
+ On Debian systems, the complete text of the GNU General Public License
+ version 3 can be found in "/usr/share/common-licenses/GPL-3".

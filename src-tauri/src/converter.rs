@@ -195,7 +195,13 @@ pub fn start_batch(
         let format = OutputFormat::parse(&options.format)
             .ok_or_else(|| AppError::Converter(format!("不支持的输出格式: {}", options.format)))?;
         resolve_ffmpeg().ok_or_else(|| {
-            AppError::Converter("未找到 bin/ffmpeg.exe，无法执行转换".into())
+            // 平台化提示：Linux 下 ffmpeg 可来自系统 PATH 或随包内置
+            // （/usr/lib/tplayer/bin）；Windows 下随安装包分发于 bin/。
+            #[cfg(target_os = "linux")]
+            let hint = "未找到 ffmpeg（请安装系统 ffmpeg：apt install ffmpeg，或使用随包内置版本）";
+            #[cfg(not(target_os = "linux"))]
+            let hint = "未找到 bin/ffmpeg.exe，无法执行转换";
+            AppError::Converter(hint.into())
         })?;
 
         let output_dir = PathBuf::from(&options.output_dir);
@@ -293,6 +299,12 @@ fn convert_one(
     output_dir: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), TaskError> {
+    // Linux：曲库中的路径可能是非 UTF-8 文件名的容错编码（NTFS 场景），
+    // 先还原为文件系统真实路径，否则 is_file 探测失败、转换无法进行。
+    // 合法路径零成本（一次 exists 探测）；Windows 行为不变。
+    #[cfg(target_os = "linux")]
+    let input = crate::library::scan_linux::resolve_path_str(&task.path);
+    #[cfg(not(target_os = "linux"))]
     let input = PathBuf::from(&task.path);
     if !input.is_file() {
         return Err(TaskError::Failed(format!("文件不存在: {}", task.path)));

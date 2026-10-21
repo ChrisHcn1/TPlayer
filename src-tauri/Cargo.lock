@@ -4820,7 +4820,9 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 name = "tplayer-next"
 version = "2.0.0"
 dependencies = [
+ "byteorder",
  "chrono",
+ "encoding_rs",
  "lofty",
  "notify",
  "rand 0.8.8",

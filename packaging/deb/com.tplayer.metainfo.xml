@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream 元数据（软件中心展示）。@VERSION@/@RELEASE_DATE@/@HOMEPAGE@ 由构建脚本替换。 -->
+<component type="desktop-application">
+  <id>com.tplayer.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>ISC</project_license>
+  <name>TPlayer</name>
+  <summary>本地优先的桌面音乐播放器</summary>
+  <description>
+    <p>TPlayer 是本地优先的桌面音乐播放器：曲库数据与在线能力解耦，在线模块默认关闭，且默认不上传本地曲库信息。</p>
+    <p>原生支持 MP3/FLAC/WAV/AAC/OGG/Opus；APE/DSD/DTS/WMA/WV/TTA/TAK/AIFF 等经由 FFmpeg 解码。所有曲库数据仅保存在本机。</p>
+  </description>
+  <launchable type="desktop-file-id">com.tplayer.desktop</launchable>
+  <url type="homepage">@HOMEPAGE@</url>
+  <provides>
+    <id>com.tplayer.desktop</id>
+    <binary>@BIN_NAME@</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Music</category>
+    <category>Player</category>
+  </categories>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">none</content_attribute>
+    <content_attribute id="violence-realistic">none</content_attribute>
+    <content_attribute id="drugs-alcohol">none</content_attribute>
+    <content_attribute id="language-profanity">none</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="@VERSION@" date="@RELEASE_DATE@">
+      <description>
+        <p>原生 DEB 打包；支持 amd64/arm64。</p>
+      </description>
+    </release>
+  </releases>
+</component>

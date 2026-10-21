@@ -31,6 +31,7 @@ import { updateService, type Update, type UpdateProgress } from '../services/upd
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import ConverterView from './ConverterView.vue'
+import StatsView from './StatsView.vue'
 import { useLayout } from '../composables/useLayout'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -38,9 +39,11 @@ type SettingsTab =
   | 'appearance'
   | 'playback'
   | 'library'
+  | 'report'
   | 'lyrics'
   | 'online'
   | 'tools'
+  | 'window'
   | 'update'
   | 'about'
 
@@ -72,6 +75,7 @@ const TAB_GROUPS: ReadonlyArray<TabGroup> = [
     tabs: [
       { key: 'playback', label: '播放', icon: 'play' },
       { key: 'library', label: '媒体库', icon: 'disc' },
+      { key: 'report', label: '收听报告', icon: 'clock' },
     ],
   },
   {
@@ -86,6 +90,7 @@ const TAB_GROUPS: ReadonlyArray<TabGroup> = [
     key: 'system',
     label: '系统',
     tabs: [
+      { key: 'window', label: '窗口', icon: 'square' },
       { key: 'update', label: '更新', icon: 'download' },
       { key: 'about', label: '关于', icon: 'info' },
     ],
@@ -541,6 +546,11 @@ async function resetSettings(): Promise<void> {
         </section>
       </div>
 
+      <!-- 收听报告（由"工具"页签独立为"播放与媒体"下的页签，置于媒体库之后） -->
+      <div v-else-if="activeTab === 'report'" class="panel">
+        <StatsView embedded />
+      </div>
+
       <!-- 在线服务 -->
       <div v-else-if="activeTab === 'online'" class="panel">
         <section class="setting-card">
@@ -590,17 +600,31 @@ async function resetSettings(): Promise<void> {
         </section>
       </div>
 
-      <!-- 工具：收听报告入口 + 音频转换器（原侧栏"工具"入口移入设置页，命令面板仍可直达） -->
+      <!-- 工具：音频转换器（收听报告已独立为"播放与媒体"下的页签） -->
       <div v-else-if="activeTab === 'tools'" class="settings__tools">
-        <button class="tool-entry" @click="router.push('/stats')">
-          <span class="tool-entry__icon"><Icon name="clock" :size="20" /></span>
-          <span class="tool-entry__meta">
-            <span class="tool-entry__title">收听报告</span>
-            <span class="tool-entry__desc">播放次数 / 累计时长 / TOP 榜单 / 最常听时段，支持导出分享卡片</span>
-          </span>
-          <Icon name="next" :size="16" class="tool-entry__chevron" />
-        </button>
         <ConverterView />
+      </div>
+
+      <!-- 窗口：关闭按钮行为 -->
+      <div v-else-if="activeTab === 'window'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">关闭按钮</h2>
+          <p class="setting-card__desc">决定点击窗口右上角 X 时的行为，立即生效并持久化。</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">点击 X 直接关闭程序</span>
+              <span class="setting-row__hint">
+                开启后点击右上角 X 立即退出；关闭时（默认）仅隐藏到托盘后台驻留，可从托盘菜单恢复或退出
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.quitOnClose"
+              @change="settingsStore.setQuitOnClose(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+        </section>
       </div>
 
       <!-- 更新 -->

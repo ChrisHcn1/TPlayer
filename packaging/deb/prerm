@@ -1,0 +1,33 @@
+#!/bin/sh
+# prerm — TPlayer（Debian 原生打包）
+#
+# 卸载 / 升级前处理逻辑：请求运行中的实例退出，确保二进制可被安全替换或移除。
+# 全部为尽力而为：实例不存在或无法结束时不阻断卸载流程。
+set -e
+
+BIN=@BIN_NAME@
+
+stop_running() {
+  command -v pkill >/dev/null 2>&1 || return 0
+  pkill -x "$BIN" 2>/dev/null || return 0
+  # 等待退出（最多 ~3s）
+  i=0
+  while [ "$i" -lt 30 ]; do
+    pgrep -x "$BIN" >/dev/null 2>&1 || return 0
+    sleep 0.1 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  pkill -9 -x "$BIN" 2>/dev/null || true
+}
+
+case "$1" in
+  remove)
+    stop_running
+    ;;
+  upgrade|failed-upgrade|deconfigure)
+    # 升级：先让旧实例退出，避免旧二进制被占用导致解包失败
+    stop_running
+    ;;
+esac
+
+exit 0

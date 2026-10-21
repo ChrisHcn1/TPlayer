@@ -131,6 +131,16 @@ pub fn run() {
                 state.watch.reconfigure(app_handle.clone(), &dirs, watch_enabled);
             }
 
+            // 显式给主窗口设置图标：Linux/X11·Wayland 下若不设置，窗口与任务栏
+            // 会回退为系统默认（齿轮）图标；安装版另由 .desktop 提供图标。
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(icon) =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                {
+                    let _ = window.set_icon(icon);
+                }
+            }
+
             // ---- 系统托盘 ----
             // 菜单：播放/暂停、上一首、下一首 | 显示主窗口、退出
             let toggle_item = MenuItem::with_id(app, "tray_toggle", "播放", true, None::<&str>)?;
@@ -152,13 +162,10 @@ pub fn run() {
                 ],
             )?;
 
-            let tray_icon = app
-                .default_window_icon()
-                .cloned()
-                .unwrap_or_else(|| {
-                    tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
-                        .expect("加载托盘图标失败")
-                });
+            // 托盘图标直接使用应用自身的 32x32 PNG，避免任何情况下回退到系统默认图标。
+            let tray_icon =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                    .expect("加载托盘图标失败");
 
             let should_quit_for_tray = should_quit.clone();
             let tray = TrayIconBuilder::with_id("main-tray")
@@ -308,11 +315,13 @@ pub fn run() {
                 }
             });
 
-            // 窗口关闭时保存播放状态，并隐藏到托盘而非退出（托盘菜单"退出"才真正退出）
+            // 窗口关闭时保存播放状态，随后按设置决定"隐藏到托盘驻留"还是"直接退出"
+            // （托盘菜单"退出"始终真正退出，置位 should_quit 后不拦截）。
             if let Some(window) = app.get_webview_window("main") {
                 let player_for_close = player_handle.clone();
                 let window_for_hide = window.clone();
                 let should_quit_for_close = should_quit.clone();
+                let app_for_close = app_handle.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         if let Ok(mut player) = player_for_close.lock() {
@@ -320,6 +329,17 @@ pub fn run() {
                         }
                         // 托盘"退出"已置位：不拦截，让应用真正退出
                         if should_quit_for_close.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        // 开启"关闭即退出"：读取实时配置，直接退出，不驻留托盘
+                        let quit_on_close = app_for_close
+                            .state::<AppState>()
+                            .config
+                            .lock()
+                            .map(|c| c.quit_on_close)
+                            .unwrap_or(false);
+                        if quit_on_close {
+                            app_for_close.exit(0);
                             return;
                         }
                         api.prevent_close();
@@ -374,6 +394,7 @@ pub fn run() {
             commands::library::library_artists,
             commands::library::library_stats,
             commands::library::library_cue_albums,
+            commands::library::library_sacd_albums,
             commands::library::library_favorite_ids,
             commands::library::library_set_favorite,
             commands::library::library_recent,

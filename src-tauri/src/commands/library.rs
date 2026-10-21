@@ -13,7 +13,7 @@ use tauri::{AppHandle, State};
 use crate::cover;
 use crate::error::{AppError, AppResult};
 use crate::library::models::{Album, Artist, LibraryStats, Playlist, RecentEntry, Track};
-use crate::library::scan::{discover_audio_files, parse_track, scan_directory, SUPPORTED_EXT};
+use crate::library::scan::{collect_import_tracks, scan_directory};
 use crate::AppState;
 
 /// 启动一次曲库扫描（增量）
@@ -35,17 +35,41 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
     // 扫描前先校验每个根目录是否可达：网络盘未挂载 / 凭据缺失 / 路径非法（如
     // SMB 共享写成 172.18.0.21/songs 而非常规 \\\\host\\share，或相对路径）都会被
     // 静默吞掉导致「扫完 0 文件」。这里显式报错让用户看到真实原因。
+    //
+    // Linux 补充：NTFS 分区（ntfs-3g / ntfs3）按挂载选项决定归属，目录可 stat
+    // 但当前用户无读权限时 read_dir 返回 EACCES——metadata 探测不到这一点，
+    // 会在扫描阶段被逐目录跳过。Linux 追加一次 read_dir 预检，把「挂载点存在
+    // 但不可读」与「挂载点不存在」区分开；错误文案按平台分支，Windows 保持
+    // 原有 SMB 提示逐字不变。
     let mut inaccessible = Vec::new();
     for root in &roots {
         if std::fs::metadata(root).is_err() {
             inaccessible.push(root.to_string_lossy().to_string());
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(e) = std::fs::read_dir(root) {
+            inaccessible.push(format!(
+                "{}：目录不可读（{}）。NTFS 分区请检查挂载选项：\
+                 以 root 挂载并指定 uid/gid（当前用户），或为 ntfs-3g 启用 permissions 选项",
+                root.display(),
+                e
+            ));
         }
     }
     if !inaccessible.is_empty() {
-        return Err(AppError::Library(format!(
+        #[cfg(target_os = "linux")]
+        let message = format!(
+            "以下曲库目录无法访问（未挂载 / 无读取权限 / 路径非法；\
+             请确认分区已挂载且当前用户有读取权限）：{}",
+            inaccessible.join("；")
+        );
+        #[cfg(not(target_os = "linux"))]
+        let message = format!(
             "以下曲库目录无法访问（网络盘未挂载 / 凭据缺失 / 路径非法；Windows SMB 共享需以 \\\\host\\share 形式，如 \\\\172.18.0.21\\songs，或将共享映射为盘符如 Y:\\songs）：{}",
             inaccessible.join("；")
-        )));
+        );
+        return Err(AppError::Library(message));
     }
 
     // 增量扫描基线（id/path/mtime），扫描为同步阻塞操作，在命令线程中执行
@@ -350,6 +374,12 @@ pub fn library_cue_albums(state: State<'_, AppState>) -> AppResult<Vec<Album>> {
     Ok(state.library.lock().unwrap().cue_albums())
 }
 
+/// SACD ISO 分轨专辑（整张 ISO 拆出的虚拟多轨专辑）
+#[tauri::command]
+pub fn library_sacd_albums(state: State<'_, AppState>) -> AppResult<Vec<Album>> {
+    Ok(state.library.lock().unwrap().sacd_albums())
+}
+
 #[tauri::command]
 pub fn library_favorite_ids(state: State<'_, AppState>) -> AppResult<Vec<String>> {
     Ok(state.library.lock().unwrap().favorite_ids())
@@ -485,29 +515,8 @@ pub fn library_import_files(
     state: State<'_, AppState>,
     paths: Vec<String>,
 ) -> AppResult<Vec<String>> {
-    let mut to_parse: Vec<PathBuf> = Vec::with_capacity(paths.len());
-    for raw in paths {
-        let path = PathBuf::from(raw);
-        if path.is_dir() {
-            to_parse.extend(discover_audio_files(&path));
-        } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if SUPPORTED_EXT.contains(&ext.to_lowercase().as_str()) {
-                    to_parse.push(path);
-                }
-            }
-        }
-    }
-    if to_parse.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut upserts: Vec<Track> = Vec::with_capacity(to_parse.len());
-    for path in &to_parse {
-        if let Some(track) = parse_track(path) {
-            upserts.push(track);
-        }
-    }
+    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let upserts = collect_import_tracks(&path_bufs);
     if upserts.is_empty() {
         return Ok(Vec::new());
     }
@@ -605,6 +614,12 @@ fn read_embedded_lyrics(path: &std::path::Path) -> Option<String> {
 /// 读取曲目元数据：先读曲库缓存（快），再用 lofty + ffprobe 补齐 bit_depth/channels 等技术字段
 fn enrich_track(track: &Track) -> TrackInfo {
     use lofty::file::AudioFile;
+    // Linux：还原非 UTF-8 文件名的容错编码路径（NTFS 场景；合法路径零成本直连）
+    #[cfg(target_os = "linux")]
+    let pb = crate::library::scan_linux::resolve_path_str(&track.file_path);
+    #[cfg(target_os = "linux")]
+    let path = pb.as_path();
+    #[cfg(not(target_os = "linux"))]
     let path = std::path::Path::new(&track.file_path);
     let mut bit_depth = None;
     let mut channels = None;

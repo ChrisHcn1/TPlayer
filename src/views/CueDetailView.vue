@@ -1,6 +1,9 @@
 <script setup lang="ts">
 /**
- * 分轨专辑详情（/cue/:id）：整盘信息 + 分轨曲目表（保留艺术家列，整盘可能多人）。
+ * 分轨专辑详情（/cue/:id）：CUE 整盘与 SACD ISO 共用此详情。
+ *
+ * 两者均为"整盘镜像拆出的虚拟多轨专辑"，UI 同构；仅角标 / 图标与文案按
+ * 专辑类型（isSacd）区分，播放链路由引擎按 is_cue / is_sacd 自动路由。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -25,9 +28,18 @@ const playerStore = usePlayerStore()
 const { playTracks } = useTrackActions()
 
 const cueId = String(route.params.id ?? '')
-const album = computed(() => libraryStore.cueAlbums.find((item) => item.id === cueId))
+// CUE 与 SACD 虚拟专辑统一走 /cue/:id，这里在两集合里查找
+const album = computed(
+  () =>
+    libraryStore.cueAlbums.find((item) => item.id === cueId) ??
+    libraryStore.sacdAlbums.find((item) => item.id === cueId),
+)
 const tracks = computed(() => libraryStore.tracksOfAlbum(cueId))
 const { coverUrl } = useGroupCover(() => cueId)
+
+const isSacd = computed(() => album.value?.isSacd === true)
+const badge = computed(() => (isSacd.value ? 'SACD' : 'CUE'))
+const heroIcon = computed(() => (isSacd.value ? 'disc' : 'layers'))
 
 const buildContext = (): PlayContext => ({
   source: 'album',
@@ -52,8 +64,8 @@ async function shuffleAll(): Promise<void> {
   <section class="view">
     <template v-if="album">
       <DetailHero
-        icon="layers"
-        badge="CUE"
+        :icon="heroIcon"
+        :badge="badge"
         :cover-url="coverUrl"
         :title="album.name"
         :subtitle="album.artists.join(' / ')"
@@ -88,7 +100,7 @@ async function shuffleAll(): Promise<void> {
       />
     </template>
 
-    <EmptyState v-else icon="layers" title="分轨专辑不存在" description="它可能已被移除，请返回分轨列表">
+    <EmptyState v-else :icon="heroIcon" title="分轨专辑不存在" description="它可能已被移除，请返回分轨列表">
       <BaseButton size="sm" variant="subtle" @click="router.push('/cue')">
         <Icon name="back" :size="14" />
         返回分轨专辑

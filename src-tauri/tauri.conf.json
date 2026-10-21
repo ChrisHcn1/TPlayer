@@ -36,8 +36,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "app", "dmg"],
     "category": "Music",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
     "shortDescription": "TPlayer —— 本地优先的桌面音乐播放器",
     "longDescription": "TPlayer 是本地优先的桌面音乐播放器：曲库数据与在线能力解耦，在线模块默认关闭且默认不上传本地曲库信息。基于 Tauri 2、Vue 3 与 Rust 构建，所有曲目数据保存在本机。",
     "icon": [

@@ -37,6 +37,18 @@ export interface Track {
   addedAt: number
   /** 文件修改时间（Unix 秒），用于增量扫描 */
   modifiedAt: number
+  /** 是否为 CUE 分轨 */
+  isCue?: boolean
+  /** CUE 分轨在镜像文件中的起始秒数 */
+  cueOffset?: number | null
+  /** 是否为 SACD ISO 虚拟分轨 */
+  isSacd?: boolean
+  /** SACD 分轨在 ISO 内的 0-based 索引 */
+  sacdTrackIndex?: number
+  /** SACD 区域：0=2ch 立体声 / 1=多声道 */
+  sacdArea?: number
+  /** 原始 DSD 采样率（DSD64=2822400） */
+  sacdDsdRate?: number
 }
 
 /** 专辑（聚合视图，不落盘为独立实体） */
@@ -50,6 +62,8 @@ export interface Album {
   hasCover: boolean
   /** 是否为 CUE 分轨专辑（整盘镜像拆出的虚拟专辑） */
   isCue?: boolean
+  /** 是否为 SACD ISO 虚拟专辑 */
+  isSacd?: boolean
 }
 
 /** 歌手（聚合视图） */

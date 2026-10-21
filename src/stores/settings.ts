@@ -32,6 +32,7 @@ export interface PersistedSettings {
   crossfade: { enabled: boolean; duration_ms: number }
   replaygain: { enabled: boolean; targetLufs: number }
   watch: { enabled: boolean }
+  quitOnClose: boolean
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -46,6 +47,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const crossfade = ref({ enabled: true, duration_ms: 1000 })
   const replaygain = ref({ enabled: true, targetLufs: -14 })
   const watch = ref({ enabled: true })
+  // 关闭窗口时是否直接退出（默认 false = 隐藏到托盘驻留）
+  const quitOnClose = ref(false)
 
   /** 导出当前设置为持久化结构 */
   function toPersisted(): PersistedSettings {
@@ -57,6 +60,7 @@ export const useSettingsStore = defineStore('settings', () => {
       crossfade: { ...crossfade.value },
       replaygain: { ...replaygain.value },
       watch: { ...watch.value },
+      quitOnClose: quitOnClose.value,
     }
   }
 
@@ -106,6 +110,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     if (persisted.watch && typeof persisted.watch.enabled === 'boolean') {
       watch.value.enabled = persisted.watch.enabled
+    }
+    if (typeof persisted.quitOnClose === 'boolean') {
+      quitOnClose.value = persisted.quitOnClose
     }
   }
 
@@ -204,6 +211,12 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
+  /** 设置关闭窗口时是否直接退出（开启后点 X 退出；关闭则隐藏到托盘驻留） */
+  async function setQuitOnClose(next: boolean): Promise<void> {
+    quitOnClose.value = next
+    persist()
+  }
+
   /**
    * 恢复出厂默认（仅重置"设置"，不影响曲库文件与播放历史）
    * 主题不在此重置：由 useTheme.resetTheme() 单独负责，保证主题只有一个写入方。
@@ -216,6 +229,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfade.value = { enabled: true, duration_ms: 1000 }
     replaygain.value = { enabled: true, targetLufs: -14 }
     watch.value = { enabled: true }
+    quitOnClose.value = false
     persist()
     void playerService.setCrossfade(true, 1000)
     void playerService.setReplaygain(true)
@@ -229,6 +243,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfade,
     replaygain,
     watch,
+    quitOnClose,
     restore,
     persist,
     setLocale,
@@ -241,6 +256,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setCrossfadeDuration,
     setReplaygainEnabled,
     setWatchEnabled,
+    setQuitOnClose,
     reset,
   }
 })

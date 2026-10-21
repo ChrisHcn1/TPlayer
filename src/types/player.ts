@@ -123,7 +123,6 @@ export type PlaybackEvent =
   | { type: 'mode'; payload: { mode: PlayMode } }
   | { type: 'rate'; payload: { rate: number } }
   | { type: 'ended'; payload: { trackId: string } }
-  | { type: 'nextPreloaded'; payload: { trackId: string } }
   | { type: 'sleepTimer'; payload: SleepTimerState }
   | { type: 'queue'; payload: PlayContext }
   | { type: 'error'; payload: { message: string; trackId: string | null } }

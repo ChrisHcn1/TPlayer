@@ -1,0 +1,6 @@
+# Debian dpkg 触发器（Policy §7.6）：
+# 其它包更新下列目录时激活本包的 postinst（triggered）以刷新缓存，
+# 避免「装了一个新主题/图标包后本应用图标不刷新」的问题。
+interest-noawait /usr/share/icons/hicolor
+interest-noawait /usr/share/mime/packages
+interest-noawait /usr/share/applications

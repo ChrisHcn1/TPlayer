@@ -1,0 +1,36 @@
+#!/bin/sh
+# postrm — TPlayer（Debian 原生打包）
+#
+# 卸载后处理逻辑：
+#   remove  —— dpkg 已删除包内文件，此处只做缓存刷新；
+#   purge   —— 额外清理本包创建的系统级目录（用户数据 ~/.local/share/<id>
+#              不受影响；需连用户数据一并清除请用 scripts/uninstall-deb.sh --purge-data）；
+#   其余状态 —— 无需处理。
+set -e
+
+PREFIX=@PREFIX@
+LIB_DIR=@LIB_DIR@
+PKG=@PACKAGE@
+
+case "$1" in
+  purge)
+    # 清理安装期可能产生的系统级缓存目录（幂等）
+    rm -rf "$LIB_DIR" 2>/dev/null || true
+    rm -rf "/var/cache/$PKG" 2>/dev/null || true
+    ;;
+  remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    : # dpkg 已处理包内文件
+    ;;
+esac
+
+# 刷新桌面 / MIME / 图标 / man 索引，让入口与文件关联立即失效
+command -v update-desktop-database >/dev/null 2>&1 && \
+  update-desktop-database -q "$PREFIX/share/applications" 2>/dev/null || true
+command -v update-mime-database >/dev/null 2>&1 && \
+  update-mime-database "$PREFIX/share/mime/packages" >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+  gtk-update-icon-cache -q -t -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+command -v update-man-db >/dev/null 2>&1 && \
+  update-man-db --quiet >/dev/null 2>&1 || true
+
+exit 0

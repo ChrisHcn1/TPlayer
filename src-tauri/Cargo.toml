@@ -45,6 +45,8 @@ rodio = "0.19"
 lofty = "0.22"
 # 稳定曲目 ID 生成（基于文件路径哈希）
 sha2 = "0.10"
+# SACD ISO 解析（按大端字节序读取 ISO-9660 / DSD 头部）
+byteorder = "1"
 # 异步运行时（Tauri 已带 tokio，但显式声明便于 spawn 扫描任务）
 tokio = { version = "1", features = ["sync", "rt"] }
 # 时间戳
@@ -55,6 +57,9 @@ rand = "0.8"
 notify = "6"
 # LRC 时间标签解析
 regex = "1"
+# 文本编码自动识别：CUE/LRC 等本地文本常为 GBK/GB18030（中文），需正确解码否则标题乱码、
+# FILE 路径错误导致无法播放
+encoding_rs = "0.8"
 # 在线歌词抓取（默认关闭，受设置开关控制）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 

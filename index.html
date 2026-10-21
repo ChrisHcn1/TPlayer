@@ -19,14 +19,23 @@
        *
        * 现约定：
        *  - 主题唯一载体是 <html data-theme="dark|light">，样式全部走 CSS 变量；
-       *  - 唯一数据源是 localStorage 的主题键 'tplayer-next.theme'，其唯一持有者为
+       *  - 唯一数据源是 localStorage 的主题键，其唯一持有者为
        *    src/composables/useTheme.ts（settings store 已移除 theme 字段，杜绝双写双源）；
        *  - 默认主题固定为 dark，与 <html> 上的静态属性及 theme.css 兜底值一致；
        *  - 此脚本不访问 document.body（此时尚未解析），只做一次最小同步。
+       *
+       * 命名隔离（与 src/constants.ts 的 THEME_STORAGE_KEY 保持一致）：
+       *  - Linux 桌面端（Tauri WebView + Linux UA）：键为 'tplayer.theme'；
+       *  - Windows 桌面端与浏览器预览：保持历史键 'tplayer-next.theme'，
+       *    线上 Windows 用户的主题偏好不因键名变更而丢失。
        */
       (function () {
         try {
-          var THEME_KEY = 'tplayer-next.theme'
+          var isLinuxDesktop =
+            typeof window !== 'undefined' &&
+            '__TAURI_INTERNALS__' in window &&
+            /X11|Linux/i.test(navigator.userAgent)
+          var THEME_KEY = (isLinuxDesktop ? 'tplayer' : 'tplayer-next') + '.theme'
           var theme = localStorage.getItem(THEME_KEY)
           if (theme !== 'light' && theme !== 'dark') {
             theme = 'dark'

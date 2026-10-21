@@ -10,8 +10,27 @@ on:
 permissions:
   contents: write
 
+# =============================================================================
+# 三平台一键打包：Windows(NSIS) + macOS(.app/.dmg) + Linux(原生 DEB)
+#
+# 必需仓库 Secret（Settings → Secrets and variables → Actions）：
+#   TAURI_SIGNING_PRIVATE_KEY           更新签名私钥内容（= src-tauri/.tauri-signing/TPlayerNext.key 文件内容）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  私钥密码（无密码可建一个空 Secret 或省略）
+#   （GITHUB_TOKEN 由 Actions 自动提供，无需手动配置）
+#
+# 可选 Secret（macOS 开发者签名/公证，未配置则产出未签名包，右键→打开可运行）：
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+#
+# 说明：
+#   - Windows 走 tauri-action：构建 + 生成 latest.json（应用内自动升级清单）+ 上传 Release。
+#   - macOS / Linux 仅构建并上传各自安装包到同一 Release（不写 latest.json，避免与 Windows 竞态）。
+#   - macOS 默认构建 Apple Silicon（macos-latest = arm64）。Intel Mac 需额外 macos-13 job 或
+#     以 `npm run tauri build -- --target universal-apple-darwin` 打通用二进制。
+#   - Linux 用 scripts/build-deb.sh 原生 dpkg 打包；bin/linux 不在仓库 → 自动依赖系统 ffmpeg。
+# =============================================================================
 jobs:
-  release:
+  # ---- Windows：NSIS 安装包 + 自动升级（latest.json）----
+  release-windows:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -35,17 +54,10 @@ jobs:
           workspaces: './src-tauri -> target'
 
       # tauri-action 会执行 tauri build，并自动：
-      #   - 用 TAURI_SIGNING_PRIVATE_KEY 对安装包签名（生成 .nsis.zip.sig）
+      #   - 用 TAURI_SIGNING_PRIVATE_KEY 对安装包签名（生成 .sig）
       #   - 生成 latest.json（应用内自动升级的清单）
-      #   - 把 *.exe / *.nsis.zip / *.sig / latest.json 上传到 GitHub Release
-      #
-      # 需要在仓库 Settings → Secrets and variables → Actions 配置：
-      #   TAURI_SIGNING_PRIVATE_KEY          私钥字符串（minisign .key 文件内容）
-      #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（无密码可留空 secret）
-      #
-      # 客户端检查地址 tauri.conf.json → plugins.updater.endpoints，
-      # 形如 https://github.com/<OWNER>/<REPO>/releases/latest/download/latest.json
-      - name: Build and publish Tauri app
+      #   - 把 *.exe / *.sig / latest.json 上传到 GitHub Release
+      - name: Build and publish Tauri app (Windows)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -58,6 +70,92 @@ jobs:
             ## TPlayer Next ${{ github.ref_name }}
 
             ### 安装
-            - 下载 `TPlayer.Next_*_x64-setup.exe` 双击安装（自动升级用户无需手动操作）。
+            - Windows：下载 `TPlayer.Next_*_x64-setup.exe` 双击安装（自动升级用户无需手动操作）。
+            - macOS：下载 `*.dmg`，打开后将 TPlayer 拖入「应用程序」（首次右键→打开）。
+            - Linux (Debian/Ubuntu)：`sudo apt install ./tplayer_*_amd64.deb`。
           releaseDraft: true
           prerelease: false
+
+  # ---- macOS：.app + .dmg（依赖 Windows 先建好 Release，再上传，避免建 Release 竞态）----
+  release-macos:
+    needs: release-windows
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Build Tauri app (macOS .app + .dmg)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 可选：Apple 开发者证书签名/公证。配置后产出已签名/已公证包；未配置则未签名。
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload macOS artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+
+  # ---- Linux：原生 DEB（scripts/build-deb.sh）----
+  release-linux:
+    needs: release-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install system dependencies (Tauri/WebKit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - name: Build DEB (native dpkg)
+        run: bash scripts/build-deb.sh
+        # bin/linux 不在仓库 → 脚本自动 BUNDLE_FFMPEG=0（安装后依赖系统 ffmpeg）。
+        # 如需随包分发 ffmpeg，先在本步骤准备好 bin/linux/ffmpeg 与 bin/linux/ffprobe。
+
+      - name: Upload Linux DEB to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/linux/*.deb

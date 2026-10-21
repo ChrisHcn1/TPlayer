@@ -4,6 +4,10 @@ dist
 dist-ssr
 *.local
 
+# Linux DEB 打包中间目录与产物
+build/deb-stage/
+dist/linux/
+
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
@@ -19,6 +23,9 @@ latest.json
 # 运行时资源（按需注入，不入库）
 src-tauri/resources/ffmpeg/*
 !src-tauri/resources/ffmpeg/.gitkeep
+# Linux 版 ffmpeg（按需获取，见 scripts/fetch-linux-ffmpeg.sh；
+# 需要随仓库分发时移除本行，注意体积约 130MB）
+bin/linux/
 
 # 日志
 logs
@@ -26,6 +33,43 @@ logs
 
 # 本地临时/实测脚本
 temp/
+
+# 本地实验产物（SACD-DST 解码研究、调试脚本与大文件，均不入库；
+# 需要入库时用 git add -f 强制添加）
+.codebuddy/
+__pycache__/
+dstdist/
+dstframes/
+ref/
+ffmpeg-*-full_build-shared/
+ffmpeg-*.tar.xz
+ffmpeg-*.7z
+*.dsf.raw
+ref_t2.dst
+ref_t2.err
+dst*.py
+mc*.py
+diag*.py
+build_dst*.py
+explore_toc.py
+sacd_dst.py
+ref_extract.py
+ref_dbg.py
+t2test.py
+ripper_*.c
+ripper_*.h
+ripper_*.cpp
+golomb.c
+golomb.h
+dff.c
+dffdec.c
+dsfdec.c
+dsddec.c
+dstdec.c
+sdsdec.c
+dst_test.c
+*.patch
+tauri-dev.err
 
 # 编辑器
 .vscode/*

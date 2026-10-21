@@ -7,18 +7,37 @@
 //!    并写回曲库持久化，此后播放直接复用。
 //!
 //! 说明：本项目本地闭环、无在线依赖，ffmpeg 已随 Tauri 打包可用（同 M0 时长探测）。
+//!
+//! 平台差异（Linux）：DEB 安装包可把 ffmpeg 内置到 `/usr/lib/tplayer/bin`
+//! （或自定义前缀的 lib/tplayer/bin），该目录不一定在 PATH 中——直接
+//! `Command::new("ffmpeg")` 会找不到程序，导致无标签曲目的 ReplayGain
+//! 分析静默失效（音量归一化能力缺失）。Linux 统一改走引擎的
+//! `resolve_ffmpeg()`（祖先目录 / 固定安装路径 / PATH 四级查找，并校验
+//! ELF 魔数）；Windows 保持原 PATH 直调，行为零变化。
 
 use std::process::Command;
 
 /// 无标签曲目在播放时触发的后台响度分析（ffmpeg ebur128）
 /// 返回 `(建议增益 dB, 峰值线性)`；静音/失败返回 None。
 pub fn analyze_loudness(path: &str) -> Option<(f32, f32)> {
-    let output = Command::new("ffmpeg")
+    // Linux：曲库路径可能是非 UTF-8 文件名的容错编码，先还原真实路径；
+    // ffmpeg 程序也走统一解析（含随包内置路径）。
+    #[cfg(target_os = "linux")]
+    let (program, input) = {
+        let program = crate::player::engine::resolve_ffmpeg()?;
+        (program, crate::library::scan_linux::resolve_path_str(path))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (program, input) = (std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from(path));
+
+    let output = Command::new(program)
         .args([
             "-hide_banner",
             "-nostats",
             "-i",
-            path,
+        ])
+        .arg(&input)
+        .args([
             "-af",
             "ebur128=framelog=quiet",
             "-f",

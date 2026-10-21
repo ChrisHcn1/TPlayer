@@ -7,7 +7,7 @@
 //!      成功后写为 .lrc 边车，下次本地命中不再请求网络）。
 //! 用户手动校正的偏移持久化在 lyrics_offsets.json。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::State;
 
@@ -40,8 +40,8 @@ fn read_embedded_lyrics(path: &std::path::Path) -> Option<String> {
 }
 
 /// 同名 .lrc 边车文件路径（song.flac → song.lrc）
-fn sidecar_path(track: &crate::library::models::Track) -> PathBuf {
-    PathBuf::from(&track.file_path).with_extension("lrc")
+fn sidecar_path(audio: &Path) -> PathBuf {
+    audio.with_extension("lrc")
 }
 
 /// 读取指定曲目的歌词；三个来源均无歌词时返回 None
@@ -59,6 +59,12 @@ pub async fn lyrics_load(
         (track, enabled)
     };
     let Some(track) = track else { return Ok(None) };
+    // Linux：曲库路径可能是非 UTF-8 文件名的容错编码（NTFS 场景），
+    // 先还原为文件系统真实路径，内嵌歌词与 .lrc 边车才能正确读到。
+    // 合法路径零成本（一次 exists 探测）；Windows 行为不变。
+    #[cfg(target_os = "linux")]
+    let audio_path = crate::library::scan_linux::resolve_path_str(&track.file_path);
+    #[cfg(not(target_os = "linux"))]
     let audio_path = PathBuf::from(&track.file_path);
 
     // 1. 内嵌标签
@@ -69,8 +75,10 @@ pub async fn lyrics_load(
     }
 
     // 2. 同名 .lrc 边车
-    let sidecar = sidecar_path(&track);
-    if let Ok(content) = std::fs::read_to_string(&sidecar) {
+    let sidecar = sidecar_path(&audio_path);
+    if let Ok(bytes) = std::fs::read(&sidecar) {
+        // .lrc 边车常为 GBK/GB18030（中文），自动识别编码，避免歌词乱码
+        let content = crate::library::cue::decode_text(&bytes);
         if !content.trim().is_empty() {
             let mut lyrics = parser::parse(&track_id, LyricsSource::Sidecar, &content);
             lyrics.offset_ms = parser::get_offset(&state.lyrics_offsets_path, &track_id);

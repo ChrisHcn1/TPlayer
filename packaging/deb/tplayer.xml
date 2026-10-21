@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  共享 MIME 信息补充（freedesktop.org Shared MIME-info Database）。
+
+  为系统 shared-mime-info 尚未覆盖（或 glob 不全）的冷门无损格式补充
+  MIME 类型与 glob，使 TPlayer 能出现在「打开方式」中。
+  已存在的类型（audio/x-ape 等）在此仅追加 glob，会与系统定义合并。
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="audio/x-ape">
+    <comment>Monkey's Audio</comment>
+    <comment xml:lang="zh_CN">Monkey's Audio 无损音频</comment>
+    <glob pattern="*.ape"/>
+  </mime-type>
+  <mime-type type="audio/x-dsf">
+    <comment>DSD Stream File</comment>
+    <comment xml:lang="zh_CN">DSD 流文件</comment>
+    <glob pattern="*.dsf"/>
+  </mime-type>
+  <mime-type type="audio/x-dff">
+    <comment>DSDIFF</comment>
+    <comment xml:lang="zh_CN">DSDIFF 音频</comment>
+    <glob pattern="*.dff"/>
+  </mime-type>
+  <mime-type type="audio/x-dts">
+    <comment>DTS audio</comment>
+    <comment xml:lang="zh_CN">DTS 音频</comment>
+    <glob pattern="*.dts"/>
+  </mime-type>
+  <mime-type type="audio/x-wma">
+    <comment>Windows Media Audio</comment>
+    <comment xml:lang="zh_CN">Windows Media Audio</comment>
+    <glob pattern="*.wma"/>
+  </mime-type>
+  <mime-type type="audio/x-wvpack">
+    <comment>WavPack</comment>
+    <comment xml:lang="zh_CN">WavPack 无损音频</comment>
+    <glob pattern="*.wv"/>
+  </mime-type>
+  <mime-type type="audio/x-tta">
+    <comment>True Audio</comment>
+    <comment xml:lang="zh_CN">True Audio 无损音频</comment>
+    <glob pattern="*.tta"/>
+  </mime-type>
+  <mime-type type="audio/x-tak">
+    <comment>TAK Audio</comment>
+    <comment xml:lang="zh_CN">TAK 无损音频</comment>
+    <glob pattern="*.tak"/>
+  </mime-type>
+  <mime-type type="audio/x-aiff">
+    <comment>AIFF Audio</comment>
+    <comment xml:lang="zh_CN">AIFF 音频</comment>
+    <glob pattern="*.aif"/>
+    <glob pattern="*.aiff"/>
+  </mime-type>
+</mime-info>

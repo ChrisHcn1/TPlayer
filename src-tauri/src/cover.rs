@@ -108,8 +108,7 @@ fn embedded_cover(path: &Path) -> Option<(&'static str, Vec<u8>)> {
 }
 
 /// 2. 同名边车图片：song.flac → song.jpg/.png/.webp/...
-fn sidecar_cover(track: &Track) -> Option<(&'static str, Vec<u8>)> {
-    let audio = PathBuf::from(&track.file_path);
+fn sidecar_cover(audio: &Path) -> Option<(&'static str, Vec<u8>)> {
     let stem = audio.file_stem()?;
     let dir = audio.parent()?;
     for ext in SIDECAR_EXTS {
@@ -131,8 +130,8 @@ const DIR_COVER_STEMS: &[&str] = &[
 
 /// 2b. 目录级封面：曲目所在目录下的 folder.jpg / cover.png / ...
 /// Windows 文件系统不区分大小写，跨平台时遇到 Folder.JPG 也兼容。
-fn directory_cover(track: &Track) -> Option<(&'static str, Vec<u8>)> {
-    let dir = PathBuf::from(&track.file_path).parent()?.to_path_buf();
+fn directory_cover(audio: &Path) -> Option<(&'static str, Vec<u8>)> {
+    let dir = audio.parent()?.to_path_buf();
 
     // 先按约定名精确匹配（各扩展名轮一遍）
     for stem in DIR_COVER_STEMS {
@@ -187,10 +186,16 @@ fn directory_cover(track: &Track) -> Option<(&'static str, Vec<u8>)> {
 
 /// 单曲目本地封面链（不联网）：内嵌 → 同名边车 → 目录级封面
 fn local_cover_for_track(track: &Track) -> Option<(&'static str, Vec<u8>)> {
+    // Linux：曲库中的路径可能是非 UTF-8 文件名的容错编码（NTFS 场景），
+    // 先还原为文件系统真实路径再解析，否则内嵌/边车/目录封面全部读不到。
+    // 合法路径零成本（一次 exists 探测）；Windows 行为不变。
+    #[cfg(target_os = "linux")]
+    let path = crate::library::scan_linux::resolve_path_str(&track.file_path);
+    #[cfg(not(target_os = "linux"))]
     let path = PathBuf::from(&track.file_path);
     embedded_cover(&path)
-        .or_else(|| sidecar_cover(track))
-        .or_else(|| directory_cover(track))
+        .or_else(|| sidecar_cover(&path))
+        .or_else(|| directory_cover(&path))
 }
 
 /// 分组（专辑/艺术家）封面解析：

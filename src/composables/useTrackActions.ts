@@ -141,9 +141,11 @@ export function useTrackActions() {
         icon: 'disc',
         onClick: () => {
           if (!track.albumId) return
-          const cueIds = new Set(libraryStore.cueAlbums.map((album) => album.id))
-          if (cueIds.has(track.albumId)) router.push(`/cue/${track.albumId}`)
-          else router.push(`/albums/${track.albumId}`)
+          const id = track.albumId
+          if (libraryStore.cueAlbums.some((album) => album.id === id)) router.push(`/cue/${id}`)
+          else if (libraryStore.sacdAlbums.some((album) => album.id === id))
+            router.push(`/cue/${id}`)
+          else router.push(`/albums/${id}`)
         },
       })
       const artist = track.artists[0]

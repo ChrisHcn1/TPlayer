@@ -7,9 +7,9 @@
  * TOP 曲目 / TOP 艺术家 / 最常听时段（24 小时分布），并支持导出分享卡片 PNG。
  *
  * 样式约束：只引用 theme.css 语义 token，禁止字面量色值 / 像素。
- * 入口：设置 → 工具 → 收听报告（工具组不占侧栏，与转换器同策略）。
+ * 入口：设置 → 播放与媒体 → 收听报告（由"工具"页签独立而来；/stats 独立页保留兼容）。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, withDefaults, defineProps } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useStatsStore } from '../stores/stats'
@@ -18,6 +18,12 @@ import { exportShareCardPng, formatDuration } from '../services/shareCard'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+
+// embedded：作为设置页"收听报告"页签内嵌展示时隐藏页头（标题/返回按钮由设置页承载）；
+// 作为 /stats 独立页展示时保留完整页头。默认独立页行为。
+withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+})
 
 const router = useRouter()
 const statsStore = useStatsStore()
@@ -76,8 +82,8 @@ async function onExport(): Promise<void> {
 </script>
 
 <template>
-  <section class="view">
-    <div class="view__header">
+  <section class="view" :class="{ 'view--embedded': embedded }">
+    <div v-if="!embedded" class="view__header">
       <div class="view__heading">
         <h1 class="view__title">收听报告</h1>
         <p class="view__subtitle">本地播放统计：次数 / 时长 / 榜单 / 时段，仅存于本机，不上传</p>
@@ -185,6 +191,11 @@ async function onExport(): Promise<void> {
   gap: var(--space-4);
   min-height: 100%;
   color: var(--color-text-primary);
+}
+
+/* 作为设置页页签内嵌展示：不再强占整页高度，由设置内容区自行滚动 */
+.view--embedded {
+  min-height: 0;
 }
 
 .view__header {

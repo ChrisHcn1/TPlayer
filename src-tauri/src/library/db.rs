@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本（变更表结构时递增并写迁移分支）
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// 打开（必要时创建）曲库数据库并完成 PRAGMA / 建表
 pub fn open(db_path: &Path) -> AppResult<Connection> {
@@ -37,11 +37,40 @@ pub fn open(db_path: &Path) -> AppResult<Connection> {
 
     init_schema(&conn)?;
     migrate(&conn)?;
+    migrate_data(&conn)?;
     Ok(conn)
 }
 
+/// 一次性数据迁移（区别于结构迁移 migrate）。
+///
+/// v4 -> v5：CUE 分轨专辑的 `album_id` 归一为 `album:<专辑名>:`（仅按专辑名聚合）。
+/// 修复旧版把每轨演唱者写进 album_id，导致合辑（如 6CD 群星）每轨不同歌手被拆成
+/// "每轨一专辑"的问题；新扫描由 cue.rs 直接生成同形 album_id。
+///
+/// 幂等/安全：
+///  - 新库（无 schema_version）跳过，交由 store::open 迁移旧 JSON 后统一写版本，避免
+///    抢在 migrate_legacy_json 前把版本写成最新而跳过旧数据导入；
+///  - 版本已 >= SCHEMA_VERSION 直接跳过（不会重复执行）。
+fn migrate_data(conn: &Connection) -> AppResult<()> {
+    let stored = get_meta(conn, "schema_version");
+    match stored.as_deref().and_then(|v| v.parse::<u32>().ok()) {
+        None => return Ok(()),                     // 新库：由 store::open 统一处理
+        Some(v) if v >= SCHEMA_VERSION => return Ok(()), // 已最新
+        Some(_) => {}
+    }
+    conn.execute(
+        "UPDATE tracks
+         SET album_id = 'album:' || album || ':'
+         WHERE is_cue = 1 AND album_id IS NOT NULL",
+        [],
+    )
+    .map_err(|e| AppError::Library(format!("迁移 CUE 专辑聚合（v5）失败: {e}")))?;
+    set_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
+    Ok(())
+}
+
 /// 幂等迁移：老库已建表但缺新列时补充（新库由 SCHEMA_SQL 直接带列，跳过）
-fn migrate(conn: &Connection) -> AppResult<()> {
+pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
     let has_column = |name: &str| -> bool {
         conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name = ?1",
@@ -100,6 +129,23 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         conn.execute_batch("ALTER TABLE tracks ADD COLUMN replaygain_peak REAL")
             .map_err(|e| AppError::Library(format!("迁移 schema v2 失败（replaygain_peak）: {e}")))?;
     }
+    // —— SACD ISO 分轨列（与 CUE 同构）——
+    if !has_column("is_sacd") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN is_sacd INTEGER NOT NULL DEFAULT 0")
+            .map_err(|e| AppError::Library(format!("迁移 schema v4 失败（is_sacd）: {e}")))?;
+    }
+    if !has_column("sacd_track_index") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN sacd_track_index INTEGER NOT NULL DEFAULT 0")
+            .map_err(|e| AppError::Library(format!("迁移 schema v4 失败（sacd_track_index）: {e}")))?;
+    }
+    if !has_column("sacd_area") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN sacd_area TEXT")
+            .map_err(|e| AppError::Library(format!("迁移 schema v4 失败（sacd_area）: {e}")))?;
+    }
+    if !has_column("sacd_dsd_rate") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN sacd_dsd_rate TEXT")
+            .map_err(|e| AppError::Library(format!("迁移 schema v4 失败（sacd_dsd_rate）: {e}")))?;
+    }
     Ok(())
 }
 
@@ -139,9 +185,17 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- CUE 分轨：标识该曲是否属于整盘镜像中的某一轨
     is_cue       INTEGER NOT NULL DEFAULT 0,
     -- CUE 分轨在镜像文件中的起始偏移（秒）；NULL 表示非分轨
-    cue_offset   REAL
+    cue_offset   REAL,
+    -- SACD ISO 分轨字段（与 CUE 同构的虚拟分轨）
+    is_sacd            INTEGER NOT NULL DEFAULT 0,
+    sacd_track_index   INTEGER NOT NULL DEFAULT 0,
+    sacd_area          TEXT,
+    sacd_dsd_rate      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
+-- CUE 去重查询（NOT EXISTS 子查询按 file_path / is_cue 匹配）走索引
+CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
+CREATE INDEX IF NOT EXISTS idx_tracks_is_cue ON tracks(is_cue);
 
 -- 曲目 ↔ 艺术家 关联（含主艺术家，position=0）
 CREATE TABLE IF NOT EXISTS track_artists (
