@@ -1319,6 +1319,56 @@ impl PlayerHandle {
         ctx.track_ids.get(idx).cloned()
     }
 
+    /// 预览「下一首」id（不改队列索引）：命令层据此预取 Track，
+    /// 再以 `advance_and_play` 在同一临界区内完成推进 + 起播。
+    pub fn peek_next_id(&self) -> Option<String> {
+        let idx = self.next_index()?;
+        self.context.as_ref()?.track_ids.get(idx).cloned()
+    }
+
+    /// 预览「上一首」id（不改队列索引）
+    pub fn peek_previous_id(&self) -> Option<String> {
+        let ctx = self.context.as_ref()?;
+        if ctx.track_ids.is_empty() {
+            return None;
+        }
+        let idx = if self.index == 0 {
+            ctx.track_ids.len() - 1
+        } else {
+            self.index - 1
+        };
+        ctx.track_ids.get(idx).cloned()
+    }
+
+    /// 推进到下一首（`backwards = false`）或上一首并起播。
+    ///
+    /// 推进与起播在同一临界区完成，消除旧实现「命令层先 next() 释放锁、
+    /// 再重新加锁 play()」的窗口——该窗口内 50ms 时钟线程的 `on_track_ended`
+    /// 可能再次推进索引并起播，导致跳两首 / 事件乱序 / 双链路交叉淡化。
+    /// `track` 应为调用方用 `peek_*_id` 预取的曲目；若窗口期内队列已被
+    /// 时钟推进，以本曲目为准校正索引，保证播放用户点选的那一首。
+    pub fn advance_and_play(
+        &mut self,
+        backwards: bool,
+        track: &Track,
+        app: &AppHandle,
+    ) -> AppResult<()> {
+        let id = if backwards {
+            self.previous()
+        } else {
+            self.next()
+        }
+        .ok_or_else(|| AppError::Player("队列为空".into()))?;
+        if id != track.id {
+            if let Some(ctx) = self.context.as_mut() {
+                if let Some(pos) = ctx.track_ids.iter().position(|x| x == &track.id) {
+                    self.index = pos;
+                }
+            }
+        }
+        self.play_once(track, None, app, false, false)
+    }
+
     pub fn dispose(&mut self) -> AppResult<()> {
         self.engine.stop()?;
         Ok(())

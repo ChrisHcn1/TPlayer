@@ -550,17 +550,19 @@ impl LibraryStore {
             .collect()
     }
 
-    pub fn create_playlist(&mut self, name: String) -> Playlist {
+    /// 创建歌单。ID 用纳秒时间戳 + 进程内自增序号，避免同一秒内连点/并发创建
+    /// 触发主键冲突（旧实现为秒级时间戳 + `.expect`，同秒第二个直接 panic）。
+    pub fn create_playlist(&mut self, name: String) -> AppResult<Playlist> {
         let now = chrono::Utc::now().timestamp();
-        let id = format!("pl:{}", now);
+        let id = format!("pl:{}-{}", now, Self::next_playlist_seq());
         self.conn
             .execute(
                 "INSERT INTO playlists(id, name, description, created_at, updated_at, is_system)
                  VALUES(?1, ?2, '', ?3, ?3, 0)",
                 params![id, name, now],
             )
-            .expect("insert playlist");
-        Playlist {
+            .map_err(|e| AppError::Library(format!("创建歌单失败: {e}")))?;
+        Ok(Playlist {
             id,
             name,
             description: String::new(),
@@ -568,7 +570,14 @@ impl LibraryStore {
             created_at: now,
             updated_at: now,
             is_system: false,
-        }
+        })
+    }
+
+    /// 进程内自增序号（与时间戳组合保证同秒内唯一）
+    fn next_playlist_seq() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        SEQ.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn rename_playlist(&mut self, id: &str, name: String) -> AppResult<()> {
@@ -723,6 +732,44 @@ impl LibraryStore {
         tx.commit()
             .map_err(|e| AppError::Library(format!("提交移除失败: {e}")))?;
         Ok(())
+    }
+
+    /// 移除指定目录下的全部曲目（含级联清理收藏/最近播放/歌单引用）。
+    ///
+    /// 用于「用户主动移除曲库目录」：扫描侧的删除检测已改为保守策略
+    /// （文件仍存在即保留，防止导入的外部文件与读取失败的目录被误删），
+    /// 因此主动移除必须在此显式删除，否则目录下曲目会一直留在库中。
+    /// 返回删除的曲目数。
+    pub fn remove_tracks_under_dir(&mut self, dir: &str) -> AppResult<usize> {
+        // 目录前缀：统一分隔符并补尾分隔符；Windows 大小写不敏感，统一转小写比较
+        let norm = |p: &str| p.replace('\\', "/").to_lowercase();
+        let prefix = {
+            let mut p = norm(dir);
+            if !p.ends_with('/') {
+                p.push('/');
+            }
+            p
+        };
+        let ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, file_path FROM tracks")
+                .map_err(|e| AppError::Library(format!("查询目录曲目失败: {e}")))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| AppError::Library(format!("查询目录曲目失败: {e}")))?;
+            rows.flatten()
+                .filter(|(_, path)| norm(path).starts_with(&prefix))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.remove_tracks(&ids)?;
+        Ok(ids.len())
     }
 }
 

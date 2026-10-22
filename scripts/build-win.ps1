@@ -42,8 +42,9 @@ $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $localKey = Join-Path $root 'src-tauri\.tauri-signing\TPlayerNext.key'
 
 # 前置检查：FFmpeg 运行时工具会随安装包分发（tauri.conf.json bundle.resources），
-# 缺失时打出来的包安装后无法播放 wma/ape/dsf/dff/dts 等格式
-foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe')) {
+# 缺失时打出来的包安装后无法播放 wma/ape/dsf/dff/dts 等格式；
+# sacd_extract.exe 负责 DST 压缩与 5.1 多声道 SACD 音轨的解码。
+foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe', 'sacd_extract.exe')) {
     $toolPath = Join-Path $root (Join-Path 'bin' $tool)
     if (-not (Test-Path $toolPath)) {
         throw "缺少运行时依赖 $toolPath 。请把 $tool 放到仓库根 bin\ 目录后再打包。"

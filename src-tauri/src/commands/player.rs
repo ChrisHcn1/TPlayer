@@ -78,40 +78,46 @@ pub fn player_stop(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> 
 
 #[tauri::command]
 pub fn player_next(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    let next_id = {
-        let mut player = state.player.lock().unwrap();
-        player.next()
-    };
-    if let Some(id) = next_id {
-        // 需 compat 解码的曲目由 play_or_skip 内 stage_compat 占位并发 compat-play 事件，
-        // 此处统一走 play，保证手动切歌与自动连播行为一致
-        let track = state
-            .library
-            .lock()
-            .unwrap()
-            .get_track(&id)
-            .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", id)))?;
-        state.player.lock().unwrap().play(&track, None, &app)?;
-    }
-    Ok(())
+    // 先预览下一首 id（锁外预取曲目），再在同一 player 锁内完成推进 + 起播，
+    // 避免时钟线程在窗口期内二次推进造成跳两首/双链路
+    let next_id = state
+        .player
+        .lock()
+        .unwrap()
+        .peek_next_id()
+        .ok_or_else(|| AppError::Player("队列已到末尾或队列为空".into()))?;
+    let track = state
+        .library
+        .lock()
+        .unwrap()
+        .get_track(&next_id)
+        .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", next_id)))?;
+    state
+        .player
+        .lock()
+        .unwrap()
+        .advance_and_play(false, &track, &app)
 }
 
 #[tauri::command]
 pub fn player_previous(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    let prev_id = {
-        let mut player = state.player.lock().unwrap();
-        player.previous()
-    };
-    if let Some(id) = prev_id {
-        let track = state
-            .library
-            .lock()
-            .unwrap()
-            .get_track(&id)
-            .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", id)))?;
-        state.player.lock().unwrap().play(&track, None, &app)?;
-    }
-    Ok(())
+    let prev_id = state
+        .player
+        .lock()
+        .unwrap()
+        .peek_previous_id()
+        .ok_or_else(|| AppError::Player("队列为空".into()))?;
+    let track = state
+        .library
+        .lock()
+        .unwrap()
+        .get_track(&prev_id)
+        .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", prev_id)))?;
+    state
+        .player
+        .lock()
+        .unwrap()
+        .advance_and_play(true, &track, &app)
 }
 
 /// 跳转到指定毫秒位置

@@ -130,6 +130,11 @@ export const useSettingsStore = defineStore('settings', () => {
       const persisted = await loadSettings()
       if (!persisted) return
       applyPersisted(persisted)
+      // 恢复的播放偏好必须同步下发引擎：后端状态机的 crossfade 配置若不更新，
+      // 会沿用默认值（启用/1000ms）提前换曲，与用户"已关闭交叉淡化"的配置相反，
+      // 表现为每首末尾约 1 秒被静默截断。
+      void playerService.setCrossfade(crossfade.value.enabled, crossfade.value.duration_ms)
+      void playerService.setReplaygain(replaygain.value.enabled)
     } catch {
       /* 解析失败视为无历史设置 */
     }

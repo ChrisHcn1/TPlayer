@@ -713,6 +713,8 @@ struct RodioEngine {
     replaygain_enabled: bool,
     /// 当前播放倍速（1.0 = 原速；新建/接管链路时下发到 sink）
     rate: f32,
+    /// 是否处于用户暂停态（seek 时据此决定是否恢复出声，避免"暂停中拖进度条却开始播放"）
+    paused: bool,
 }
 
 impl RodioEngine {
@@ -737,6 +739,7 @@ impl RodioEngine {
             fade_ms: 1000,
             replaygain_enabled: true,
             rate: 1.0,
+            paused: false,
         }
     }
 
@@ -851,6 +854,8 @@ impl RodioEngine {
         range: Option<(f64, f64)>,
         sacd_track_index: Option<u32>,
     ) -> AppResult<()> {
+        // 新曲目起播即脱离暂停态（避免上首暂停态残留导致 seek 不出声）
+        self.paused = false;
         // Linux：还原非 UTF-8 文件名的容错编码路径（合法路径零成本直连），
         // 保证 NTFS 上的这类曲目可被打开、解码、播放（含后续 ffmpeg 管道）。
         #[cfg(target_os = "linux")]
@@ -1012,6 +1017,7 @@ impl RodioEngine {
 
     /// 无缝接管预加载链路：旧曲目转入淡出，新曲目从静默淡入并开始发声。
     fn swap_to_next(&mut self) -> AppResult<()> {
+        self.paused = false;
         let next = self
             .next
             .take()
@@ -1061,6 +1067,7 @@ impl RodioEngine {
         }
         self.next_path = None;
 
+        self.paused = false;
         if is_native_format(path) {
             self.play(path, gain, None, None)?;
             // sink 新建后混音线程可能还没拉到首帧；此时立即 seek 在个别时序下
@@ -1079,6 +1086,7 @@ impl RodioEngine {
         if let Some(playback) = &self.current {
             playback.sink.pause();
         }
+        self.paused = true;
         Ok(())
     }
 
@@ -1086,6 +1094,7 @@ impl RodioEngine {
         if let Some(playback) = &self.current {
             playback.sink.play();
         }
+        self.paused = false;
         Ok(())
     }
 
@@ -1103,6 +1112,7 @@ impl RodioEngine {
         self.fade_in_started = None;
         self.current_path = None;
         self.current_is_ffmpeg = false;
+        self.paused = false;
         Ok(())
     }
 
@@ -1123,7 +1133,10 @@ impl RodioEngine {
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
             playback.sink.append(source);
-            playback.sink.play();
+            // 暂停态 seek 只重定位不出声（恢复播放由 resume 负责）
+            if !self.paused {
+                playback.sink.play();
+            }
             playback.sink.set_speed(self.rate);
             self.fade_in_started = Some(Instant::now());
             return Ok(());
@@ -1158,7 +1171,10 @@ impl RodioEngine {
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
             playback.sink.append(source);
-            playback.sink.play();
+            // 暂停态 seek 只重定位不出声（恢复播放由 resume 负责）
+            if !self.paused {
+                playback.sink.play();
+            }
             playback.sink.set_speed(self.rate);
         } else {
             playback
@@ -1451,14 +1467,15 @@ fn spawn_ffmpeg_decoder(
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
     } else {
+        // 非 DSD：同样**不指定 -ac**，让 ffmpeg 按源（文件头）声道输出——
+        // 多声道 ape/wv/tta/tak/dts-in-wav 5.1 与 DSD 分支保持同一语义，
+        // 设备适配统一由 PcmStreamSource 下混完成。
         cmd.arg("-f")
             .arg("s16le")
             .arg("-acodec")
             .arg("pcm_s16le")
             .arg("-ar")
             .arg(out_rate.to_string())
-            .arg("-ac")
-            .arg(out_ch.to_string())
             .arg("-")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1516,6 +1533,8 @@ struct PcmStreamSource {
     out_frame: Vec<i16>,
     /// out_frame 内的读取位置
     out_pos: usize,
+    /// 上次 read 不足一个完整样本的残余字节（跨块拼接，保证字节对齐）
+    residual: Vec<u8>,
 }
 
 impl PcmStreamSource {
@@ -1539,47 +1558,49 @@ impl PcmStreamSource {
             eof: false,
             out_frame: Vec::new(),
             out_pos: 0,
+            residual: Vec::new(),
         }
     }
 
     /// 从管道填充一块样本到 buffer（追加，不清空——保证跨块帧连续）；
-    /// 失败/EOF 时标记 eof
+    /// 失败/EOF 时标记 eof。
+    ///
+    /// 管道 `read` 不保证按样本边界返回（部分读常见于 DSD lowpass 重负载与 EOF 附近），
+    /// 尾部不足一个样本的字节缓存到 `residual`，与下次读到的数据拼接后再切样本，
+    /// 否则该点之后全部样本字节错位 → 整轨噪声。
     fn refill(&mut self) {
         if self.eof {
             return;
         }
+        let stride = if self.float_input { 4 } else { 2 };
+        let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * stride];
+        let n = match self.reader.read(&mut bytes) {
+            Ok(0) => {
+                self.eof = true;
+                return;
+            }
+            Ok(n) => n,
+            Err(_) => {
+                self.eof = true;
+                return;
+            }
+        };
+        // 拼接上次残余 → 取整样本 → 残余留给下次
+        let mut all = std::mem::take(&mut self.residual);
+        all.extend_from_slice(&bytes[..n]);
+        let usable = all.len() - (all.len() % stride);
+        self.residual = all.split_off(usable);
         if self.float_input {
             // f32le：每个样本 4 字节；读到后量化回 i16（rodio 按 i16 消费）。
-            let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * 4];
-            match self.reader.read(&mut bytes) {
-                Ok(0) => self.eof = true,
-                Ok(n) => {
-                    let sample_bytes = n - (n % 4);
-                    self.buffer.extend(bytes[..sample_bytes].chunks_exact(4).map(|c| {
-                        let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(-1.0, 1.0);
-                        (f * 32767.0) as i16
-                    }));
-                }
-                Err(_) => self.eof = true,
-            }
+            self.buffer.extend(all.chunks_exact(4).map(|c| {
+                let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(-1.0, 1.0);
+                (f * 32767.0) as i16
+            }));
         } else {
-            let mut bytes = vec![0u8; Self::CHUNK_SAMPLES * 2];
-            match self.reader.read(&mut bytes) {
-                Ok(0) => {
-                    self.eof = true;
-                }
-                Ok(n) => {
-                    let sample_bytes = n - (n % 2);
-                    self.buffer.extend(
-                        bytes[..sample_bytes]
-                            .chunks_exact(2)
-                            .map(|c| i16::from_le_bytes([c[0], c[1]])),
-                    );
-                }
-                Err(_) => {
-                    self.eof = true;
-                }
-            }
+            self.buffer.extend(
+                all.chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]])),
+            );
         }
     }
 

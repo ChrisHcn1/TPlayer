@@ -520,10 +520,18 @@ pub fn scan_directory(
     upserts.extend(virtual_tracks);
 
     // 删除检测：基线中存在、本轮未发现的曲目（按 id 判定，
-    // 覆盖「同一镜像路径对应多条分轨」与「镜像从整轨转为分轨」的情况）
+    // 覆盖「同一镜像路径对应多条分轨」与「镜像从整轨转为分轨」的情况）。
+    //
+    // 保守策略：仅当文件在磁盘上**确已不存在**时才删除——
+    //  - 拖拽导入到曲库目录之外的文件（library_import_files）不属于任何扫描根，
+    //    下一轮全盘扫描扫不到，但文件仍在，绝不能连收藏/歌单一起级联清除；
+    //  - 目录读取失败（权限 / 网络挂载掉线 / Linux NTFS 未挂载）时该目录下的文件
+    //    只是"没被发现"，同样必须保留。
     let mut removed_ids: Vec<String> = existing
         .iter()
-        .filter(|(id, _, _)| !seen_ids.contains(id))
+        .filter(|(id, path, _)| {
+            !seen_ids.contains(id) && !std::path::Path::new(path).exists()
+        })
         .map(|(id, _, _)| id.clone())
         .collect();
     removed_ids.sort();

@@ -90,35 +90,41 @@ function measure(): void {
   scrollerHeight.value = Math.max(200, Math.floor(rootRect.bottom - rect.top))
 }
 
-let resizeObserver: ResizeObserver | null = null
-let densityObserver: MutationObserver | null = null
-let scrollRoot: HTMLElement | null = null
+// 观察器与滚动根引用改为**组件实例级**：TrackList 被多个 keepAlive 视图复用，
+// 模块级变量会让后挂载的实例覆盖前者的观察器，前者卸载时又 disconnect 别人的，
+// 导致高度测量失效与监听泄漏。
+const resizeObserver = ref<ResizeObserver | null>(null)
+const densityObserver = ref<MutationObserver | null>(null)
+const scrollRoot = ref<HTMLElement | null>(null)
 
 onMounted(() => {
   rowHeight.value = readRowHeight()
   void nextTick(measure)
-  scrollRoot = scrollerEl.value?.closest('.app-shell__content-scroll') as HTMLElement | null
+  scrollRoot.value = scrollerEl.value?.closest('.app-shell__content-scroll') as HTMLElement | null
   // 外层滚动时视口相对位置变化 → 实时调整高度（passive，不影响滚动性能）
-  scrollRoot?.addEventListener('scroll', measure, { passive: true })
+  scrollRoot.value?.addEventListener('scroll', measure, { passive: true })
   window.addEventListener('resize', measure)
-  resizeObserver = new ResizeObserver(() => measure())
-  if (scrollRoot) resizeObserver.observe(scrollRoot)
+  resizeObserver.value = new ResizeObserver(() => measure())
+  if (scrollRoot.value) resizeObserver.value.observe(scrollRoot.value)
   // 密度档切换（html[data-density]）时同步 item-size
-  densityObserver = new MutationObserver(() => {
+  densityObserver.value = new MutationObserver(() => {
     rowHeight.value = readRowHeight()
     void nextTick(measure)
   })
-  densityObserver.observe(document.documentElement, {
+  densityObserver.value.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['data-density'],
   })
 })
 
 onBeforeUnmount(() => {
-  scrollRoot?.removeEventListener('scroll', measure)
+  scrollRoot.value?.removeEventListener('scroll', measure)
   window.removeEventListener('resize', measure)
-  resizeObserver?.disconnect()
-  densityObserver?.disconnect()
+  resizeObserver.value?.disconnect()
+  resizeObserver.value = null
+  densityObserver.value?.disconnect()
+  densityObserver.value = null
+  scrollRoot.value = null
 })
 
 const sortField = ref<TrackSortField | null>(null)

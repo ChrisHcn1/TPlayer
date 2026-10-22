@@ -431,9 +431,18 @@ pub fn library_add_dir(state: State<'_, AppState>, path: String) -> AppResult<()
 /// 从曲库白名单移除目录
 #[tauri::command]
 pub fn library_remove_dir(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let mut config = state.config.lock().unwrap();
-    config.library_dirs.retain(|p| p != &path);
-    config.save(&state.config_path)?;
+    let removed = {
+        let mut library = state.library.lock().unwrap();
+        library.remove_tracks_under_dir(&path)?
+    };
+    {
+        let mut config = state.config.lock().unwrap();
+        config.library_dirs.retain(|p| p != &path);
+        config.save(&state.config_path)?;
+    }
+    if removed > 0 {
+        eprintln!("[library] 移除曲库目录 {path}，删除 {removed} 条曲目");
+    }
     Ok(())
 }
 
@@ -448,7 +457,7 @@ pub fn library_create_playlist(
     name: String,
 ) -> AppResult<Playlist> {
     let mut library = state.library.lock().unwrap();
-    let playlist = library.create_playlist(name);
+    let playlist = library.create_playlist(name)?;
     Ok(playlist)
 }
 

@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true  # bin/*.exe（ffmpeg/ffprobe/sacd_extract）为 LFS 对象，不拉取则安装包内是指针文本
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -83,6 +85,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true  # bin/*.exe（ffmpeg/ffprobe/sacd_extract）为 LFS 对象，不拉取则安装包内是指针文本
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -129,6 +133,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true  # bin/*.exe（ffmpeg/ffprobe/sacd_extract）为 LFS 对象，不拉取则安装包内是指针文本
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -148,6 +148,16 @@ export class CompatPlayer implements IPlayer {
         resolve({ trackId: id, ok: false, level: 'none', error: 'Worker 异常' }),
       )
       this.pending.clear()
+      // 预热失败：清理"待 core 就绪自动切播"的曲目并明确报错，
+      // 否则用户会看到"稍后自动播放"却永远等不到回执（永久无声）。
+      const pa = this.pendingAuto
+      this.pendingAuto = null
+      if (pa) {
+        this.dispatch({
+          type: 'error',
+          payload: { message: '解码组件加载失败，无法播放该曲目', trackId: pa.trackId },
+        })
+      }
     }
   }
 
@@ -264,6 +274,9 @@ export class CompatPlayer implements IPlayer {
       // 需兜底（DTS/DSD/APE 等）：交后端占位（同步队列上下文/快照 + 发 compat-play 事件），
       // 由 compat-play 监听方走 playCompat 静默接管。手动点歌 / 自动连播 / 断点续播
       // 三条路径统一走这一条链路，保证队列 index 推进与事件序一致。
+      // 与 goNative 分支一致：先停掉所有旧通道，否则上一曲的兜底隐藏 <audio>
+      // 仍在发声，切换后出现双音频叠加。
+      this.stopAll()
       await this.base.play(trackId, context)
     }
   }

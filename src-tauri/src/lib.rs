@@ -94,10 +94,15 @@ pub fn run() {
                 .unwrap()
                 .set_persist_path(playback_path);
 
-            // 从配置下发交叉淡化参数
+            // 从配置下发交叉淡化参数（引擎线程 + 状态机内部配置都要同步：
+            // 状态机的 crossfade_enabled/ms 决定连播时是否提前换曲，
+            // 只同步引擎会导致"配置已关、状态机仍按 1s 提前切走"的截断）
             {
                 let cfg = &config;
-                engine_handle.set_crossfade(cfg.crossfade.enabled, cfg.crossfade.duration_ms);
+                let mut player = player_handle.lock().unwrap();
+                player
+                    .set_crossfade(cfg.crossfade.enabled, cfg.crossfade.duration_ms)
+                    .ok(); // 启动期同步失败不阻断（前端 restore 会再次下发）
             }
             // 从配置下发音量归一化 ReplayGain 开关
             {

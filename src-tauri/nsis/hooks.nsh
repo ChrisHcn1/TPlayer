@@ -22,8 +22,15 @@
 ; ============================================================================
 
 !define TPN_UNINST_ROOT "Software\Microsoft\Windows\CurrentVersion\Uninstall"
-!define TPN_MATCH       "tplayer"
-!define TPN_EXCLUDE     "potplayer"
+; 命中判定：DisplayName 以 "tplayer" **开头**（大小写不敏感），覆盖
+; "TPlayer" / "TPlayer Next" / "TPlayerNext" / "TPlayer 2.0.x" 等本产品族；
+; 旧实现用任意位置子串匹配，会把 "MyTPlayer Tools" 这类第三方软件误判为旧版
+; 并触发静默卸载。精确前缀匹配天然排除 PotPlayer 等仅含子串的软件。
+!define TPN_NAME_PREFIX "tplayer"
+!define TPN_PREFIX_LEN  7
+; 安装目录守卫：要求路径含 "\tplayer" 目录段（排除 mytplayer 等），
+; 命中 "…\TPlayer" 与 "…\TPlayerNext" 两种安装布局。
+!define TPN_DIR_MARK "\tplayer"
 
 ; ---------------------------------------------------------------------------
 ; 按注册表视图枚举一个根键下的卸载子键并处理命中项。
@@ -46,10 +53,9 @@ tpn_scan_${UID}_loop:
   ReadRegStr $R3 ${ROOT} "${TPN_UNINST_ROOT}\$R2" "DisplayName"
   IfErrors tpn_scan_${UID}_next
   ${StrCase} $R4 $R3 "L"
-  ${StrLoc} $R5 $R4 "${TPN_MATCH}" ">"
-  StrCmp $R5 "" tpn_scan_${UID}_next
-  ${StrLoc} $R5 $R4 "${TPN_EXCLUDE}" ">"
-  StrCmp $R5 "" 0 tpn_scan_${UID}_next
+  ; 前缀精确匹配（见 TPN_NAME_PREFIX 注释）：仅本产品族命中
+  StrCpy $R5 $R4 ${TPN_PREFIX_LEN}
+  StrCmp $R5 "${TPN_NAME_PREFIX}" 0 tpn_scan_${UID}_next
   StrCpy $R6 "${ROOT}"
   Call TPN_ProcessEntry
   StrCmp $R9 "1" tpn_scan_${UID}_done
@@ -351,7 +357,7 @@ Function TPN_ForceCleanup
   ${Else}
     DeleteRegKey HKLM "$R8"
   ${EndIf}
-  ; 2) 残留安装目录：仅当路径包含 tplayer、长度 >= 10 且不以 \ 结尾时才允许删除
+  ; 2) 残留安装目录：仅当路径含 "\tplayer" 目录段、长度 >= 10 且不以 \ 结尾时才允许删除
   StrCpy $R1 $R5
   ${If} $R1 == ""
     ${If} $R2 != ""
@@ -360,7 +366,7 @@ Function TPN_ForceCleanup
   ${EndIf}
   ${If} $R1 != ""
     ${StrCase} $R0 $R1 "L"
-    ${StrLoc} $R0 $R0 "tplayer" ">"
+    ${StrLoc} $R0 $R0 "${TPN_DIR_MARK}" ">"
     ${If} $R0 != ""
       StrLen $R0 $R1
       IntCmp $R0 10 tpn_fc_rmdir tpn_fc_skipdir tpn_fc_rmdir
