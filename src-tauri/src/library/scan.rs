@@ -448,7 +448,9 @@ pub fn scan_directory(
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
         for iso in &iso_files {
-            if let Some(disc) = super::sacd::SacdDisc::open(iso) {
+            if let Some(mut disc) = super::sacd::SacdDisc::open(iso) {
+                // DST 压缩区按数据量推算会把时长压低（仅 ~40%），用 -P 探测真实时长
+                disc.probe_durations();
                 let tracks = disc.to_tracks();
                 if let Some(parent) = iso.parent() {
                     let set = sacd_titles_by_dir
@@ -607,7 +609,8 @@ pub(crate) fn collect_import_tracks(paths: &[PathBuf]) -> Vec<Track> {
     > = std::collections::HashMap::new();
     for f in &iso {
         referenced.insert(norm_path_for_match(f));
-        if let Some(disc) = super::sacd::SacdDisc::open(f) {
+        if let Some(mut disc) = super::sacd::SacdDisc::open(f) {
+            disc.probe_durations();
             let tracks = disc.to_tracks();
             if let Some(parent) = f.parent() {
                 let set = sacd_titles_by_dir

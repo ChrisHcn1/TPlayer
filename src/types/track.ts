@@ -45,8 +45,8 @@ export interface Track {
   isSacd?: boolean
   /** SACD 分轨在 ISO 内的 0-based 索引 */
   sacdTrackIndex?: number
-  /** SACD 区域：0=2ch 立体声 / 1=多声道 */
-  sacdArea?: number
+  /** SACD 区域（后端 SacdArea 枚举序列化值） */
+  sacdArea?: 'Stereo2ch' | 'MultiCh'
   /** 原始 DSD 采样率（DSD64=2822400） */
   sacdDsdRate?: number
 }

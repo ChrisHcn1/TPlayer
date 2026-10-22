@@ -59,6 +59,17 @@ fn sql_stem_expr(path_expr: &str) -> String {
     format!("rtrim({rest}, replace({rest}, '.', ''))")
 }
 
+/// SACD 5.1 环绕轨过滤条件（作用于 `tracks` 别名 `t`）。
+///
+/// ISO 的立体声区与多声道区是同一张碟的两套曲目（标题仅差 `[5.1]` 后缀），
+/// 在「全部歌曲 / 统计 / 艺术家」里并排出现会像重复加载；5.1 轨本身仍完整入库，
+/// 由 SACD 专辑页的「立体声 / 5.1 环绕」切换访问（`tracks_of_album` 不过滤）。
+///
+/// `sacd_area` 存的是 serde_json 序列化值（含双引号），故按 `"MultiCh"` 比较。
+fn not_sacd_multich() -> &'static str {
+    "NOT (t.is_sacd = 1 AND t.sacd_area = '\"MultiCh\"')"
+}
+
 /// 「CUE 结构大文件」去重条件（作用于 `tracks` 的别名 `t`）。
 ///
 /// CUE 会在「分轨专辑」页展示整碟镜像拆出的分轨；同一张碟的整碟大文件
@@ -127,8 +138,14 @@ impl LibraryStore {
     pub fn tracks(&self) -> Vec<Track> {
         // 过滤被 CUE 分轨引用的整碟大文件（同一张碟不重复展示）
         let cue_cond = not_cue_source();
+        // 同时过滤 SACD 的 5.1 环绕轨：ISO 的立体声区与多声道区是同一张碟的
+        // 两套曲目（标题仅差 `[5.1]`），全部歌曲里并排展示会像"每首歌加载了两次"。
+        // 5.1 轨仍完整入库，通过 SACD 专辑页的「立体声 / 5.1 环绕」切换访问。
+        let multich_cond = not_sacd_multich();
         let sql = format!(
-                "SELECT t.* FROM tracks t WHERE {cue_cond} ORDER BY t.added_at, t.id"
+            "SELECT t.* FROM tracks t \
+             WHERE {cue_cond} AND {multich_cond} \
+             ORDER BY t.added_at, t.id"
         );
         let mut stmt = self.conn.prepare(&sql).expect("prepare tracks");
         let rows = stmt
@@ -282,11 +299,13 @@ impl LibraryStore {
     }
 
     pub fn stats(&self) -> LibraryStats {
-        // 统计口径与列表一致：排除被 CUE 分轨引用的整碟大文件
+        // 统计口径与列表一致：排除被 CUE 分轨引用的整碟大文件与 SACD 5.1 轨
         let cue_cond = not_cue_source();
+        let multich_cond = not_sacd_multich();
         let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(duration), 0.0),
-                                COUNT(DISTINCT album_id) FROM tracks t WHERE {cue_cond}"
+                               COUNT(DISTINCT album_id) FROM tracks t
+              WHERE {cue_cond} AND {multich_cond}"
         );
         let (track_count, total_duration, album_count) = self
             .conn
@@ -298,11 +317,10 @@ impl LibraryStore {
                 ))
             })
             .unwrap_or((0, 0.0, 0));
-        let cue_cond = not_cue_source();
         let artist_count_sql = format!(
             "SELECT COUNT(DISTINCT ta.artist) FROM track_artists ta
              JOIN tracks t ON t.id = ta.track_id
-                  WHERE {cue_cond}"
+                  WHERE {cue_cond} AND {multich_cond}"
         );
         let artist_count = self
             .conn
@@ -331,7 +349,9 @@ impl LibraryStore {
         let cue_cond = not_cue_source();
         let where_clause = match mode {
             "cue" => "t.is_cue = 1".to_string(),
-            "sacd" => "t.is_sacd = 1".to_string(),
+            // SACD 专辑页的曲目数按立体声区统计（与详情页默认版本一致）；
+            // 5.1 环绕轨在详情页切换查看，不作为独立曲目重复计数
+            "sacd" => format!("t.is_sacd = 1 AND {}", not_sacd_multich()),
             _ => format!("t.is_cue = 0 AND t.is_sacd = 0 AND {cue_cond}"),
         };
         let sql = format!(
@@ -402,6 +422,7 @@ impl LibraryStore {
     /// 按艺术家聚合（曲目数 / 去重专辑数）
     pub fn artists(&self) -> Vec<Artist> {
         let cue_cond = not_cue_source();
+        let multich_cond = not_sacd_multich();
         let sql = format!(
             r#"
             SELECT ta.artist,
@@ -409,7 +430,7 @@ impl LibraryStore {
                    COUNT(DISTINCT t.album_id)  AS album_count
             FROM track_artists ta
             JOIN tracks t ON t.id = ta.track_id
-                WHERE {cue_cond}
+                WHERE {cue_cond} AND {multich_cond}
             GROUP BY ta.artist
             ORDER BY ta.artist
         "#

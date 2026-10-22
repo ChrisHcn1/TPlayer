@@ -109,6 +109,13 @@ pub struct SacdDisc {
     pub unsupported: bool,
     /// 多声道（5.1）区曲目数（0 = 无多声道区）。两区曲目按相同顺序对应。
     pub multich_track_count: usize,
+    /// 由 `sacd_extract -P` 探测到的真实每轨时长（秒，索引 = 曲目序号）。
+    ///
+    /// DST 压缩区的存储数据量只有未压缩 DSD 的 ~25%，用「区间字节数 / 每帧字节数」
+    /// 推算帧数会把时长压到约 1/4（Energy 每轨 5:52 被显示成 2:44）。
+    /// ISO 的 Area TOC 只给区总帧数与各轨起点、不含每轨帧数，因此时长必须由
+    /// 解析了区 TOC 的 sacd_extract 提供；探测失败时为 None（回退为数据量推算）。
+    probed_durations: Option<Vec<f64>>,
 }
 
 impl SacdDisc {
@@ -377,6 +384,29 @@ impl SacdDisc {
     /// （若有）同样每条一轨（`sacd_area = MultiCh`，标题带 `[5.1]` 后缀），
     /// 用户可在曲库中任选版本播放。`sacd_track_index` 为合并列表中的索引
     /// （前 n 条 = 立体声区，其后 = 多声道区）。
+    /// 探测每轨真实时长（扫描期每碟调用一次）。
+    ///
+    /// DST 压缩区的存储数据量远小于未压缩 DSD，按字节推算的时长会被压缩率压低
+    /// （Energy 实测约 1/2.4）。ISO 的 Area TOC 不含每轨帧数，只有 `-P` 输出的
+    /// `Duration: MM:SS:FF` 是权威值（sacd_extract 自行解析区 TOC）。
+    /// 工具缺失 / 解析失败 / 曲目数不匹配时保持 None，回退为数据量推算。
+    pub fn probe_durations(&mut self) {
+        let Some(d) = probe_durations_via_external(&self.iso_path) else {
+            return;
+        };
+        if d.len() == self.tracks.len() {
+            self.probed_durations = Some(d);
+        }
+    }
+
+    /// 单轨时长：优先探测值，否则按数据量推算（对未压缩区准确，DST 区偏短）
+    fn track_duration(&self, i: usize, t: &SacdTrackMeta) -> f64 {
+        self.probed_durations
+            .as_ref()
+            .and_then(|v| v.get(i).copied())
+            .unwrap_or_else(|| (t.frames as f64) / (DSD_FRAMES_PER_SEC as f64))
+    }
+
     pub fn to_tracks(&self) -> Vec<Track> {
         let album = self.album.clone();
         let artist = self.artist.clone();
@@ -385,7 +415,7 @@ impl SacdDisc {
 
         let mut tracks: Vec<Track> = Vec::with_capacity(self.tracks.len() * 2);
         for (i, t) in self.tracks.iter().enumerate() {
-            let duration = (t.frames as f64) / (DSD_FRAMES_PER_SEC as f64);
+            let duration = self.track_duration(i, t);
             let artists = t
                 .artist
                 .as_ref()
@@ -440,7 +470,7 @@ impl SacdDisc {
         let n = self.tracks.len();
         for i in 0..self.multich_track_count.min(n) {
             let t = &self.tracks[i];
-            let duration = (t.frames as f64) / (DSD_FRAMES_PER_SEC as f64);
+            let duration = self.track_duration(i, t);
             let artists = t
                 .artist
                 .as_ref()
@@ -585,6 +615,7 @@ fn parse_toc(
         audio_end_byte: file_size,
         unsupported: false,
         multich_track_count: 0,
+        probed_durations: None,
     })
 }
 
@@ -1097,6 +1128,7 @@ fn parse_scarletbooks(
         audio_end_byte: area_end_byte,
         unsupported,
         multich_track_count,
+        probed_durations: None,
     })
 }
 
@@ -1154,6 +1186,77 @@ fn sacd_track_id(iso: &Path, num: u32, multich: bool) -> String {
 /// 2. 系统 PATH。
 fn resolve_sacd_extract() -> Option<PathBuf> {
     crate::player::engine::resolve_bin_tool("sacd_extract")
+}
+
+/// 调 `sacd_extract -P` 取每轨真实时长。
+///
+/// `-P` 只解析 ISO 的区 TOC（不读音频数据），单碟耗时约几十毫秒，仅扫描期调用。
+fn probe_durations_via_external(iso: &Path) -> Option<Vec<f64>> {
+    let exe = resolve_sacd_extract()?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg("-P")
+        .arg("-i")
+        .arg(iso)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 无控制台窗口
+        cmd.creation_flags(0x08000000);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_probe_output(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 解析 `-P` 输出：按 `Area Information [N]` 分段收集 `Duration: MM:SS:FF`。
+///
+/// 优先取 `Speaker config: 2 Channel` 的区（曲目顺序与 SACDTRL1 一致，
+/// 多声道区与之逐轨对应）；无 2ch 区时取第一个非空区。
+fn parse_probe_output(text: &str) -> Option<Vec<f64>> {
+    let mut areas: Vec<(bool, Vec<f64>)> = Vec::new();
+    let mut cur: Option<(bool, Vec<f64>)> = None;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with("Area Information [") {
+            if let Some(c) = cur.take() {
+                areas.push(c);
+            }
+            cur = Some((false, Vec::new()));
+        } else if l.starts_with("Speaker config:") {
+            if let Some(c) = cur.as_mut() {
+                c.0 = l.contains("2 Channel");
+            }
+        } else if let Some(rest) = l.strip_prefix("Duration:") {
+            if let Some(c) = cur.as_mut() {
+                if let Some(secs) = parse_msf(rest.trim()) {
+                    c.1.push(secs);
+                }
+            }
+        }
+    }
+    if let Some(c) = cur.take() {
+        areas.push(c);
+    }
+    areas
+        .iter()
+        .find(|(is_2ch, v)| *is_2ch && !v.is_empty())
+        .or_else(|| areas.iter().find(|(_, v)| !v.is_empty()))
+        .map(|(_, v)| v.clone())
+}
+
+/// `05:52:06 [mins:secs:frames]` → 秒（SACD 帧率 75 fps）
+fn parse_msf(s: &str) -> Option<f64> {
+    let token = s.split_whitespace().next()?;
+    let mut it = token.split(':');
+    let mins: f64 = it.next()?.parse().ok()?;
+    let secs: f64 = it.next()?.parse().ok()?;
+    let frames: f64 = it.next().unwrap_or("0").parse().unwrap_or(0.0);
+    Some(mins * 60.0 + secs + frames / 75.0)
 }
 
 /// 在目录树中查找第一个 .dsf 文件（sacd_extract 输出 <专辑>/<Stereo|6ch>/NN - Title.dsf）。
@@ -1227,6 +1330,60 @@ mod sacd_export_tests {
     use super::*;
     use std::io::Write;
     use std::process::Command;
+
+    /// `-P` 输出解析：优先 2 Channel 区，MSF 帧按 75fps 换算
+    #[test]
+    fn probe_output_prefers_stereo_area_and_parses_msf() {
+        let text = "\r\nAlbum Information:\r\n\tTitle: Energy\r\n\r\nArea count: 2\r\n\
+            \tArea Information [0]:\r\n\r\n\tTrack Count: 2\r\n\
+            \tTotal play time: 09:59:81 [mins:secs:frames]\r\n\
+            \tSpeaker config: 2 Channel\r\n\tTrack list [0]:\r\n\
+            \t\tTitle[0]: Fortune Teller\r\n\t\tDuration: 05:52:06 [mins:secs:frames]\r\n\r\n\
+            \t\tTitle[1]: Argentina\r\n\t\tDuration: 04:07:75 [mins:secs:frames]\r\n\r\n\
+            \tArea Information [1]:\r\n\r\n\tTrack Count: 2\r\n\
+            \tSpeaker config: 6 Channel\r\n\tTrack list [1]:\r\n\
+            \t\tTitle[0]: Fortune Teller\r\n\t\tDuration: 05:52:00 [mins:secs:frames]\r\n";
+        let d = parse_probe_output(text).expect("应解析出 2ch 区时长");
+        assert_eq!(d.len(), 2);
+        assert!((d[0] - (5.0 * 60.0 + 52.0 + 6.0 / 75.0)).abs() < 1e-6);
+        // 75 帧 = 1 秒 → 4:08
+        assert!((d[1] - (4.0 * 60.0 + 8.0)).abs() < 1e-6);
+    }
+
+    /// 真实 ISO 端到端：DST 压缩区时长必须来自 -P（而非数据量推算）。
+    /// 设置 `SACD_TEST_ISO` 环境变量后运行；工具缺失时跳过。
+    #[test]
+    fn probe_real_iso_durations_when_available() {
+        let Ok(iso) = std::env::var("SACD_TEST_ISO") else {
+            return;
+        };
+        if resolve_sacd_extract().is_none() {
+            return;
+        }
+        let Some(mut disc) = SacdDisc::open(Path::new(&iso)) else {
+            return;
+        };
+        disc.probe_durations();
+        let tracks = disc.to_tracks();
+        let durations: Vec<f64> = tracks.iter().map(|t| t.duration).collect();
+        eprintln!("tracks={} durations={:?}", tracks.len(), durations);
+        assert!(
+            tracks.iter().all(|t| t.duration > 60.0),
+            "每轨时长应大于 1 分钟（DST 区若按数据量推算会缩到约 40%）：{durations:?}"
+        );
+        // 总时长应与 -P 的 "Total play time" 量级一致（Energy ≈ 50 分钟）
+        let total: f64 = durations.iter().take(disc.tracks.len()).sum();
+        assert!(total > 1800.0, "立体声区总时长应在 30 分钟以上：{total}");
+    }
+
+    /// 只有 6 Channel 区的碟：回退为第一个非空区
+    #[test]
+    fn probe_output_falls_back_to_first_area() {
+        let text = "Area Information [0]:\n\tSpeaker config: 6 Channel\n\
+            \t\tDuration: 03:00:00 [mins:secs:frames]\n";
+        let d = parse_probe_output(text).expect("应解析出多声道区时长");
+        assert_eq!(d, vec![180.0]);
+    }
 
     /// ffmpeg 是否可用（缺少则回归测试跳过解码校验，仅做结构校验）。
     fn ffmpeg_ok() -> bool {
