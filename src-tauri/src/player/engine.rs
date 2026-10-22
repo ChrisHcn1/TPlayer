@@ -5,7 +5,7 @@
 
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -282,7 +282,7 @@ pub fn resolve_ffprobe() -> Option<PathBuf> {
 /// 失败返回 None，由调用方回退到扩展名判定与安全默认值。
 fn probe_audio_stream(path: &Path) -> Option<(bool, u32, u16)> {
     let ffprobe = resolve_ffprobe()?;
-    let out = Command::new(ffprobe)
+    let out = crate::util::hidden_command(ffprobe)
         .args([
             "-v",
             "error",
@@ -330,7 +330,7 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 
     // 1) ffprobe 首选
     if let Some(ffprobe) = resolve_ffprobe() {
-        let mut cmd = Command::new(ffprobe);
+        let mut cmd = crate::util::hidden_command(ffprobe);
         cmd.arg("-v")
             .arg("error")
             .arg("-show_entries")
@@ -367,7 +367,7 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 /// `-t 0.001` 使 ffmpeg 读够输入信息后立即退出，避免大文件全量解码。
 fn probe_duration_via_ffmpeg(path: &Path) -> Option<f64> {
     let ffmpeg = resolve_ffmpeg()?;
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::util::hidden_command(ffmpeg);
     cmd.arg("-hide_banner")
         .arg("-i")
         .arg(path)
@@ -1260,7 +1260,7 @@ fn guard_sacd_dsf(dsf_path: &Path) -> AppResult<()> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
         AppError::Player("SACD 解码校验需要 FFmpeg：未找到 ffmpeg".into())
     })?;
-    let out = std::process::Command::new(&ffmpeg)
+    let out = crate::util::hidden_command(&ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(dsf_path)
         .args([
@@ -1442,7 +1442,7 @@ fn spawn_ffmpeg_decoder(
         );
     }
 
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::util::hidden_command(ffmpeg);
     if offset_ms > 0 {
         cmd.arg("-ss")
             .arg(format!("{:.3}", offset_ms as f64 / 1000.0));

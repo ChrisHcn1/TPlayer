@@ -7,7 +7,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -329,7 +329,7 @@ fn convert_one(
     );
 
     let ffmpeg = resolve_ffmpeg().expect("start_batch 已校验 ffmpeg 存在");
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::util::hidden_command(ffmpeg);
     cmd.arg("-y")
         .arg("-v")
         .arg("error")

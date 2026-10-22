@@ -63,7 +63,7 @@
         "role": "Viewer"
       }
     ],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "windows": {
       "nsis": {
         "installMode": "currentUser",

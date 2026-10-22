@@ -15,7 +15,7 @@
 //! `resolve_ffmpeg()`（祖先目录 / 固定安装路径 / PATH 四级查找，并校验
 //! ELF 魔数）；Windows 保持原 PATH 直调，行为零变化。
 
-use std::process::Command;
+
 
 /// 无标签曲目在播放时触发的后台响度分析（ffmpeg ebur128）
 /// 返回 `(建议增益 dB, 峰值线性)`；静音/失败返回 None。
@@ -30,7 +30,7 @@ pub fn analyze_loudness(path: &str) -> Option<(f32, f32)> {
     #[cfg(not(target_os = "linux"))]
     let (program, input) = (std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from(path));
 
-    let output = Command::new(program)
+    let output = crate::util::hidden_command(program)
         .args([
             "-hide_banner",
             "-nostats",

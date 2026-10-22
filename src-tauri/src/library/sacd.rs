@@ -20,7 +20,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
@@ -312,7 +312,7 @@ impl SacdDisc {
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work)?;
 
-        let mut cmd = Command::new(&exe);
+        let mut cmd = crate::util::hidden_command(&exe);
         cmd.arg(if multich { "-m" } else { "-2" })
             .arg("-s") // 输出 DSF
             .arg("-t")
@@ -326,12 +326,6 @@ impl SacdDisc {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            // CREATE_NO_WINDOW：解码期间不弹控制台窗口
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000);
-        }
 
         eprintln!(
             "SACD_EXTERNAL exe={:?} track={} multich={} iso={:?}",
@@ -1220,19 +1214,13 @@ fn resolve_sacd_extract() -> Option<PathBuf> {
 /// `-P` 只解析 ISO 的区 TOC（不读音频数据），单碟耗时约几十毫秒，仅扫描期调用。
 fn probe_durations_via_external(iso: &Path) -> Option<Vec<f64>> {
     let exe = resolve_sacd_extract()?;
-    let mut cmd = Command::new(&exe);
+    let mut cmd = crate::util::hidden_command(&exe);
     cmd.arg("-P")
         .arg("-i")
         .arg(iso)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // 无控制台窗口
-        cmd.creation_flags(0x08000000);
-    }
     let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;

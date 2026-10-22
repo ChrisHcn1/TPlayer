@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent};
 
 pub mod commands;
 pub mod config;
+pub mod util;
 pub mod converter;
 pub mod cover;
 pub mod error;
