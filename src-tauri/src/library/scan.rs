@@ -756,11 +756,123 @@ fn retain_sacd_derived(
     });
 }
 
+/// 收集 SACD 时长校正的输入：每个 ISO 及其在库内的现有 `(id, duration)`。
+///
+/// 由调用方在**持有曲库锁**时调用（只做查询，很快）；探测与对比必须在锁外进行。
+pub fn sacd_duration_plan(
+    library: &super::store::LibraryStore,
+) -> Vec<(String, Vec<(String, f64)>)> {
+    library
+        .sacd_iso_paths()
+        .into_iter()
+        .map(|iso| {
+            let existing = library.sacd_tracks_of_file(&iso);
+            (iso, existing)
+        })
+        .filter(|(_, existing)| !existing.is_empty())
+        .collect()
+}
+
+/// 按 `sacd_extract -P` 的探测结果计算需要校正的分轨时长 `(id, 新时长)`。
+///
+/// DST 压缩区的存储数据量只有未压缩 DSD 的 ~25%，旧版本按「区间字节数 / 每帧字节数」
+/// 推算的时长会压到约 40%（Energy 每轨 5:52 显示成 2:22）。这类错值入库后不会自行
+/// 消失——扫描只对新增/变更文件重解析，SACD 虚拟分轨虽每轮重建，但用户不重扫就一直是
+/// 旧值。启动期用它就地校正，让升级即生效。
+///
+/// 探测失败（工具缺失/解析失败）的 ISO 不产生任何修改，仍保留原值。
+pub fn sacd_duration_fixes(plan: &[(String, Vec<(String, f64)>)]) -> Vec<(String, f64)> {
+    let mut fixes: Vec<(String, f64)> = Vec::new();
+    for (iso, existing) in plan {
+        let Some(mut disc) = super::sacd::SacdDisc::open(std::path::Path::new(iso)) else {
+            continue;
+        };
+        disc.probe_durations();
+        if !disc.has_probed_durations() {
+            continue;
+        }
+        for track in disc.to_tracks() {
+            let Some((_, old)) = existing.iter().find(|(id, _)| id == &track.id) else {
+                continue;
+            };
+            // 0.5s 容差：避免探测的小数抖动造成无意义写入
+            if (old - track.duration).abs() > 0.5 {
+                fixes.push((track.id, track.duration));
+            }
+        }
+    }
+    fixes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
+
+    /// 端到端：库里存着旧版本按数据量推算的时长（DST 区约 40%）时，
+    /// 启动期校正必须把 duration 就地改成探测值（真实 ISO，需 SACD_TEST_ISO）
+    #[test]
+    fn sacd_duration_repair_fixes_stale_rows() {
+        let Ok(iso) = std::env::var("SACD_TEST_ISO") else {
+            return;
+        };
+        if crate::player::engine::resolve_bin_tool("sacd_extract").is_none() {
+            return;
+        }
+        let Some(mut disc) = super::super::sacd::SacdDisc::open(std::path::Path::new(&iso)) else {
+            return;
+        };
+        disc.probe_durations();
+        if !disc.has_probed_durations() {
+            return;
+        }
+        let correct = disc.to_tracks();
+
+        // 模拟旧库：DST 压缩区按字节推算 → 时长约为真实值的 40%
+        let mut stale = correct.clone();
+        for t in &mut stale {
+            t.duration *= 0.4;
+        }
+
+        let dir = std::env::temp_dir().join(format!("tplayer-sacd-dur-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lib = crate::library::store::LibraryStore::open(
+            dir.join("library.db"),
+            dir.join("legacy.json"),
+        )
+        .expect("打开临时曲库");
+        lib.apply_scan(&stale, &[]).expect("写入旧时长");
+
+        let plan = sacd_duration_plan(&lib);
+        assert_eq!(plan.len(), 1, "应收集到该 ISO");
+        let fixes = sacd_duration_fixes(&plan);
+        assert_eq!(fixes.len(), stale.len(), "每轨时长都应判为需要校正");
+        let updated = lib.update_durations(&fixes).expect("写回校正时长");
+        assert_eq!(updated, fixes.len());
+
+        let after = lib.sacd_tracks_of_file(&iso);
+        for t in &correct {
+            let (_, dur) = after
+                .iter()
+                .find(|(id, _)| id == &t.id)
+                .unwrap_or_else(|| panic!("缺少曲目 {}", t.title));
+            assert!(
+                (dur - t.duration).abs() < 0.6,
+                "{}: 校正后 {dur:.2}s，应为 {:.2}s",
+                t.title,
+                t.duration
+            );
+        }
+        // 5.1 轨同样被校正（其帧数来自立体声区，旧值同样偏短）
+        let multich: Vec<_> = after
+            .iter()
+            .filter(|(_, d)| (d - correct[0].duration).abs() < 0.6)
+            .collect();
+        assert!(multich.len() >= 2, "5.1 轨也应校正");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn normalize_strips_track_number_prefix() {

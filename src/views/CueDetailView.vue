@@ -8,7 +8,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { useLibraryStore } from '../stores/library'
+import { isSacdMultich, useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useTrackActions } from '../composables/useTrackActions'
 import { useTrackSelection } from '../composables/useTrackSelection'
@@ -49,8 +49,7 @@ const heroIcon = computed(() => (isSacd.value ? 'disc' : 'layers'))
  * 这里默认只显示立体声区，按需切到 5.1，列表与「播放整盘」都只作用于当前区。
  */
 const areaTab = ref<'stereo' | 'multich'>('stereo')
-const isMultichTrack = (t: Track): boolean =>
-  String(t.sacdArea ?? '').toLowerCase() === 'multich'
+const isMultichTrack = (t: Track): boolean => isSacdMultich(t)
 const hasMultich = computed(() => tracks.value.some(isMultichTrack))
 const displayTracks = computed(() => {
   if (!isSacd.value || !hasMultich.value) return tracks.value

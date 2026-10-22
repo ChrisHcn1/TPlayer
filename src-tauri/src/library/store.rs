@@ -135,17 +135,17 @@ impl LibraryStore {
         stmt.query_row([path], |_| Ok(())).is_ok()
     }
 
+    /// 全部曲目（含 SACD 的 5.1 环绕轨）。
+    ///
+    /// 5.1 轨与立体声区是同一张碟的两套曲目，**不能**在数据层直接裁掉：
+    /// 前端「SACD 专辑页」的立体声/5.1 切换需要它们。普通列表（全部歌曲 /
+    /// 艺术家 / 统计）的 5.1 去重分别在 SQL 侧（stats/artists/albums）与
+    /// 前端 store（tracks 与 allTracks 分离）完成。
     pub fn tracks(&self) -> Vec<Track> {
         // 过滤被 CUE 分轨引用的整碟大文件（同一张碟不重复展示）
         let cue_cond = not_cue_source();
-        // 同时过滤 SACD 的 5.1 环绕轨：ISO 的立体声区与多声道区是同一张碟的
-        // 两套曲目（标题仅差 `[5.1]`），全部歌曲里并排展示会像"每首歌加载了两次"。
-        // 5.1 轨仍完整入库，通过 SACD 专辑页的「立体声 / 5.1 环绕」切换访问。
-        let multich_cond = not_sacd_multich();
         let sql = format!(
-            "SELECT t.* FROM tracks t \
-             WHERE {cue_cond} AND {multich_cond} \
-             ORDER BY t.added_at, t.id"
+            "SELECT t.* FROM tracks t WHERE {cue_cond} ORDER BY t.added_at, t.id"
         );
         let mut stmt = self.conn.prepare(&sql).expect("prepare tracks");
         let rows = stmt
@@ -177,6 +177,63 @@ impl LibraryStore {
     }
 
     /// 专辑（含 CUE 分轨专辑）下全部曲目，按音轨号升序
+    /// 库内所有 SACD ISO 路径（去重；启动期时长校正用）
+    pub fn sacd_iso_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT DISTINCT file_path FROM tracks WHERE is_sacd = 1 ORDER BY file_path")
+        else {
+            return out;
+        };
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            out.extend(rows.flatten());
+        }
+        out
+    }
+
+    /// 指定 ISO 在库内的 SACD 分轨 `(id, duration)`（含 5.1 区，启动期时长校正用）
+    pub fn sacd_tracks_of_file(&self, file_path: &str) -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, duration FROM tracks \
+             WHERE file_path = ?1 COLLATE NOCASE AND is_sacd = 1",
+        ) else {
+            return out;
+        };
+        if let Ok(rows) = stmt.query_map([file_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        }) {
+            out.extend(rows.flatten());
+        }
+        out
+    }
+
+    /// 批量更新曲目时长（秒），返回实际更新条数。
+    ///
+    /// 仅改 duration，不触碰 added_at / 收藏 / 歌单引用，也不重建艺术家关联。
+    pub fn update_durations(&mut self, items: &[(String, f64)]) -> AppResult<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| AppError::Library(format!("开启时长更新事务失败: {e}")))?;
+        let mut updated = 0usize;
+        for (id, duration) in items {
+            updated += tx
+                .execute(
+                    "UPDATE tracks SET duration = ?1 WHERE id = ?2",
+                    params![duration, id],
+                )
+                .map_err(|e| AppError::Library(format!("更新曲目时长失败: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| AppError::Library(format!("提交时长更新失败: {e}")))?;
+        Ok(updated)
+    }
+
     pub fn tracks_of_album(&self, album_id: &str) -> Vec<Track> {
         let cue_cond = not_cue_source();
         let sql = format!(

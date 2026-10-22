@@ -1371,7 +1371,19 @@ fn spawn_sacd_decoder(
 
     // 防白噪兜底：校验导出 DSF 确为可正常解码的 PCM（非 DST/参数错误导致的白噪），
     // 一旦检出异常立即拒绝播放，绝不把白噪轰到声卡（对应"运行期自检 & 防白噪兜底"）。
-    guard_sacd_dsf(&dsf_path)?;
+    //
+    // 内置导出校验失败时不能直接报错：Area TOC 不携带可靠的「该区是否 DST」标志
+    // （Energy 的 2ch 区就是被误判为未压缩的 DST 数据），此时改由 sacd_extract 重解，
+    // 这是一次性的兜底（成功后会命中缓存），正常碟片零成本。
+    if let Err(err) = guard_sacd_dsf(&dsf_path) {
+        if use_external {
+            return Err(err);
+        }
+        let _ = std::fs::remove_file(&dsf_path);
+        disc.extract_track_via_external(meta.track_number, multich, &dsf_path)
+            .map_err(|e| AppError::Player(format!("解码 SACD 音轨失败: {}", e)))?;
+        guard_sacd_dsf(&dsf_path)?;
+    }
     // 复用 ffmpeg 管道解码 DSF（ffmpeg 原生支持 DSF，由 dsd_lsbf 解码器直接输出 PCM）
     let (child, source) = spawn_ffmpeg_decoder(&dsf_path, 0, None)?;
     Ok((child, source, dsf_path))

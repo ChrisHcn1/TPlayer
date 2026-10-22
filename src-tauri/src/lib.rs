@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Listener, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent};
 
 pub mod commands;
 pub mod config;
@@ -134,6 +134,43 @@ pub fn run() {
                     (config.library_dirs.clone(), config.watch.enabled)
                 };
                 state.watch.reconfigure(app_handle.clone(), &dirs, watch_enabled);
+            }
+
+            // 启动期 SACD 分轨时长校正（后台线程，不阻塞首屏）：
+            // 时长只能由 sacd_extract -P 给出（DST 压缩区数据量 ≠ 播放时长），旧版本
+            // 按字节推算入库的值会一直留在库里，必须重扫才会更新。这里在启动后
+            // 重新探测并就地改 duration，升级即修正，无需用户手动重扫。
+            // 探测在曲库锁外进行（每碟几十毫秒），只在收集/写回时短暂持锁。
+            {
+                let app_bg = app_handle.clone();
+                std::thread::spawn(move || {
+                    let state = app_bg.state::<AppState>();
+                    let plan = {
+                        let library = state.library.lock().unwrap();
+                        library::scan::sacd_duration_plan(&library)
+                    };
+                    if plan.is_empty() {
+                        return;
+                    }
+                    let fixes = library::scan::sacd_duration_fixes(&plan);
+                    if fixes.is_empty() {
+                        return;
+                    }
+                    let updated = state
+                        .library
+                        .lock()
+                        .unwrap()
+                        .update_durations(&fixes)
+                        .unwrap_or(0);
+                    if updated > 0 {
+                        eprintln!("[library] 启动期校正 {updated} 条 SACD 分轨时长");
+                        // 复用目录监控事件通知前端刷新曲库视图（时长列即时更新）
+                        let _ = app_bg.emit(
+                            "watcher://event",
+                            serde_json::json!({ "changes": [], "reason": "sacd-duration" }),
+                        );
+                    }
+                });
             }
 
             // 显式给主窗口设置图标：Linux/X11·Wayland 下若不设置，窗口与任务栏

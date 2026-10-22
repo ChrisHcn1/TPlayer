@@ -36,7 +36,25 @@ export function matchTrackKeyword(track: Track, key: string): boolean {
   return ext.length > 0 && ext === key.replace(/^\.+/, '')
 }
 
+/**
+ * 是否为 SACD 的 5.1 环绕轨（后端 `SacdArea` 序列化为 `"MultiCh"`）。
+ *
+ * 与立体声区逐曲对应、标题仅差 `[5.1]` 后缀，普通列表需要去重，
+ * 只有 SACD 专辑页的区域切换才展示。
+ */
+export function isSacdMultich(track: Track): boolean {
+  return String(track.sacdArea ?? '').toLowerCase() === 'multich'
+}
+
 export const useLibraryStore = defineStore('library', () => {
+  /**
+   * 全量曲目（含 SACD 的 5.1 环绕轨）。
+   *
+   * ISO 的立体声区与多声道区是同一张碟的两套曲目（标题仅差 `[5.1]` 后缀），
+   * 直接并排展示会像"每首歌加载了两次"。这里保留全量供 SACD 专辑页做
+   * 「立体声 / 5.1 环绕」切换，普通列表统一用下面的 `tracks`（已剔除 5.1）。
+   */
+  const allTracks = ref<Track[]>([])
   const tracks = ref<Track[]>([])
   const albums = ref<Album[]>([])
   const cueAlbums = ref<Album[]>([])
@@ -63,7 +81,8 @@ export const useLibraryStore = defineStore('library', () => {
   /** id → 曲目 的索引，供各视图 O(1) 取当前播放 / 歌单曲目 */
   const tracksById = computed(() => {
     const map = new Map<string, Track>()
-    for (const track of tracks.value) map.set(track.id, track)
+    // 用全量索引：播放中的 5.1 轨、专辑页切换后的曲目都要能取到元数据
+    for (const track of allTracks.value) map.set(track.id, track)
     return map
   })
 
@@ -101,9 +120,12 @@ export const useLibraryStore = defineStore('library', () => {
     return artists.value.find((artist) => artist.name === name)
   }
 
-  /** 专辑下的曲目（按音轨序号排序；找不到时回落到空数组） */
+  /**
+   * 专辑下的曲目（按音轨序号排序；找不到时回落到空数组）。
+   * 取全量 `allTracks`：SACD 专辑页需要立体声 + 5.1 两套，按区域切换显示。
+   */
   function tracksOfAlbum(albumId: string): Track[] {
-    return tracks.value
+    return allTracks.value
       .filter((track) => track.albumId === albumId)
       .sort((a, b) => (a.trackNumber ?? 0) - (b.trackNumber ?? 0))
   }
@@ -144,7 +166,9 @@ export const useLibraryStore = defineStore('library', () => {
           libraryService.favoriteIds(),
           libraryService.recent(),
         ])
-      tracks.value = trackList
+      allTracks.value = trackList
+      // 普通列表剔除 SACD 5.1 环绕轨（与立体声区同曲目，只差 `[5.1]` 后缀）
+      tracks.value = trackList.filter((track) => !isSacdMultich(track))
       albums.value = albumList
       cueAlbums.value = cueList
       sacdAlbums.value = sacdList
@@ -289,6 +313,7 @@ export const useLibraryStore = defineStore('library', () => {
   /** 清空内存中的曲库视图（不删除任何磁盘文件，重新扫描可恢复） */
   function clear(): void {
     tracks.value = []
+    allTracks.value = []
     albums.value = []
     cueAlbums.value = []
     sacdAlbums.value = []

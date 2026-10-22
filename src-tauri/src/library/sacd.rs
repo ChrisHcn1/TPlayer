@@ -399,6 +399,32 @@ impl SacdDisc {
         }
     }
 
+    /// 是否已拿到探测时长（调用方据此决定是否写回库，避免把推算值当权威值）
+    pub fn has_probed_durations(&self) -> bool {
+        self.probed_durations.is_some()
+    }
+
+    /// 该立体声区曲目的数据是否经过 DST 压缩。
+    ///
+    /// Area TOC 不携带「该区是否 DST」的可靠标志（Energy 2ch 区即被误判为未压缩），
+    /// 但压缩与否可由**真实时长 vs 镜像数据量**的倍率判定：DST 无损压缩率约 2~2.5 倍，
+    /// 按字节推算的帧数会显著小于真实帧数。真实时长来自 `sacd_extract -P`（探测后才有）。
+    pub fn track_is_compressed(&self, index: usize) -> bool {
+        let Some(real) = self
+            .probed_durations
+            .as_ref()
+            .and_then(|v| v.get(index))
+            .copied()
+        else {
+            return false;
+        };
+        let Some(t) = self.tracks.get(index) else {
+            return false;
+        };
+        // 真实帧数明显大于按数据量推算的帧数 → 镜像里存的是压缩数据
+        real * (DSD_FRAMES_PER_SEC as f64) > (t.frames as f64) * 1.2
+    }
+
     /// 单轨时长：优先探测值，否则按数据量推算（对未压缩区准确，DST 区偏短）
     fn track_duration(&self, i: usize, t: &SacdTrackMeta) -> f64 {
         self.probed_durations
@@ -426,8 +452,9 @@ impl SacdDisc {
             } else {
                 t.title.clone()
             };
-            // DST / 非标准布局：由外部 sacd_extract 解码，格式标记为 iso-dst
-            let fmt = if t.is_dst || self.unsupported {
+            // DST / 非标准布局：由外部 sacd_extract 解码，格式标记为 iso-dst。
+            // 压缩与否也可能是探测后才确定的（TOC 无可靠标志），见 track_is_compressed。
+            let fmt = if t.is_dst || self.unsupported || self.track_is_compressed(i) {
                 "iso-dst"
             } else {
                 "iso-dsd"
@@ -1374,6 +1401,21 @@ mod sacd_export_tests {
         // 总时长应与 -P 的 "Total play time" 量级一致（Energy ≈ 50 分钟）
         let total: f64 = durations.iter().take(disc.tracks.len()).sum();
         assert!(total > 1800.0, "立体声区总时长应在 30 分钟以上：{total}");
+
+        // DST 识别：Energy 的 2ch 区 TOC 无压缩标志，靠「探测时长 vs 数据量」倍率判定，
+        // 否则播放会走内置裸 DSD 导出 → 白噪（只能靠 guard 失败后兜底重解）。
+        let derived = disc.tracks[0].frames as f64 / (DSD_FRAMES_PER_SEC as f64);
+        eprintln!(
+            "track0: derived={derived:.2}s probed={:.2}s format={} compressed={}",
+            tracks[0].duration,
+            tracks[0].format,
+            disc.track_is_compressed(0)
+        );
+        assert!(
+            tracks[0].duration > derived * 1.2,
+            "该碟 2ch 区为 DST 压缩，探测时长应显著大于按数据量推算的值"
+        );
+        assert_eq!(tracks[0].format, "iso-dst", "DST 区应标记为 iso-dst");
     }
 
     /// 只有 6 Channel 区的碟：回退为第一个非空区
