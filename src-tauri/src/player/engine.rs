@@ -1309,6 +1309,13 @@ fn spawn_sacd_decoder(
             "该曲目使用 DST 压缩，当前版本暂不支持；请选择 SACD 立体声 2ch 区未压缩音轨".into(),
         ));
     }
+    if disc.unsupported {
+        return Err(AppError::Player(
+            "该 SACD 音频区为 DST 压缩（或非标准布局），当前版本无法解码；\
+             请先用 sacd_extract 等工具转换为 DSF 后入库播放"
+                .into(),
+        ));
+    }
 
     let dsf_path = cached_dsf_path(iso_path, track_index).ok_or_else(|| {
         AppError::Player("无法创建 SACD 临时缓存目录".into())
@@ -1361,8 +1368,13 @@ fn spawn_ffmpeg_decoder(
         .map(|e| matches!(e.to_ascii_lowercase().as_str(), "dsf" | "dff"))
         .unwrap_or(false);
     let is_dsd = codec_dsd || ext_dsd;
-    // 输出声道：单声道/立体声原样，多声道下混为立体声（rodio 友好）。
-    let out_ch = src_ch.clamp(1, 2);
+    // 输出声道：**按源（文件头）声道数解码**，不强制 2ch——多声道文件（如 5.1 SACD
+    // 解出的 6ch DSF）若被硬按 2ch 解释，样本帧会错位成噪声。设备适配（多声道→立体声
+    // 下混）由 PcmStreamSource 在输出侧完成，解码链路保持源声道。
+    let src_ch = src_ch.clamp(1, 8);
+    // 供给 rodio 的声道：rodio 0.19 不做声道转换，设备为立体声（Windows 共享混音常态），
+    // 多声道在此下混；单声道复制为双声道，立体声原样。
+    let out_ch = 2;
     // 输出采样率：DSD 统一到 44.1kHz 标准率；PCM 透传源速率（探测失败回退 44.1kHz）。
     let out_rate = if is_dsd {
         44100
@@ -1383,8 +1395,8 @@ fn spawn_ffmpeg_decoder(
     // 诊断日志（终端可见）：仅对 SACD(DSD) 记录实际解码命令与判定，便于排查白噪/无法播放。
     if is_dsd {
         eprintln!(
-            "SACD_DECODE ffmpeg={:?} codec_dsd={} ext_dsd={} out_ch={} out_rate={} filter={:?}",
-            ffmpeg, codec_dsd, ext_dsd, out_ch, out_rate, audio_filter
+            "SACD_DECODE ffmpeg={:?} codec_dsd={} ext_dsd={} src_ch={} out_ch={} out_rate={} filter={:?}",
+            ffmpeg, codec_dsd, ext_dsd, src_ch, out_ch, out_rate, audio_filter
         );
     }
 
@@ -1414,7 +1426,8 @@ fn spawn_ffmpeg_decoder(
     if is_dsd {
         // DSD→PCM 经 ffmpeg 解码：ffmpeg 8.x 直接输出 s16le 会解出白噪，必须以 f32le 浮点输出
         // （本机 ffmpeg 此路径正常），再由 PcmStreamSource 量化回 i16 喂给 rodio。
-        // 输出不再指定 -ar/-ac（filter 已 resample 到 44.1k/2ch），避免 -ar 叠加抽取消音。
+        // 不指定 -ar/-ac：声道数按文件头（源）输出——5.1 DSF 输出 6ch，立体声 2ch，
+        // 设备适配（下混到 2ch）由 PcmStreamSource 完成；显式 -ac 2 会让多声道帧错位成噪声。
         cmd.arg("-f")
             .arg("f32le")
             .arg("-acodec")
@@ -1454,7 +1467,7 @@ fn spawn_ffmpeg_decoder(
 
     Ok((
         child,
-        PcmStreamSource::new(BufReader::new(stdout), out_ch, out_rate, is_dsd),
+        PcmStreamSource::new(BufReader::new(stdout), src_ch, out_ch, out_rate, is_dsd),
     ))
 }
 
@@ -1465,18 +1478,30 @@ fn spawn_ffmpeg_decoder(
 ///
 /// `float_input`：ffmpeg 8.x 对 DSD 直接输出 `s16le` 存在缺陷（解出的 PCM 为白噪），须以
 /// `f32le` 浮点输出（本机 ffmpeg 此路径正常），此处再把 f32 量化回 i16 喂给 rodio。
+///
+/// 声道语义（v2.0.1 修复）：`src_channels` = ffmpeg 实际输出的声道数（来自文件头探测，
+/// 5.1 DSF 为 6、立体声为 2）；`channels` = 供给 rodio 的声道数（设备适配后）。
+/// 旧实现把多声道流硬按 2ch 解释（帧错位成噪声），现在改为**按源声道解码**，仅在输出侧
+/// 按设备声道下混/上混（5.1→立体声走 ITU-R BS.775 系数，单声道复制到双声道）。
 struct PcmStreamSource {
     reader: BufReader<ChildStdout>,
+    /// ffmpeg 输出（源）声道数
+    src_channels: u16,
+    /// 供给 rodio 的声道数（设备适配后）
     channels: u16,
     sample_rate: u32,
     /// 解码输出是否为 f32le（DSD 解码走此路径以避免 s16le 白噪缺陷）
     float_input: bool,
-    /// 解码输出的样本缓冲（i16 交错）
+    /// 解码输出的样本缓冲（i16，按 src_channels 交错）
     buffer: Vec<i16>,
     /// 当前缓冲读取位置
     pos: usize,
     /// 是否到达流末尾
     eof: bool,
+    /// 声道适配后的当前帧样本（长度 = channels）
+    out_frame: Vec<i16>,
+    /// out_frame 内的读取位置
+    out_pos: usize,
 }
 
 impl PcmStreamSource {
@@ -1484,22 +1509,27 @@ impl PcmStreamSource {
 
     fn new(
         reader: BufReader<ChildStdout>,
+        src_channels: u16,
         channels: u16,
         sample_rate: u32,
         float_input: bool,
     ) -> Self {
         Self {
             reader,
-            channels,
+            src_channels: src_channels.max(1),
+            channels: channels.max(1),
             sample_rate,
             float_input,
             buffer: Vec::with_capacity(Self::CHUNK_SAMPLES),
             pos: 0,
             eof: false,
+            out_frame: Vec::new(),
+            out_pos: 0,
         }
     }
 
-    /// 从管道填充一块样本到 buffer；失败/EOF 时标记 eof
+    /// 从管道填充一块样本到 buffer（追加，不清空——保证跨块帧连续）；
+    /// 失败/EOF 时标记 eof
     fn refill(&mut self) {
         if self.eof {
             return;
@@ -1511,12 +1541,10 @@ impl PcmStreamSource {
                 Ok(0) => self.eof = true,
                 Ok(n) => {
                     let sample_bytes = n - (n % 4);
-                    self.buffer.clear();
                     self.buffer.extend(bytes[..sample_bytes].chunks_exact(4).map(|c| {
                         let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(-1.0, 1.0);
                         (f * 32767.0) as i16
                     }));
-                    self.pos = 0;
                 }
                 Err(_) => self.eof = true,
             }
@@ -1528,19 +1556,89 @@ impl PcmStreamSource {
                 }
                 Ok(n) => {
                     let sample_bytes = n - (n % 2);
-                    self.buffer.clear();
                     self.buffer.extend(
                         bytes[..sample_bytes]
                             .chunks_exact(2)
                             .map(|c| i16::from_le_bytes([c[0], c[1]])),
                     );
-                    self.pos = 0;
                 }
                 Err(_) => {
                     self.eof = true;
                 }
             }
         }
+    }
+
+    /// 取下一帧（src_channels 个样本）并适配为 out_frame（channels 个样本）
+    fn next_frame(&mut self) -> bool {
+        let src = self.src_channels as usize;
+        loop {
+            if self.pos + src <= self.buffer.len() {
+                let frame = &self.buffer[self.pos..self.pos + src];
+                self.pos += src;
+                self.out_frame.clear();
+                self.out_frame
+                    .extend(adapt_channels(frame, self.channels as usize));
+                self.out_pos = 0;
+                return true;
+            }
+            if self.eof {
+                return false;
+            }
+            // 剩余样本不足一帧：压缩已消费部分后续读，保证帧跨块连续
+            if self.pos > 0 {
+                self.buffer.drain(..self.pos);
+                self.pos = 0;
+            }
+            let before = self.buffer.len();
+            self.refill();
+            if self.buffer.len() == before && self.eof {
+                return false;
+            }
+        }
+    }
+}
+
+/// 把一帧 src 声道样本适配为 dst 声道（输出侧设备适配，不改解码链路）。
+///
+/// - 源 == 目标：原样拷贝；
+/// - 单声道 → 立体声：复制；
+/// - 5.1（L R C LFE Ls Rs）→ 立体声：ITU-R BS.775 下混
+///   （L' = L + 0.707·C + 0.707·Ls，R' = R + 0.707·C + 0.707·Rs，LFE 不计入）；
+/// - 其它多声道 → 立体声：按奇偶索引均分（保留全部声道能量，避免只取前两声丢失环绕）。
+fn adapt_channels(frame: &[i16], dst: usize) -> Vec<i16> {
+    let src = frame.len();
+    if src == dst {
+        return frame.to_vec();
+    }
+    if dst == 2 {
+        match src {
+            1 => return vec![frame[0], frame[0]],
+            6 => {
+                let l = frame[0] as f32 + 0.7071 * (frame[2] as f32 + frame[4] as f32);
+                let r = frame[1] as f32 + 0.7071 * (frame[2] as f32 + frame[5] as f32);
+                return vec![clamp_i16(l), clamp_i16(r)];
+            }
+            _ => {}
+        }
+    }
+    // 通用：按目标声道数 round-robin 平均
+    let mut out = vec![0f32; dst];
+    for (i, &s) in frame.iter().enumerate() {
+        out[i % dst] += s as f32;
+    }
+    let scale = 1.0 / (src as f32 / dst as f32);
+    out.iter().map(|&v| clamp_i16(v * scale)).collect()
+}
+
+#[inline]
+fn clamp_i16(v: f32) -> i16 {
+    if v >= 32767.0 {
+        32767
+    } else if v <= -32768.0 {
+        -32768
+    } else {
+        v as i16
     }
 }
 
@@ -1549,15 +1647,14 @@ impl Iterator for PcmStreamSource {
 
     fn next(&mut self) -> Option<i16> {
         loop {
-            if self.pos < self.buffer.len() {
-                let sample = self.buffer[self.pos];
-                self.pos += 1;
+            if self.out_pos < self.out_frame.len() {
+                let sample = self.out_frame[self.out_pos];
+                self.out_pos += 1;
                 return Some(sample);
             }
-            if self.eof {
+            if !self.next_frame() {
                 return None;
             }
-            self.refill();
         }
     }
 }
@@ -1595,7 +1692,16 @@ mod tests {
         };
         let (mut child, mut source, _dsf) = match spawn_sacd_decoder(Path::new(&iso), 0) {
             Ok(x) => x,
-            Err(e) => panic!("spawn_sacd_decoder 拒绝播放（可能是 DST/格式）: {:?}", e),
+            Err(e) => {
+                // DST 压缩 / 非标准布局的 ISO 应被明确拒绝（而非输出白噪）——同样算通过
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("DST") || msg.contains("无法解码"),
+                    "非预期拒绝播放: {msg}"
+                );
+                eprintln!("SACD ISO 为 DST 压缩/非标准布局，已按预期明确拒绝（无白噪）");
+                return;
+            }
         };
         // 跳过开头 1s（前导），取之后约 4s 的 i16 样本
         const SKIP: usize = 44_100 * 2 * 1;
@@ -1785,5 +1891,90 @@ mod probe_tests {
         assert_eq!(parse_duration_line("  Duration: N/A, bitrate: N/A\n"), None);
         assert_eq!(parse_duration_line("  Duration: 12:34\n"), None); // 段数不足
         assert_eq!(parse_duration_line("  Duration: 00:00:00.00, start: 0\n"), None); // 零时长
+    }
+
+    // ---- 声道适配（多声道解码 → 设备输出）----
+
+    #[test]
+    fn stereo_passthrough() {
+        assert_eq!(adapt_channels(&[100, -100], 2), vec![100, -100]);
+    }
+
+    #[test]
+    fn mono_duplicated() {
+        assert_eq!(adapt_channels(&[500], 2), vec![500, 500]);
+    }
+
+    #[test]
+    fn surround_5_1_downmix_bs775() {
+        // L R C LFE Ls Rs = 1000 1000 1000 0 1000 1000
+        let out = adapt_channels(&[1000, 1000, 1000, 0, 1000, 1000], 2);
+        assert_eq!(out.len(), 2);
+        let expect = 1000f32 + 0.7071 * (1000f32 + 1000f32);
+        assert!((out[0] as f32 - expect).abs() < 2.0, "L={} expect={}", out[0], expect);
+        assert!((out[1] as f32 - expect).abs() < 2.0);
+    }
+
+    #[test]
+    fn surround_downmix_no_clipping_on_typical_levels() {
+        let out = adapt_channels(&[8000, 7000, 5000, 4000, 3000, 2000], 2);
+        assert!(out[0] > i16::MIN && out[0] < i16::MAX);
+        assert!(out[1] > i16::MIN && out[1] < i16::MAX);
+    }
+
+    #[test]
+    fn generic_multichannel_round_robin() {
+        // 4ch → 2ch：奇偶均分
+        assert_eq!(adapt_channels(&[100, 200, 300, 400], 2), vec![200, 300]);
+    }
+
+    #[test]
+    fn six_channel_frames_not_misread_as_two() {
+        // 回归：6ch 帧若被当 2ch 会帧错位成噪声；下混后首帧须等于 BS.775 结果
+        let frame: Vec<i16> = vec![10, 20, 30, 40, 50, 60];
+        let out = adapt_channels(&frame, 2);
+        let expect_l = 10f32 + 0.7071 * (30f32 + 50f32);
+        assert!((out[0] as f32 - expect_l).abs() < 2.0);
+    }
+
+    /// 端到端：5.1 解包出的 6ch DSF 走完整播放链路（探测 → ffmpeg 6ch → 下混 2ch）。
+    /// 用环境变量 DSF_6CH_TEST 指定文件（本地回归用；CI 无此文件自动跳过）。
+    #[test]
+    fn six_channel_dsf_downmix_pipeline() {
+        let Ok(p) = std::env::var("DSF_6CH_TEST") else {
+            eprintln!("DSF_6CH_TEST unset; skipping");
+            return;
+        };
+        let path = Path::new(&p);
+        if !path.exists() {
+            eprintln!("DSF_6CH_TEST file missing; skipping");
+            return;
+        }
+        let (mut child, mut source) = spawn_ffmpeg_decoder(path, 0, None).expect("spawn ffmpeg");
+        use rodio::Source as _;
+        // 源为 6ch，供给 rodio 的必须是设备声道（2ch），否则 rodio 会帧错位
+        assert_eq!(source.channels(), 2, "多声道源须在输出侧适配为设备声道");
+        assert_eq!(source.sample_rate(), 44100);
+        let skip = 44_100 * 2 * 2;
+        let take = 44_100 * 2 * 3;
+        let mut taken: Vec<i16> = Vec::with_capacity(take);
+        let mut skipped = 0usize;
+        for s in source.by_ref() {
+            if skipped < skip {
+                skipped += 1;
+                continue;
+            }
+            taken.push(s);
+            if taken.len() >= take {
+                break;
+            }
+        }
+        let _ = child.kill();
+        assert!(taken.len() > take / 2, "样本不足: {}", taken.len());
+        let rms = (taken.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>()
+            / taken.len() as f64)
+            .sqrt();
+        eprintln!("6ch DSF 下混后 rms={rms:.3}");
+        assert!(rms > 0.001, "下混输出近似静音（rms={rms}）");
     }
 }

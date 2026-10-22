@@ -48,7 +48,7 @@ const DSF_HEADER_BYTES: u64 = 92;
 /// v7：**修正去交错粒度**：真实 SACD 2ch DSD 是「每帧 588L+588R 平面」而非「逐字节 L,R 交错」。
 /// 旧 parity 去交错把同一声道奇偶字节拆为两路→单声道塌缩+混叠（听感为噪声）。改为帧平面去交错后
 /// 跨多轨得到正常立体声（声道独立、包络正相关）。升级以整体失效旧版（噪声）缓存。
-const SACD_CACHE_VERSION: &str = "v9";
+const SACD_CACHE_VERSION: &str = "v10";
 /// ScarletBooks ISO 头部扫描长度：覆盖 Master TOC / 碟级与曲目文本 / 两张 tracklist
 /// （本样本中全部位于 < 0x114000，取 0x140000 留足余量且不深入音频区）。
 const SB_HEAD_SCAN: u64 = 0x140000;
@@ -76,6 +76,8 @@ pub struct SacdTrackMeta {
     pub frames: u64,
     /// 是否 DST 压缩
     pub is_dst: bool,
+    /// 声道数（2 = 立体声区，6 = 5.1 多声道区）
+    pub channels: u16,
 }
 
 /// 从 ISO 中解析出的整张专辑信息
@@ -97,6 +99,10 @@ pub struct SacdDisc {
     block_headers: bool,
     /// 末轨音频结束字节偏移（块结构导出时界定最后一轨；平坦布局用 file_size）。
     audio_end_byte: u64,
+    /// 音频区为 DST 压缩或非标准布局（无 Sony 音频扇区签名），无法按裸 DSD 导出。
+    /// 典型：SACD 多声道区与部分立体声区使用 DST 压缩，需专用解码器；
+    /// 这类镜像请先用 sacd_extract 等工具转换为 DSF 再入库播放。
+    pub unsupported: bool,
 }
 
 impl SacdDisc {
@@ -202,6 +208,13 @@ impl SacdDisc {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "SACD 多声道区使用 DST 压缩，当前版本暂不支持 DST 解压；请选择立体声 2ch 区音轨",
+            ));
+        }
+        if self.unsupported {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "该 SACD 音频区为 DST 压缩（或非标准布局），当前版本无法解码；\
+                 请先用 sacd_extract 等工具转换为 DSF 后入库播放",
             ));
         }
 
@@ -317,7 +330,8 @@ impl SacdDisc {
                 // 所有分轨共享 ISO 路径，与 CUE 分轨共享镜像路径同理
                 file_path: self.iso_path.to_string_lossy().to_string(),
                 file_size: self.file_size,
-                format: if t.is_dst {
+                format: if t.is_dst || self.unsupported {
+                    // DST 压缩 / 非标准布局：标记为 iso-dst，播放时给出明确错误
                     "iso-dst".to_string()
                 } else {
                     "iso-dsd".to_string()
@@ -412,6 +426,7 @@ fn parse_toc(
                 start_lba,
                 frames,
                 is_dst,
+                channels: 2, // 旧「SACDMTA」经验布局仅覆盖立体声区
             });
         }
     }
@@ -437,6 +452,7 @@ fn parse_toc(
         iso_mtime,
         block_headers: false,
         audio_end_byte: file_size,
+        unsupported: false,
     })
 }
 
@@ -490,6 +506,7 @@ fn heuristic_track_table(toc: &[u8], file_size: u64) -> Vec<SacdTrackMeta> {
             start_lba,
             frames,
             is_dst: false, // 启发式无法判定 DST，按 DSD 处理；后续失败再回退
+            channels: 2,
         });
         last_lba = start_lba;
     }
@@ -902,11 +919,18 @@ fn parse_scarletbooks(
             start_lba: start_sector,
             frames,
             is_dst: false,
+            channels: 2, // SACDTRL1 为立体声区轨表
         });
     }
     if tracks.is_empty() {
         return None;
     }
+
+    // DST / 非标准布局检测：Sony ScarletBooks 未压缩音频扇区以固定签名开头
+    // （第二字节恒为 0x18，如 0x4418_1897 / 0x4018_1b17）。DST 压缩区（多声道区常见，
+    // 部分立体声区也是）与其它非标准抓轨的扇区没有该签名——把这类数据按裸 DSD 去交错
+    // 只会得到白噪。此处标记为 unsupported，播放链路据此给出明确错误而非输出噪声。
+    let unsupported = !sacd_audio_has_sector_signature(iso_path, tracks[0].start_lba);
 
     Some(SacdDisc {
         album,
@@ -920,7 +944,41 @@ fn parse_scarletbooks(
         iso_mtime,
         block_headers: true,
         audio_end_byte: area_end_byte,
+        unsupported,
     })
+}
+
+/// 检测音频区是否为标准 Sony ScarletBooks 布局（未压缩裸 DSD）。
+///
+/// 采样该轨起始扇区及其后若干扇区，任一扇区命中签名（`buf[1] == 0x18` 且
+/// `buf[0]` 为 0x40/0x44 类帧头）即视为标准布局；全部不命中则判定为 DST 压缩
+/// 或非标准抓轨（无法按裸 DSD 导出）。
+///
+/// 实测判据（真实 ISO）：
+///  - 未压缩 DSD（Sandy Lam SACD）：扇区头 `44 18 18 97 e0 00 02 …` / `40 18 1b 17 …`，命中；
+///  - DST 压缩（Fourplay Energy 2ch/5.1 区）：`fd 90 0b 90 …` / `21 17 fd 22 …`，不命中。
+fn sacd_audio_has_sector_signature(iso_path: &Path, first_lba: u64) -> bool {
+    let Ok(mut file) = File::open(iso_path) else {
+        return true; // 读不到时不阻断，沿用旧行为
+    };
+    // 检查起始扇区 + 其后 3 个轨内扇区（曲目间隙/边界处可能是数据而非头）
+    for step in 0..4u64 {
+        let sector = first_lba + step * 64;
+        if sector * SACD_SECTOR_SIZE >= file.metadata().map(|m| m.len()).unwrap_or(0) {
+            break;
+        }
+        if file.seek(SeekFrom::Start(sector * SACD_SECTOR_SIZE)).is_err() {
+            continue;
+        }
+        let mut head = [0u8; 8];
+        if file.read_exact(&mut head).is_err() {
+            continue;
+        }
+        if head[1] == 0x18 && (0x40..=0x7f).contains(&head[0]) {
+            return true;
+        }
+    }
+    false
 }
 
 fn sacd_track_id(iso: &Path, num: u32) -> String {
