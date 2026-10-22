@@ -52,7 +52,8 @@
     ],
     "resources": {
       "../bin/ffmpeg.exe": "bin/ffmpeg.exe",
-      "../bin/ffprobe.exe": "bin/ffprobe.exe"
+      "../bin/ffprobe.exe": "bin/ffprobe.exe",
+      "../bin/sacd_extract.exe": "bin/sacd_extract.exe"
     },
     "fileAssociations": [
       {

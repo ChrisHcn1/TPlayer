@@ -13,10 +13,14 @@
 //! 注意：多声道区规范强制 DST 压缩，当前版本只解析 2ch 立体声区（绝大多数音乐碟
 //! 立体声区是未压缩 DSD，ffmpeg 可以直接解码）；DST 压缩轨会标记为不可播放，
 //! 并返回明确错误以便后续版本集成 DST 解压。
+//!
+//! v2.0.2 起：DST 压缩区与多声道（5.1）区改由随包分发的 sacd_extract 解码
+//! （见 `extract_track_via_external`），两区曲目都会入库（标题带 `[5.1]` 后缀）。
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
@@ -33,7 +37,7 @@ const SACD_SECTOR_HEADER: u64 = 32;
 /// 每扇区有效 DSD 数据字节数（2048 − 32）
 const SACD_SECTOR_DATA: u64 = SACD_SECTOR_SIZE - SACD_SECTOR_HEADER;
 /// DSF 文件头字节数（DSD chunk 28 + fmt chunk 52 + data chunk 头 12）。
-const DSF_HEADER_BYTES: u64 = 92;
+pub(crate) const DSF_HEADER_BYTES: u64 = 92;
 /// SACD 导出缓存目录版本：导出/校验逻辑变更时递增，整体失效旧缓存，
 /// 避免复用更早版本（含去交错/位序/块头错误）产出的损坏 DSF（表现为播放噪声）。
 /// v4：SACD 2ch 立体声区为连续 DSD 位流、无每 64KB 块头；每 DSD 帧 = 1176 字节，内为
@@ -103,6 +107,8 @@ pub struct SacdDisc {
     /// 典型：SACD 多声道区与部分立体声区使用 DST 压缩，需专用解码器；
     /// 这类镜像请先用 sacd_extract 等工具转换为 DSF 再入库播放。
     pub unsupported: bool,
+    /// 多声道（5.1）区曲目数（0 = 无多声道区）。两区曲目按相同顺序对应。
+    pub multich_track_count: usize,
 }
 
 impl SacdDisc {
@@ -217,7 +223,6 @@ impl SacdDisc {
                  请先用 sacd_extract 等工具转换为 DSF 后入库播放",
             ));
         }
-
         // 音轨在 ISO 中的字节范围：[本轨起始扇区, 下一轨起始扇区)；末轨到 audio_end_byte。
         // v9：扇区前 32 字节为块头，DSD 数据从扇区边界 +32 开始（网格以数据起点为锚）。
         let sector_start = t.start_lba * SACD_SECTOR_SIZE;
@@ -273,8 +278,82 @@ impl SacdDisc {
         Ok(())
     }
 
+    /// 用外部 sacd_extract 把某轨解码为 DSF 并写入 `out_path`。
+    ///
+    /// 适用场景（内置裸 DSD 导出覆盖不了的情况）：
+    ///  - DST 压缩的立体声区（如 Fourplay Energy 的 2ch 区）；
+    ///  - 多声道（5.1）区（SACDTRL2，多为 DST，且扇区表语义与立体声区不同）。
+    ///
+    /// sacd_extract 自行解析 ISO 的区结构，我们只需给出区（`-2` / `-m`）与曲目号
+    /// （`-t N`，1-based），输出 DSF（`-s`）到临时目录后取回。该工具随安装包分发
+    /// （tauri.conf.json bundle.resources → bin/sacd_extract.exe，GPL-3.0）。
+    pub fn extract_track_via_external(
+        &self,
+        track_number: u32,
+        multich: bool,
+        out_path: &Path,
+    ) -> std::io::Result<()> {
+        let exe = resolve_sacd_extract().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "未找到 sacd_extract（应随安装包分发），无法解码该音轨",
+            )
+        })?;
+
+        // 临时输出目录：sacd_extract 会在其下建 <专辑>/<Stereo|6ch>/ 子目录
+        let work = out_path.with_extension("extract-work");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work)?;
+
+        let mut cmd = Command::new(&exe);
+        cmd.arg(if multich { "-m" } else { "-2" })
+            .arg("-s") // 输出 DSF
+            .arg("-t")
+            .arg(track_number.to_string())
+            .arg("-i")
+            .arg(&self.iso_path)
+            .arg("-y")
+            .arg(&work)
+            // 隔离工作目录，避免读取/生成 sacd_extract.cfg 到用户目录
+            .current_dir(&work)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            // CREATE_NO_WINDOW：解码期间不弹控制台窗口
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+
+        eprintln!(
+            "SACD_EXTERNAL exe={:?} track={} multich={} iso={:?}",
+            exe, track_number, multich, self.iso_path
+        );
+        let out = cmd.output()?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr);
+            let last = detail.lines().last().unwrap_or("").trim();
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(std::io::Error::other(format!(
+                "sacd_extract 解码失败（退出码 {:?}）：{}",
+                out.status.code(),
+                last
+            )));
+        }
+
+        let dsf = find_first_dsf(&work).ok_or_else(|| {
+            let _ = std::fs::remove_dir_all(&work);
+            std::io::Error::other("sacd_extract 未产出 DSF 文件")
+        })?;
+        let copied = std::fs::copy(&dsf, out_path);
+        let _ = std::fs::remove_dir_all(&work);
+        copied.map(|_| ())
+    }
+
     /// 某轨导出为 DSF 后的预期文件总字节数（DSF 头 + DSD 载荷）。
     /// 播放链路据此校验磁盘缓存是否与当前导出一致，避免复用旧版/损坏的 DSF（噪声）。
+    /// 仅适用于内置（未压缩 DSD）导出路径。
     pub fn exported_dsf_len(&self, track_index: usize) -> u64 {
         let t = &self.tracks[track_index];
         // v9：与 export_track_to_dsf 保持一致——数据起点 = 扇区边界 + 32 字节块头
@@ -293,13 +372,18 @@ impl SacdDisc {
     }
 
     /// 导出为 Track 模型（供曲库扫描直接 upsert）
+    ///
+    /// 两区曲目都会入库：立体声区每条一轨（`sacd_area = Stereo2ch`），多声道区
+    /// （若有）同样每条一轨（`sacd_area = MultiCh`，标题带 `[5.1]` 后缀），
+    /// 用户可在曲库中任选版本播放。`sacd_track_index` 为合并列表中的索引
+    /// （前 n 条 = 立体声区，其后 = 多声道区）。
     pub fn to_tracks(&self) -> Vec<Track> {
         let album = self.album.clone();
         let artist = self.artist.clone();
         let first_artist = artist.as_str();
         let album_id = Some(album_id_of(&album, first_artist));
 
-        let mut tracks = Vec::with_capacity(self.tracks.len());
+        let mut tracks: Vec<Track> = Vec::with_capacity(self.tracks.len() * 2);
         for (i, t) in self.tracks.iter().enumerate() {
             let duration = (t.frames as f64) / (DSD_FRAMES_PER_SEC as f64);
             let artists = t
@@ -307,17 +391,21 @@ impl SacdDisc {
                 .as_ref()
                 .map(|a| split_artists(a))
                 .unwrap_or_else(|| split_artists(&artist));
-            let id = sacd_track_id(&self.iso_path, t.track_number);
-            // 采样率：DSD 转 PCM 目标采样率（由 ffmpeg 最终输出 44100，这里标注原始 DSD 率）
-            // bitrate 对 DSD 没意义，填 None
+            let base_title = if t.title.trim().is_empty() {
+                format!("Track {:02}", t.track_number)
+            } else {
+                t.title.clone()
+            };
+            // DST / 非标准布局：由外部 sacd_extract 解码，格式标记为 iso-dst
+            let fmt = if t.is_dst || self.unsupported {
+                "iso-dst"
+            } else {
+                "iso-dsd"
+            };
             tracks.push(Track {
-                id,
-                title: if t.title.trim().is_empty() {
-                    format!("Track {:02}", t.track_number)
-                } else {
-                    t.title.clone()
-                },
-                artists,
+                id: sacd_track_id(&self.iso_path, t.track_number, false),
+                title: base_title.clone(),
+                artists: artists.clone(),
                 album: album.clone(),
                 album_id: album_id.clone(),
                 duration,
@@ -330,12 +418,7 @@ impl SacdDisc {
                 // 所有分轨共享 ISO 路径，与 CUE 分轨共享镜像路径同理
                 file_path: self.iso_path.to_string_lossy().to_string(),
                 file_size: self.file_size,
-                format: if t.is_dst || self.unsupported {
-                    // DST 压缩 / 非标准布局：标记为 iso-dst，播放时给出明确错误
-                    "iso-dst".to_string()
-                } else {
-                    "iso-dsd".to_string()
-                },
+                format: fmt.to_string(),
                 bitrate: None,
                 sample_rate: Some(self.dsd_sample_rate),
                 has_cover: false, // ISO 不内嵌图片，封面走同目录查找/在线匹配
@@ -347,7 +430,55 @@ impl SacdDisc {
                 cue_offset: None,
                 is_sacd: true,
                 sacd_track_index: i as u32,
-                sacd_area: Some(self.area),
+                sacd_area: Some(SacdArea::Stereo2ch),
+                sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
+            });
+        }
+
+        // 多声道区：曲目数与立体声区相同（顺序对应），时长取立体声区对应轨
+        // （两区时长基本一致，误差 <2%，仅影响进度条显示）。
+        let n = self.tracks.len();
+        for i in 0..self.multich_track_count.min(n) {
+            let t = &self.tracks[i];
+            let duration = (t.frames as f64) / (DSD_FRAMES_PER_SEC as f64);
+            let artists = t
+                .artist
+                .as_ref()
+                .map(|a| split_artists(a))
+                .unwrap_or_else(|| split_artists(&artist));
+            tracks.push(Track {
+                id: sacd_track_id(&self.iso_path, t.track_number, true),
+                title: format!("{} [5.1]", if t.title.trim().is_empty() {
+                    format!("Track {:02}", t.track_number)
+                } else {
+                    t.title.clone()
+                }),
+                artists,
+                album: album.clone(),
+                album_id: album_id.clone(),
+                duration,
+                track_number: if t.track_number == 0 {
+                    None
+                } else {
+                    Some(t.track_number)
+                },
+                year: self.year,
+                file_path: self.iso_path.to_string_lossy().to_string(),
+                file_size: self.file_size,
+                // 多声道区多为 DST 压缩，统一按 iso-dst 标记（由外部工具解码）
+                format: "iso-dst".to_string(),
+                bitrate: None,
+                sample_rate: Some(self.dsd_sample_rate),
+                has_cover: false,
+                replaygain_db: None,
+                replaygain_peak: None,
+                added_at: chrono::Utc::now().timestamp(),
+                modified_at: self.iso_mtime,
+                is_cue: false,
+                cue_offset: None,
+                is_sacd: true,
+                sacd_track_index: (n + i) as u32,
+                sacd_area: Some(SacdArea::MultiCh),
                 sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
             });
         }
@@ -453,6 +584,7 @@ fn parse_toc(
         block_headers: false,
         audio_end_byte: file_size,
         unsupported: false,
+        multich_track_count: 0,
     })
 }
 
@@ -862,6 +994,25 @@ fn parse_scarletbooks(
         return None;
     }
 
+    // 多声道（5.1）区曲目数：SACDTRL2 存在即含多声道区，项数 = 曲目数
+    // （该表值为时间码而非扇区号，故仅取数量；曲目顺序与立体声区一一对应）。
+    let multich_track_count = find_marker(buf, b"SACDTRL2")
+        .map(|trl2| {
+            let mut count = 0usize;
+            let mut q = trl2 + 8;
+            while count < 99 {
+                match read_u32_be(buf, q) {
+                    Some(v) if v > 0 => {
+                        count += 1;
+                        q += 4;
+                    }
+                    _ => break,
+                }
+            }
+            count
+        })
+        .unwrap_or(0);
+
     // 曲目标题与碟级文本
     let titles = parse_sb_text_table(buf, b"SACDTTxt");
     let disc = parse_sb_text_table(buf, b"SACDText");
@@ -945,6 +1096,7 @@ fn parse_scarletbooks(
         block_headers: true,
         audio_end_byte: area_end_byte,
         unsupported,
+        multich_track_count,
     })
 }
 
@@ -981,14 +1133,50 @@ fn sacd_audio_has_sector_signature(iso_path: &Path, first_lba: u64) -> bool {
     false
 }
 
-fn sacd_track_id(iso: &Path, num: u32) -> String {
+/// 生成 SACD 轨 ID。`multich` 区分立体声区与多声道区（同曲目号在两区各有一轨）。
+fn sacd_track_id(iso: &Path, num: u32, multich: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"sacd|");
+    if multich {
+        hasher.update(b"mch|");
+    }
     hasher.update(iso.to_string_lossy().as_bytes());
     hasher.update(b"|");
     hasher.update(num.to_string().as_bytes());
     let r = hasher.finalize();
     r.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 定位随包分发的 sacd_extract（DST/多声道区外部解码器）。
+///
+/// 查找顺序与 ffmpeg 一致（开发期源码树 `bin/`、安装包资源 `bin/`、系统 PATH）：
+/// 1. 沿可执行文件祖先目录的 `bin/`（安装版：安装目录/bin/sacd_extract.exe）；
+/// 2. 系统 PATH。
+fn resolve_sacd_extract() -> Option<PathBuf> {
+    crate::player::engine::resolve_bin_tool("sacd_extract")
+}
+
+/// 在目录树中查找第一个 .dsf 文件（sacd_extract 输出 <专辑>/<Stereo|6ch>/NN - Title.dsf）。
+fn find_first_dsf(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("dsf"))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// 获取 SACD ISO 临时 DSF 缓存目录（每张 ISO 一个目录，按 mtime 校验缓存有效性）。

@@ -200,7 +200,7 @@ const EXTRA_TOOL_SUBDIRS: &[&str] = &[];
 ///  3. 安装包固定位置 `/usr/lib/tplayer/bin`、`/usr/local/lib/tplayer/bin`、`/usr/libexec/tplayer`；
 ///  4. 系统 PATH（Debian/Ubuntu 的 `ffmpeg` 包）。
 /// Linux 侧所有候选都经 ELF 魔数校验（见 tool_runnable），Windows 版 .exe 不会被误用。
-fn resolve_bin_tool(base: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_bin_tool(base: &str) -> Option<PathBuf> {
     let names = tool_names(base);
     // Linux 追加 ELF 魔数校验：避免把 Windows 版 ffmpeg.exe 当成本机可用工具
     let found = |cand: &Path| (cand.is_file() && tool_runnable(cand)).then(|| cand.to_path_buf());
@@ -1296,28 +1296,31 @@ fn spawn_sacd_decoder(
     let disc = SacdDisc::open(iso_path).ok_or_else(|| {
         AppError::Player(format!("无法解析 SACD ISO: {}", iso_path.display()))
     })?;
-    let track_index = track_index as usize;
-    if track_index >= disc.tracks.len() {
-        return Err(AppError::Player(format!(
-            "SACD 曲目索引越界：{}/{}",
-            track_index,
-            disc.tracks.len()
-        )));
-    }
-    if disc.tracks[track_index].is_dst {
-        return Err(AppError::Player(
-            "该曲目使用 DST 压缩，当前版本暂不支持；请选择 SACD 立体声 2ch 区未压缩音轨".into(),
-        ));
-    }
-    if disc.unsupported {
-        return Err(AppError::Player(
-            "该 SACD 音频区为 DST 压缩（或非标准布局），当前版本无法解码；\
-             请先用 sacd_extract 等工具转换为 DSF 后入库播放"
-                .into(),
-        ));
-    }
+    // 曲库中的 sacd_track_index 是**两区合并索引**：前 n 条为立体声区
+    // （n = disc.tracks.len()），其后为多声道区（disc.multich_track_count 条）。
+    // disc.tracks 只含立体声区；多声道区曲目与立体声区一一对应（同曲目号/帧数），
+    // 元数据直接复用对应立体声轨。
+    let stereo_len = disc.tracks.len();
+    let idx = track_index as usize;
+    let (meta, multich) = if idx < stereo_len {
+        (&disc.tracks[idx], false)
+    } else {
+        let m = idx - stereo_len;
+        if m >= disc.multich_track_count {
+            return Err(AppError::Player(format!(
+                "SACD 曲目索引越界：{}/{}",
+                track_index,
+                stereo_len + disc.multich_track_count
+            )));
+        }
+        (&disc.tracks[m], true)
+    };
+    let multich = multich || meta.channels > 2;
+    // 导出策略：未压缩立体声区走内置裸 DSD 导出（快、无外部依赖）；
+    // DST 压缩区与多声道（5.1）区交给随包分发的 sacd_extract 解码。
+    let use_external = multich || disc.unsupported;
 
-    let dsf_path = cached_dsf_path(iso_path, track_index).ok_or_else(|| {
+    let dsf_path = cached_dsf_path(iso_path, idx).ok_or_else(|| {
         AppError::Player("无法创建 SACD 临时缓存目录".into())
     })?;
 
@@ -1326,17 +1329,28 @@ fn spawn_sacd_decoder(
     if let Some(dir) = dsf_path.parent() {
         ensure_sacd_cache_fresh(dir);
     }
-    // 复用缓存的前提是文件大小与当前导出一致；旧版/损坏/截断的缓存字节数不符，
-    // 会被检测到并重新导出。导出前清理可能残留的历史文件，仅读取最新正确参数数据。
-    let expected_len = disc.exported_dsf_len(track_index);
-    let cache_valid = dsf_path
-        .metadata()
-        .map(|m| m.len() == expected_len)
-        .unwrap_or(false);
+    // 缓存校验：内置导出按精确字节数（旧版/截断即重导）；外部解码无法预知产出大小，
+    // 用「大于 DSF 头」判定存在性。导出前清理可能残留的历史文件。
+    let cache_valid = if use_external {
+        dsf_path
+            .metadata()
+            .map(|m| m.len() > crate::library::sacd::DSF_HEADER_BYTES)
+            .unwrap_or(false)
+    } else {
+        dsf_path
+            .metadata()
+            .map(|m| m.len() == disc.exported_dsf_len(idx))
+            .unwrap_or(false)
+    };
     if !cache_valid {
         let _ = std::fs::remove_file(&dsf_path);
-        disc.export_track_to_dsf(track_index, &dsf_path)
-            .map_err(|e| AppError::Player(format!("导出 SACD 分轨为 DSF 失败: {}", e)))?;
+        if use_external {
+            disc.extract_track_via_external(meta.track_number, multich, &dsf_path)
+                .map_err(|e| AppError::Player(format!("解码 SACD 音轨失败: {}", e)))?;
+        } else {
+            disc.export_track_to_dsf(idx, &dsf_path)
+                .map_err(|e| AppError::Player(format!("导出 SACD 分轨为 DSF 失败: {}", e)))?;
+        }
     }
 
     // 防白噪兜底：校验导出 DSF 确为可正常解码的 PCM（非 DST/参数错误导致的白噪），
@@ -1681,6 +1695,8 @@ mod tests {
 
     /// 端到端验证 SACD 播放链路（导出 DSF → ffmpeg 解码 → PcmStreamSource f32→i16）不会解出白噪。
     /// 直接用真实播放代码路径，避免只测导出/只测 ffmpeg 命令导致的盲区。
+    /// `SACD_TEST_ISO` 指定镜像；`SACD_TEST_TRACK_INDEX` 指定合并轨索引（默认 0；
+    /// 立体声区之后的索引为多声道 5.1 轨，走外部 sacd_extract 解码）。
     #[test]
     fn sacd_playback_pipeline_not_white_noise() {
         let iso = match std::env::var("SACD_TEST_ISO") {
@@ -1690,7 +1706,11 @@ mod tests {
                 return;
             }
         };
-        let (mut child, mut source, _dsf) = match spawn_sacd_decoder(Path::new(&iso), 0) {
+        let track_index: u32 = std::env::var("SACD_TEST_TRACK_INDEX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let (mut child, mut source, _dsf) = match spawn_sacd_decoder(Path::new(&iso), track_index) {
             Ok(x) => x,
             Err(e) => {
                 // DST 压缩 / 非标准布局的 ISO 应被明确拒绝（而非输出白噪）——同样算通过
