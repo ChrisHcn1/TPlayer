@@ -279,6 +279,14 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
         "CREATE INDEX IF NOT EXISTS idx_tracks_metadata_pending ON tracks(metadata_pending)",
     )
     .map_err(|e| AppError::Library(format!("迁移 schema v6 失败（索引 metadata_pending）: {e}")))?;
+    // 同一首歌跨目录去重（见 store::not_duplicate_song）的表达式索引：
+    // 相关性子查询按这三个表达式等值匹配，没有它大库会退化成逐行全表扫描。
+    // 索引定义必须与查询里的表达式逐字一致，SQLite 才会真正用它。
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_song_key
+         ON tracks(lower(trim(title)), lower(trim(album)), lower(trim(format)))",
+    )
+    .map_err(|e| AppError::Library(format!("创建 song_key 索引失败: {e}")))?;
     Ok(())
 }
 

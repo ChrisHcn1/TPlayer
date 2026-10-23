@@ -72,6 +72,37 @@ fn not_sacd_multich() -> &'static str {
     "NOT (t.is_sacd = 1 AND t.sacd_area = '\"MultiCh\"')"
 }
 
+/// 「同一首歌」去重条件（作用于 `tracks` 别名 `t`）。
+///
+/// 用户会把同一首歌放在不同目录（如 `歌手A/专辑/01.flac` 与 `杂录/01.flac`），
+/// 全部歌曲里就成了两条。判定「同一首歌」的键 = **主艺人 + 标题 + 专辑 + 格式**：
+///  - 格式**不同**（flac / mp3 / ape 各一份）视为不同版本，**都保留**，由用户自己选；
+///  - 格式相同则是真正的重复副本，只保留一条。
+///
+/// 保留哪一条按 (metadata_pending, added_at, id) 升序取最小者——优先已解析完
+/// 元数据的、最先入库的，结果稳定可预期； SACD 虚拟分轨不参与（其版本由专辑页的
+/// 立体声/5.1 切换表达，不在此处折叠）。
+///
+/// 依赖索引 `idx_tracks_song_key`（表达式索引，见 db::migrate）以避免大库退化。
+fn not_duplicate_song() -> &'static str {
+    r#"NOT (t.is_sacd = 0 AND EXISTS (
+        SELECT 1 FROM tracks d
+         WHERE d.id <> t.id
+           AND d.is_sacd = 0
+           AND lower(trim(d.title))  = lower(trim(t.title))
+           AND lower(trim(d.album))  = lower(trim(t.album))
+           AND lower(trim(d.format)) = lower(trim(t.format))
+           AND lower(trim(COALESCE(json_extract(d.artists_json, '$[0]'), '')))
+               = lower(trim(COALESCE(json_extract(t.artists_json, '$[0]'), '')))
+           AND (
+                 d.metadata_pending < t.metadata_pending
+              OR (d.metadata_pending = t.metadata_pending AND (
+                     d.added_at < t.added_at
+                  OR (d.added_at = t.added_at AND d.id < t.id)))
+           )
+    ))"#
+}
+
 /// 「CUE 结构大文件」去重条件（作用于 `tracks` 的别名 `t`）。
 ///
 /// CUE 会在「分轨专辑」页展示整碟镜像拆出的分轨；同一张碟的整碟大文件
@@ -161,8 +192,10 @@ impl LibraryStore {
     pub fn tracks(&self) -> Vec<Track> {
         // 过滤被 CUE 分轨引用的整碟大文件（同一张碟不重复展示）
         let cue_cond = not_cue_source();
+        // 同一首歌（同主艺人+标题+专辑+格式）放在不同目录 → 只保留一条；格式不同则都保留
+        let song_cond = not_duplicate_song();
         let sql = format!(
-            "SELECT t.* FROM tracks t WHERE {cue_cond} ORDER BY t.added_at, t.id"
+            "SELECT t.* FROM tracks t WHERE {cue_cond} AND {song_cond} ORDER BY t.added_at, t.id"
         );
         let mut stmt = self.conn.prepare(&sql).expect("prepare tracks");
         let rows = stmt
@@ -262,9 +295,10 @@ impl LibraryStore {
 
     pub fn tracks_of_album(&self, album_id: &str) -> Vec<Track> {
         let cue_cond = not_cue_source();
+        let song_cond = not_duplicate_song();
         let sql = format!(
             "SELECT t.* FROM tracks t
-                  WHERE t.album_id = ?1 AND {cue_cond}
+                  WHERE t.album_id = ?1 AND {cue_cond} AND {song_cond}
              ORDER BY COALESCE(t.track_number, 2147483647), t.id"
         );
         let mut stmt = self.conn.prepare(&sql).expect("prepare tracks_of_album");
@@ -277,10 +311,11 @@ impl LibraryStore {
     /// 艺术家参与（任一阵位）的全部曲目，与前端 artists.includes 口径一致
     pub fn tracks_of_artist(&self, artist: &str) -> Vec<Track> {
         let cue_cond = not_cue_source();
+        let song_cond = not_duplicate_song();
         let sql = format!(
             "SELECT t.* FROM tracks t
              JOIN track_artists ta ON ta.track_id = t.id
-                  WHERE ta.artist = ?1 AND {cue_cond}
+                  WHERE ta.artist = ?1 AND {cue_cond} AND {song_cond}
              ORDER BY t.album, COALESCE(t.track_number, 2147483647), t.id"
         );
         let mut stmt = self.conn.prepare(&sql).expect("prepare tracks_of_artist");
@@ -382,13 +417,15 @@ impl LibraryStore {
     }
 
     pub fn stats(&self) -> LibraryStats {
-        // 统计口径与列表一致：排除被 CUE 分轨引用的整碟大文件与 SACD 5.1 轨
+        // 统计口径与列表一致：排除被 CUE 分轨引用的整碟大文件、SACD 5.1 轨，
+        // 以及跨目录的同一首歌重复副本（格式不同则不算重复，仍计入）
         let cue_cond = not_cue_source();
         let multich_cond = not_sacd_multich();
+        let song_cond = not_duplicate_song();
         let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(duration), 0.0),
                                COUNT(DISTINCT album_id) FROM tracks t
-              WHERE {cue_cond} AND {multich_cond}"
+              WHERE {cue_cond} AND {multich_cond} AND {song_cond}"
         );
         let (track_count, total_duration, album_count) = self
             .conn
@@ -403,7 +440,7 @@ impl LibraryStore {
         let artist_count_sql = format!(
             "SELECT COUNT(DISTINCT ta.artist) FROM track_artists ta
              JOIN tracks t ON t.id = ta.track_id
-                  WHERE {cue_cond} AND {multich_cond}"
+                  WHERE {cue_cond} AND {multich_cond} AND {song_cond}"
         );
         let artist_count = self
             .conn
@@ -430,12 +467,14 @@ impl LibraryStore {
         // normal 模式额外排除「被 CUE 分轨引用的整碟大文件」所在专辑，
         // 避免同一张碟既出现在分轨专辑页、又以整碟形式出现在普通专辑页。
         let cue_cond = not_cue_source();
+        // 同一首歌跨目录重复副本只计一次（格式不同则都计）
+        let song_cond = not_duplicate_song();
         let where_clause = match mode {
             "cue" => "t.is_cue = 1".to_string(),
             // SACD 专辑页的曲目数按立体声区统计（与详情页默认版本一致）；
             // 5.1 环绕轨在详情页切换查看，不作为独立曲目重复计数
             "sacd" => format!("t.is_sacd = 1 AND {}", not_sacd_multich()),
-            _ => format!("t.is_cue = 0 AND t.is_sacd = 0 AND {cue_cond}"),
+            _ => format!("t.is_cue = 0 AND t.is_sacd = 0 AND {cue_cond} AND {song_cond}"),
         };
         let sql = format!(
             r#"
@@ -506,6 +545,7 @@ impl LibraryStore {
     pub fn artists(&self) -> Vec<Artist> {
         let cue_cond = not_cue_source();
         let multich_cond = not_sacd_multich();
+        let song_cond = not_duplicate_song();
         let sql = format!(
             r#"
             SELECT ta.artist,
@@ -513,7 +553,7 @@ impl LibraryStore {
                    COUNT(DISTINCT t.album_id)  AS album_count
             FROM track_artists ta
             JOIN tracks t ON t.id = ta.track_id
-                WHERE {cue_cond} AND {multich_cond}
+                WHERE {cue_cond} AND {multich_cond} AND {song_cond}
             GROUP BY ta.artist
             ORDER BY ta.artist
         "#
@@ -1180,6 +1220,128 @@ mod tests {
     /// 「全部歌曲」查询应隐藏整碟镜像
     fn visible_ids(store: &LibraryStore) -> Vec<String> {
         store.tracks().into_iter().map(|t| t.id).collect()
+    }
+
+    /// 插入一条带完整键（标题/艺人/专辑/格式）的曲目
+    fn insert_song(
+        store: &LibraryStore,
+        id: &str,
+        path: &str,
+        title: &str,
+        artist: &str,
+        album: &str,
+        format: &str,
+        added_at: i64,
+    ) {
+        let artists_json = serde_json::to_string(&vec![artist.to_string()]).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(id, title, album, duration, file_path, file_size, format,
+                                    added_at, modified_at, artists_json, is_cue)
+                 VALUES(?1, ?2, ?3, 0.0, ?4, 0, ?5, ?6, 0, ?7, 0)",
+                params![id, title, album, path, format, added_at, artists_json],
+            )
+            .expect("insert song");
+    }
+
+    /// 同一首歌（同主艺人+标题+专辑+格式）放在不同目录 → 只保留一条
+    #[test]
+    fn dedupes_same_song_across_directories() {
+        let store = test_store();
+        insert_song(
+            &store,
+            "a",
+            r"D:\A\Album\01.flac",
+            "Bohemian Rhapsody",
+            "Queen",
+            "A Night at the Opera",
+            "flac",
+            100,
+        );
+        insert_song(
+            &store,
+            "b",
+            r"D:\杂录\Queen - Bohemian Rhapsody.flac",
+            "Bohemian Rhapsody",
+            "Queen",
+            "A Night at the Opera",
+            "flac",
+            200,
+        );
+        // 大小写/空白差异也算同一首
+        insert_song(
+            &store,
+            "c",
+            r"D:\B\queen - bohemian rhapsody .flac",
+            " bohemian rhapsody ",
+            "QUEEN",
+            "a night at the opera",
+            "FLAC",
+            300,
+        );
+        assert_eq!(visible_ids(&store), vec!["a".to_string()], "应只保留最先入库的那条");
+    }
+
+    /// 格式不同（flac / mp3 各一份）→ 视为不同版本，都保留
+    #[test]
+    fn keeps_different_formats_of_same_song() {
+        let store = test_store();
+        insert_song(&store, "flac", r"D:\A\01.flac", "Song", "A", "Al", "flac", 100);
+        insert_song(&store, "mp3", r"D:\A\01.mp3", "Song", "A", "Al", "mp3", 200);
+        insert_song(&store, "ape", r"D:\B\01.ape", "Song", "A", "Al", "ape", 300);
+        assert_eq!(
+            visible_ids(&store),
+            vec!["flac".to_string(), "mp3".to_string(), "ape".to_string()],
+            "格式不同应全部保留（顺序按 added_at）"
+        );
+    }
+
+    /// 标题相同但专辑 / 艺人不同 → 不是同一首歌，都保留
+    #[test]
+    fn keeps_same_title_in_different_albums() {
+        let store = test_store();
+        insert_song(&store, "x", r"D:\A\01.flac", "Yesterday", "The Beatles", "Help!", "flac", 100);
+        insert_song(
+            &store,
+            "y",
+            r"D:\B\Yesterday.flac",
+            "Yesterday",
+            "The Beatles",
+            "Yesterday and Today",
+            "flac",
+            200,
+        );
+        insert_song(
+            &store,
+            "z",
+            r"D:\C\Yesterday.flac",
+            "Yesterday",
+            "Else",
+            "Help!",
+            "flac",
+            300,
+        );
+        assert_eq!(visible_ids(&store).len(), 3);
+    }
+
+    /// SACD 虚拟分轨不参与同一首歌去重（版本由专辑页区域切换表达）
+    #[test]
+    fn sacd_tracks_are_not_deduped() {
+        let store = test_store();
+        insert_song(&store, "p", r"D:\A\01.flac", "Song", "A", "Al", "flac", 100);
+        store
+            .conn
+            .execute(
+                "INSERT INTO tracks(id, title, album, duration, file_path, file_size, format,
+                                    added_at, modified_at, artists_json, is_cue, is_sacd)
+                 VALUES('s', 'Song', 'Al', 0.0, 'D:\\A\\disc.iso', 0, 'iso-dsd', 200, 0, '[\"A\"]', 0, 1)",
+                [],
+            )
+            .unwrap();
+        let mut visible = visible_ids(&store);
+        visible.sort();
+        assert_eq!(visible, vec!["p".to_string(), "s".to_string()]);
     }
 
     /// 同目录同基名的整碟副本（.ape / .flac）不应出现在普通列表
