@@ -99,93 +99,100 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
         cover_cache().lock().unwrap().clear();
     }
 
-    // 后台补解析：仅对「本地磁盘 + 较小文件」先行解析元数据（不解析 CUE/SACD，
-    // 网络目录/大文件不阻塞等待，留待播放时按需解析）。全程异步、不阻塞 UI。
-    // 带整体时间预算（避免慢盘/海量小文件长期占用）与取消标志（前端 cancelScan）。
-    spawn_lazy_backfill(
-        &app,
-        state.scan_cancel.clone(),
-        std::time::Duration::from_secs(120),
-    );
+    // 后台补解析：对全部占位轨道（本地优先、网络随后）异步解析元数据 / 时长，
+    // 不解析 CUE/SACD（留待播放时按需解析）。全程异步、不阻塞 UI，可被 cancelScan 中止。
+    spawn_lazy_backfill(&app, state.scan_cancel.clone());
 
     Ok(())
 }
 
 /// 两阶段懒加载 - 阶段二「后台补解析」（异步线程，不阻塞 UI）。
 ///
-/// 扫描完成后在后台只对「本地磁盘且体积较小」的占位曲目先行解析元数据：
-///  - 网络共享路径（UNC `\\host\share`、映射的网络盘符，或 Linux 非本地挂载）
-///    一律跳过，避免逐文件网络 IO 拖慢体验；
-///  - 大文件（默认 > 32MB，典型 APE 整碟 / SACD ISO / 高码率 DSF）跳过，
-///    其元数据解析留待播放该曲目时按需触发；
-///  - 本函数**不解析** CUE 分轨与 SACD ISO（sacd_extract），这两类由
-///    `library_resolve_track` 在播放时补做。
+/// 扫描完成后在后台对**全部**未解析占位曲目解析元数据与时长：
+///  - 本地磁盘优先（快速填补大部分条目），网络共享（UNC / 映射网络盘 / Linux
+///    非本地挂载）随后处理；网络条目每 20 条轻节流，避免持续打满共享带宽；
+///  - 不再按文件体积跳过——时长 / 标签均通过读取文件头获得，几十 MB 的 WAV/APE
+///    也很轻量；否则整轨 WAV/APE、高码率 DSF 会一直显示 0:00；
+///  - 仅跳过 SACD ISO 占位（其虚拟分轨由播放 / 显式解析流程生成）；
+///  - 本函数**不解析** CUE 分轨（由 `library_resolve_track` 在播放时补做）。
 ///
-/// 时间预算 `budget`：整体耗时超限即停止，剩余占位留待播放时按需解析——
-/// 慢盘 / 海量小文件不会让后台线程长期不退出。`cancel` 由 `library_cancel_scan`
-/// 置位，用户主动取消时立即中止。
-///
-/// 已解析完成的曲目通过 `library://tracks-resolved` 事件推送前端增量更新。
-fn spawn_lazy_backfill(app: &AppHandle, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>, budget: std::time::Duration) {
+/// 循环处理直到没有待解析条目：进程内不会因单次预算到期而残留大量占位；
+/// `cancel` 由 `library_cancel_scan` 置位，用户主动取消时立即中止，剩余条目
+/// 留待下次扫描 / 启动继续。已解析完成的曲目通过 `library://tracks-resolved`
+/// 事件推送前端增量更新。
+pub(crate) fn spawn_lazy_backfill(
+    app: &AppHandle,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let handle = app.clone();
     std::thread::spawn(move || {
         let Some(app_state) = handle.try_state::<AppState>() else {
             return;
         };
-        let deadline = std::time::Instant::now() + budget;
-        let pending = {
-            match app_state.library.lock() {
-                Ok(g) => g.pending_tracks(),
-                Err(_) => return,
-            }
-        };
-        if pending.is_empty() {
-            return;
-        }
-        const SIZE_THRESHOLD: u64 = 32 * 1024 * 1024; // 32MB
-        let mut upserts: Vec<Track> = Vec::new();
-        let mut resolved: Vec<Track> = Vec::new();
-        for track in pending {
-            // 取消 / 超时预算：立即中止，剩余占位留待播放时按需解析
-            if cancel.load(std::sync::atomic::Ordering::SeqCst)
-                || std::time::Instant::now() >= deadline
-            {
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            // 只处理本地磁盘 + 较小文件；网络路径 / ISO 占位 / 大文件跳过
-            if track.iso_placeholder || track.file_size > SIZE_THRESHOLD {
-                continue;
+            let pending = match app_state.library.lock() {
+                Ok(g) => g.pending_tracks(),
+                Err(_) => return,
+            };
+            // 跳过 SACD ISO 占位；本地优先、网络随后
+            let (local, remote): (Vec<Track>, Vec<Track>) = pending
+                .into_iter()
+                .filter(|t| !t.iso_placeholder)
+                .partition(|t| !is_network_path(&t.file_path));
+            if local.is_empty() && remote.is_empty() {
+                break;
             }
-            if is_network_path(&track.file_path) {
-                continue;
-            }
-            if let Some(mut full) = parse_track(std::path::Path::new(&track.file_path)) {
-                full.id = track.id;
-                // 完整元数据入库（metadata_pending 由 parse_track 置 false）
-                upserts.push(full.clone());
-                resolved.push(full);
-            }
-            // 每 64 条提交一批，避免长时间占用库锁
-            if upserts.len() >= 64 {
-                let batch: Vec<Track> = std::mem::take(&mut upserts);
-                if let Ok(mut library) = app_state.library.lock() {
-                    let _ = library.apply_scan(&batch, &[]);
+            let mut progress = 0usize;
+            let mut upserts: Vec<Track> = Vec::new();
+            let mut resolved: Vec<Track> = Vec::new();
+            for (i, track) in local.into_iter().chain(remote).enumerate() {
+                if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
                 }
+                if let Some(mut full) = parse_track(std::path::Path::new(&track.file_path)) {
+                    full.id = track.id;
+                    // 完整元数据入库（metadata_pending 由 parse_track 置 false）
+                    upserts.push(full.clone());
+                    resolved.push(full);
+                    progress += 1;
+                }
+                // 每 64 条提交一批，避免长时间占用库锁
+                if upserts.len() >= 64 {
+                    let batch: Vec<Track> = std::mem::take(&mut upserts);
+                    if let Ok(mut library) = app_state.library.lock() {
+                        let _ = library.apply_scan(&batch, &[]);
+                    }
+                    if !resolved.is_empty() {
+                        let _ = handle.emit(
+                            "library://tracks-resolved",
+                            serde_json::json!({ "tracks": &resolved }),
+                        );
+                        resolved.clear();
+                    }
+                }
+                // 轻节流：避免逐文件网络 IO 打满共享带宽（本地也仅约 1 秒/千条）
+                if i % 20 == 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                }
+            }
+            if !upserts.is_empty() {
+                if let Ok(mut library) = app_state.library.lock() {
+                    let _ = library.apply_scan(&upserts, &[]);
+                }
+            }
+            if !resolved.is_empty() {
                 let _ = handle.emit(
                     "library://tracks-resolved",
                     serde_json::json!({ "tracks": &resolved }),
                 );
-                resolved.clear();
             }
-        }
-        if !upserts.is_empty() {
-            if let Ok(mut library) = app_state.library.lock() {
-                let _ = library.apply_scan(&upserts, &[]);
+            // 本轮无任何进展（文件已不可读等）→ 退出，避免死循环
+            if progress == 0 {
+                break;
             }
-            let _ = handle.emit(
-                "library://tracks-resolved",
-                serde_json::json!({ "tracks": &resolved }),
-            );
         }
     });
 }
@@ -224,8 +231,9 @@ fn is_windows_remote_drive(path: &str) -> bool {
     let root: Vec<u16> = format!("{}:\\", (bytes[0] as char).to_ascii_uppercase())
         .encode_utf16()
         .collect();
-    // DRIVE_REMOTE = 3
-    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == 3 }
+    // Windows 常量：DRIVE_FIXED = 3，DRIVE_REMOTE = 4。此前误写成 3 会把本地盘
+    // 误判为网络盘（进而被后台补解析跳过，本地条目长期停在 0:00），此处修正为 4。
+    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == 4 }
 }
 
 /// 两阶段懒加载 - 阶段二「播放时按需解析」。

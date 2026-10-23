@@ -186,6 +186,18 @@ pub fn run() {
                 });
             }
 
+            // 启动后自动补解析历史占位轨道（早期扫描遗留、元数据未读的 0:00 条目）：
+            // 延迟数秒，避免与首屏加载 / 首次曲库刷新争抢 IO 与曲库锁；本地优先、网络随后，
+            // 完成后经 library://tracks-resolved 增量更新前端。用户点“扫描”时会再触发一次。
+            {
+                let app_bg = app_handle.clone();
+                let cancel = app.state::<AppState>().scan_cancel.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    commands::library::spawn_lazy_backfill(&app_bg, cancel);
+                });
+            }
+
             // 显式给主窗口设置图标：Linux/X11·Wayland 下若不设置，窗口与任务栏
             // 会回退为系统默认（齿轮）图标；安装版另由 .desktop 提供图标。
             if let Some(window) = app.get_webview_window("main") {
