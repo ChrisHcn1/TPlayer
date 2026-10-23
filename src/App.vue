@@ -321,11 +321,14 @@ onMounted(async () => {
   })
 
   // 3.6) 两阶段懒加载：订阅后台补解析 / 播放时按需解析完成事件，
-  //      增量合并曲目元数据（不触发全量刷新，网络大目录 UI 即时响应）
-  listen<{ tracks: Track[] }>('library://tracks-resolved', (e) => {
-    if (Array.isArray(e.payload?.tracks) && e.payload.tracks.length > 0) {
-      libraryStore.applyResolvedTracks(e.payload.tracks)
-    }
+  //      增量合并曲目元数据（不触发全量刷新，网络大目录 UI 即时响应）。
+  //      removedIds：整碟镜像被 CUE / SACD 分轨取代时，后端会移除占位条目，
+  //      前端需同步移除，避免列表里残留「未知专辑」的幽灵条目。
+  listen<{ tracks: Track[]; removedIds?: string[] }>('library://tracks-resolved', (e) => {
+    const tracks = Array.isArray(e.payload?.tracks) ? e.payload.tracks : []
+    const removedIds = Array.isArray(e.payload?.removedIds) ? e.payload.removedIds : []
+    if (tracks.length === 0 && removedIds.length === 0) return
+    libraryStore.applyResolvedTracks(tracks, removedIds)
   })
     .then((unsub) => {
       unlistenResolved = unsub

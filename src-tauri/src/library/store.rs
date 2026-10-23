@@ -219,6 +219,17 @@ impl LibraryStore {
         rows.flatten().collect()
     }
 
+    /// 库内全部 CUE 分轨（后台补解析用）。
+    ///
+    /// 用途：判断某张整碟镜像是否已经被 CUE 拆成分轨（已入库且 cue 未变更时
+    /// 无需重复解析，只把整碟占位移除即可），避免每次扫描都重解析全部 CUE。
+    pub fn cue_tracks(&self) -> Vec<Track> {
+        let sql = "SELECT * FROM tracks WHERE is_cue = 1 ORDER BY added_at, id";
+        let mut stmt = self.conn.prepare(sql).expect("prepare cue_tracks");
+        let rows = stmt.query_map([], row_to_track).expect("query cue_tracks");
+        rows.flatten().collect()
+    }
+
     /// 更新单曲 ReplayGain 增益（后台分析完成后写回；None 表示无数据则置空）
     pub fn update_replaygain(
         &mut self,

@@ -191,6 +191,28 @@ fn discover_sacd_files(root: &Path) -> Vec<PathBuf> {
     without_junk(files)
 }
 
+/// 列出**本目录**（不递归）下的 .cue 文件。
+///
+/// 后台补解析按「镜像所在目录」就近查找 CUE：同一目录的多个镜像共用一份
+/// 解析结果（目录级缓存），避免逐文件重复遍历整棵目录树。
+pub(crate) fn cue_files_in_dir(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_cue = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cue"));
+        if is_cue && path.is_file() {
+            files.push(path);
+        }
+    }
+    files
+}
+
 /// 生成稳定 ID（基于文件路径的 SHA-256 前 16 位 hex）
 fn track_id_from_path(path: &Path) -> String {
     let mut hasher = Sha256::new();
@@ -667,6 +689,8 @@ pub(crate) fn placeholder_track(path: &Path, is_iso: bool) -> Option<Track> {
 /// 阶段二（补解析）见 `commands/library.rs` 的 `library_resolve_track` 与后台
 /// `spawn_lazy_backfill`：播放某曲目时或空闲后台线程按需补做元数据 / 封面 /
 /// CUE 分轨 / SACD 解析，完成后再 apply_scan 覆盖占位轨道并推送增量事件。
+/// 后台补解析按本地 / 网络分流：**本地**做深度解析（元数据 + CUE 分轨 +
+/// SACD 虚拟分轨），**网络**只读文件头（虚拟分轨留待播放时按需解析）。
 ///
 /// 增量语义与完整扫描一致：mtime 未变且库内已有完整轨道（非 pending）的文件
 /// 不再生成占位，避免把已解析元数据覆盖回占位；磁盘上确已不存在的曲目移除。

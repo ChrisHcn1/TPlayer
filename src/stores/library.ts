@@ -111,6 +111,23 @@ export const useLibraryStore = defineStore('library', () => {
       scanProgress.value.stage === 'writing',
   )
 
+  /**
+   * 是否处于「后台补解析」阶段。
+   *
+   * 扫描（快速占位入库）结束后，后台线程继续解析占位条目：
+   * 本地做深度解析（元数据 + CUE 分轨 + SACD 虚拟分轨），网络只读文件头。
+   * 该阶段的结果**增量**推给前端（`library://tracks-resolved`），
+   * 用户无需等待全部解析完就能看到已解析好的条目。
+   */
+  const isBackfilling = computed(() => scanProgress.value.stage === 'backfilling')
+
+  /** 后台解析进度文案（如「后台解析 128/540」）；不在该阶段时为空串 */
+  const backfillLabel = computed(() => {
+    if (!isBackfilling.value) return ''
+    const { processed, total } = scanProgress.value
+    return total > 0 ? `后台解析 ${processed}/${total}` : `后台解析 ${processed}`
+  })
+
   /** id → 曲目 的索引，供各视图 O(1) 取当前播放 / 歌单曲目 */
   const tracksById = computed(() => {
     const map = new Map<string, Track>()
@@ -219,38 +236,21 @@ export const useLibraryStore = defineStore('library', () => {
   /** 触发一次扫描（扫描根目录取 settings.libraryDirs，由 Rust 侧读取配置） */
   async function scan(): Promise<void> {
     error.value = null
-    // 监听一次后端扫描进度事件：
-    //  - 中间态写入 scanProgress（既有能力，此前无人订阅，顺带接通）；
-    //  - Linux：NTFS 分区上的目录可能因挂载权限无法读取，后端在完成事件里
-    //    带回聚合错误（progress.error）。这里捕获并向用户明示，避免
-    //    「部分目录被静默跳过、曲目缺失但无任何提示」。Windows 该字段恒为
-    //    null，不产生任何提示，行为零变化。
-    let scanError: string | null = null
-    let unlisten: (() => void) | null = null
-    if (isTauriRuntime()) {
-      try {
-        unlisten = await listen<ScanProgress>('library://scan-progress', (e) => {
-          applyScanProgress(e.payload)
-          if (e.payload.stage === 'done' && e.payload.error) {
-            scanError = e.payload.error
-          }
-        })
-      } catch {
-        /* 事件订阅失败不阻断扫描本身 */
-      }
-    }
+    scanError.value = null
     try {
       await libraryService.scan()
       await refresh()
-      scanProgress.value = { ...scanProgress.value, stage: 'done' }
-      if (scanError) {
-        toast.warning(scanError)
+      // 后台补解析阶段（stage=backfilling）由后端事件驱动，
+      // 不能被这里的 'done' 覆盖掉（否则「后台解析中 x/y」指示器会闪退）
+      if (scanProgress.value.stage !== 'backfilling') {
+        scanProgress.value = { ...scanProgress.value, stage: 'done' }
+      }
+      if (scanError.value) {
+        toast.warning(scanError.value)
       }
     } catch (cause) {
       error.value = normalizeError(cause).message
       scanProgress.value = { ...scanProgress.value, stage: 'failed', error: error.value }
-    } finally {
-      unlisten?.()
     }
   }
 
@@ -283,6 +283,33 @@ export const useLibraryStore = defineStore('library', () => {
   /** 由后端扫描事件写入进度 */
   function applyScanProgress(progress: ScanProgress): void {
     scanProgress.value = progress
+  }
+
+  /**
+   * 后端在完成事件里带回的扫描错误。
+   *
+   * Linux：NTFS 分区上的目录可能因挂载权限无法读取，后端在完成事件里带回
+   * 聚合错误（progress.error）。这里捕获并向用户明示，避免「部分目录被静默
+   * 跳过、曲目缺失但无任何提示」。Windows 该字段恒为 null，不产生任何提示。
+   */
+  const scanError = ref<string | null>(null)
+
+  /**
+   * 常驻订阅扫描 / 后台补解析进度。
+   *
+   * 此前监听挂在 `scan()` 内部，扫描结束即注销 → 后台补解析阶段
+   * （stage = `backfilling`）的进度完全收不到，前端既看不到
+   * 「后台解析中 x/y」，也不知道解析结果何时陆续到达。
+   */
+  if (isTauriRuntime()) {
+    void listen<ScanProgress>('library://scan-progress', (e) => {
+      applyScanProgress(e.payload)
+      if (e.payload.stage === 'done' && e.payload.error) {
+        scanError.value = e.payload.error
+      }
+    }).catch(() => {
+      /* 事件订阅失败不阻断扫描本身 */
+    })
   }
 
   /**
@@ -432,6 +459,8 @@ export const useLibraryStore = defineStore('library', () => {
     error,
     isEmpty,
     isScanning,
+    isBackfilling,
+    backfillLabel,
     tracksById,
     favoriteTracks,
     recentTracks,

@@ -1,7 +1,7 @@
 # TPlayer —— 项目进度清单
 
 > 本文件是项目的唯一进度台账。**每次继续本项目时，先读本文件，不要全量遍历代码。**
-> 最后更新：2026-10-14
+> 最后更新：2026-10-23
 
 ---
 
@@ -183,12 +183,25 @@ npm run typecheck  # 仅类型检查
 - [x] 音量归一化 ReplayGain：解析 ReplayGain 标签（或按参考响度计算），播放时按增益自动归一化，避免切歌音量跳变（2026-10-10 完成：入库解析内嵌 TRACK_GAIN/TRACK_PEAK 标签 + db v2 持久化 + 无标签曲目首次播放 ffmpeg ebur128 响度分析 + 引擎按增益归一化音量（-14 LUFS 目标、峰值防削波）+ 设置页开关，cargo build --release 与 npm run build 零错误）
 - [x] 目录自动监控：监听曲库目录变更（新增/删除/改名），增量同步进曲库，无需手动重新扫描（2026-10-11 完成：Rust notify 实时监听（600ms 去抖批量）+ 按磁盘实况增量入库/更新/移除 + Tauri 事件推送前端自动刷新曲库 + 设置页开关与监控状态展示，cargo build --release 与 npm run build 零错误）
 - [x] 睡眠定时器（2026-10-11 完成：`handle.rs` SleepTimer（epoch 到期 + wait_track_end 模式到期后播完当前曲才停、delay=0 立即进入曲终等待），tick 到期立即暂停并推送 sleepTimer 事件，on_track_ended 曲终停播分支；新增 player_set_sleep_timer / player_cancel_sleep_timer / player_sleep_timer_status 命令；IPlayer 契约 + Web mock（setTimeout 暂停/曲终停止）+ player store sleepTimer 状态与动作；PlayerBar 右侧新增月亮按钮，菜单 15/30/45/60/90 分钟 / 播完当前曲目后停止 / 取消定时，激活态高亮 + title 倒计时；顺带修复 NextPreloaded 事件 serde tag 全小写导致前端 'nextPreloaded' 分支不命中的隐患（改显式 rename）；cargo check 与 npm run build 零错误）
+- [x] 主界面月亮图标合并（2026-10-23 完成：排查全项目 moon 引用——主界面常驻月亮图标仅 PlayerBar 睡眠定时器按钮一枚；TitleBar/SideBar 的独立主题切换月亮入口已并入 PlayerBar 睡眠菜单（统一入口，菜单含「切换到浅/深色主题」项），设置页深色调与命令面板主题项属各自功能内的主题子项非重复月亮按钮。主界面最终只保留 PlayerBar 一枚月亮图标，功能（睡眠定时 + 主题切换）不缺失）
+- [x] 目录加载两阶段懒加载优化（2026-10-23 完成，解决网络共享大目录（如 \\172.18.0.21\sound，54GB/1864 文件）逐文件 ffprobe 解析元数据导致加载极慢与 UI 未响应）：
+  - Rust 侧：`library/scan.rs` 新增 `scan_directory_fast` 快速扫描——仅遍历目录构造轻量占位 Track（title 回落文件名、duration=0、metadata_pending=true，ISO 镜像另置 iso_placeholder=true），跳过 lofty/ffprobe 元数据解析、封面读取、CUE 分轨与 SACD（sacd_extract）解析；`placeholder_track` 生成占位；保留已有完整轨道不降级；删除检测仅针对磁盘确不存在文件。`commands/library.rs` 的 `library_scan` 改调快速扫描后 `spawn_lazy_backfill` 仅对本地磁盘 + 小文件（<32MB）的非 ISO 占位曲后台补解析；新增 `library_resolve_track` 播放时按需解析单曲/CUE/SACD（resolve_audio / resolve_sacd_iso，spawn_blocking 异步），经 `library://tracks-resolved` 事件增量推送。
+  - 数据层：`library/models.rs` Track 增 `metadata_pending` / `iso_placeholder` 字段（serde default+skip_serializing_if=is_false）；`library/db.rs` SCHEMA_VERSION=6，migrate() 含两列 ADD + 索引，SCHEMA_SQL 同步建列；`library/store.rs` row_to_track 读新列、upsert_track 写新列、apply_scan 支持增量 upsert + removed_ids 级联清理歌单；普通列表沿用 not_cue_source/not_sacd_multich 自动隐藏整碟镜像与 SACD 5.1 轨，补解析后分轨自然取代占位，不破坏歌单引用（库中条目不删）。
+  - 前端：`types/track.ts` Track 增 metadataPending/isoPlaceholder；`services/library.ts` 封装 resolveTrack；`stores/library.ts` applyResolvedTracks 按 id 合并 + removedIds 滤除占位 + 过滤 SACD 5.1，resolveTrack 播放前调用替换占位；`stores/player.ts` play() 在 metadataPending 时先 resolveTrack 再替换 trackId 播放；`App.vue` 订阅 `library://tracks-resolved` 事件增量刷新，不触发全量 refresh。
+  - 效果：扫描阶段仅轻量列目录与音频文件信息，前端先以文件名渲染列表；网络目录/大文件不阻塞等待，UI 即时响应；播放某曲目时后台异步补元数据/封面/CUE/SACD，就绪后增量更新。
+  - 基线修复：`src/App.vue` L334 `unlistenResolved = null` 改为 `undefined`（TS2322 类型错误，非本次改动引入）。
+- [x] 扫描策略按本地 / 网络分流 + CUE / SACD 分轨后台补解析（2026-10-23 完成，解决「本地音频进了播放列表却没有 CUE 解析、SACD 分轨」的问题）：
+  - 后端：新增统一解析入口 `resolve_placeholder`（`commands/library.rs`）+ 深度策略 `ResolveDepth`：**本地**深度解析（元数据 + CUE 分轨 + SACD 虚拟分轨），**网络**仅浅解析（读文件头取标签 / 时长，虚拟分轨留待播放时按需解析，避免打满共享带宽）。CUE 分轨走「目录级缓存 + 整碟键（目录+基名）匹配」，同目录多镜像只解析一次；分轨已在库且 cue 未变更时直接复用，不重复解析。
+  - 修掉历史 bug：`resolve_audio` 把「同 id upsert」与「同 id remove」一起提交，`apply_scan` 先 upsert 后 remove → 解析完成的曲目把自己删掉（库里凭空消失）。现改为同 id 覆盖时不再进移除清单，并在 `flush_resolved` 加同 id 防御过滤。
+  - 进度与增量推送：新增 `ScanStage::Backfilling`，后台补解析经 `library://scan-progress` 上报 processed/total；每 32 条一批 `apply_scan` + `library://tracks-resolved`（新增 `removedIds`：整碟占位被分轨取代时同步移除），并刷新播放器曲目缓存。
+  - 前端：`types/track.ts` 增 `backfilling` 阶段；`stores/library.ts` 把 `scan-progress` 监听从 `scan()` 临时监听改为**常驻**（此前扫描结束即注销，收不到后台阶段进度），新增 `isBackfilling` / `backfillLabel`；`App.vue` 消费 `removedIds`；`TitleBar.vue` 品牌名右侧显示「后台解析 x/y」徽标。
+  - 前端可见时点：扫描结束即出现占位条目（文件名）→ 后台每批完成即增量可见（本地 CUE / SACD 分轨在对应批次到达时出现）→ 全部完成收起指示器；网络条目只更新元数据，分轨需点播放触发。
+  - 测试：新增 `commands/library_tests.rs`（5 例）覆盖「镜像被 CUE 取代」「同 id 覆盖不得自删」「已入库分轨复用」「网络浅解析不产分轨」「整碟键跨扩展名一致」；cargo test 63 passed、vue-tsc 与 vitest 51 passed 零错误。
 
 #### 后期更新项目计划（未实施）
 - [x] 睡眠定时器（→ 已提前完成，见上）
 - [ ] 播放统计权重
 - [ ] 桌面歌词透明模式
-- [ ] 迷你模式
 - [ ] 频谱可视化
 - [ ] 元数据编辑器
 - [ ] 重复曲目检测

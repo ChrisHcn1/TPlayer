@@ -176,6 +176,8 @@ pub enum ScanStage {
     Discovering,
     Parsing,
     Writing,
+    /// 后台补解析阶段（扫描已结束，线程继续解析占位条目的元数据 / CUE / SACD 分轨）
+    Backfilling,
     Done,
     Failed,
 }

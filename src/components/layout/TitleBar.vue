@@ -23,6 +23,7 @@
  */
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
+import { storeToRefs } from 'pinia'
 
 import { useCommandPalette } from '../../composables/useCommandPalette'
 import { useTheme } from '../../composables/useTheme'
@@ -30,11 +31,23 @@ import { router } from '../../router'
 import { resolveNavLabel } from '../../i18n/nav'
 import { isTauriRuntime } from '../../services/ipc'
 import { windowService } from '../../services/window'
+import { useLibraryStore } from '../../stores/library'
 import SearchBox from '../common/SearchBox.vue'
 import Icon from '../common/Icon.vue'
 
 const { open: openCommandPalette } = useCommandPalette()
 const { theme, toggleTheme } = useTheme()
+
+/**
+ * 曲库后台补解析指示器（「后台解析 128/540」）。
+ *
+ * 扫描（快速占位入库）结束后，后台线程继续解析占位条目：
+ * 本地做深度解析（元数据 + CUE 分轨 + SACD 虚拟分轨），网络只读文件头。
+ * 解析结果**增量**推给前端——用户看到数字在涨的同时，列表里的条目也在
+ * 逐批变成完整曲目（本地分轨在对应批次到达时即刻出现）。
+ */
+const libraryStore = useLibraryStore()
+const { backfillLabel } = storeToRefs(libraryStore)
 
 /** 主题切换按钮图标：深色显示月亮（点击切浅色），浅色显示太阳（点击切深色）。
  *  主界面只保留这一枚主题图标（原 SideBar 也有一枚，已去重）。 */
@@ -83,6 +96,13 @@ function handleDragDoubleClick(event: MouseEvent) {
     <div class="title-bar__left">
       <img src="/logo.svg" alt="TPlayer" class="title-bar__logo" />
       <span class="title-bar__brand">TPlayer</span>
+      <!-- 后台补解析进度：仅在后台解析阶段出现，不占常驻位（避免布局跳动） -->
+      <span
+        v-if="backfillLabel"
+        class="title-bar__backfill"
+        role="status"
+        aria-live="polite"
+      >{{ backfillLabel }}</span>
     </div>
 
     <!-- 中：全局搜索（可交互区域，需排除窗口拖拽）；聚焦/点击即唤起 Ctrl+K 命令浮层 -->
@@ -189,6 +209,18 @@ function handleDragDoubleClick(event: MouseEvent) {
   letter-spacing: var(--font-letter-spacing-tight);
   color: var(--color-text-secondary);
   white-space: nowrap;
+}
+
+/* 后台补解析指示器：品牌名右侧的小徽标，仅在后台解析阶段渲染 */
+.title-bar__backfill {
+  flex: 0 0 auto;
+  padding: 1px var(--space-2);
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-2xs);
+  color: var(--color-brand);
+  white-space: nowrap;
+  background-color: var(--color-bg-selected);
+  border-radius: var(--radius-full);
 }
 
 /* 搜索区：宽度按 §4.3 固定 320px，两侧空间不足时允许收缩 */

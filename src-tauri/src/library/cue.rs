@@ -239,6 +239,34 @@ pub fn parse_cue(cue_path: &Path) -> Vec<Track> {
     tracks
 }
 
+/// 轻量提取 .cue 引用的音频文件路径：**只读文本，不探测音频**。
+///
+/// `parse_cue` 会顺带探测镜像时长（lofty / ffprobe），网络共享上代价过高；
+/// 本函数只解析 `FILE` 行，用于两处轻量判定：
+///  1. 判断某个整碟镜像是否被 CUE 引用（扫描期避免把镜像当普通单曲入库）；
+///  2. 判断某个 CUE 是否已被解析过（比对 cue 文件 mtime 与分轨的 modified_at）。
+pub fn referenced_audio_files(cue_path: &Path) -> Vec<PathBuf> {
+    let bytes = match std::fs::read(cue_path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let content = decode_text(&bytes);
+    let cue_dir = cue_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut out = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if !line.to_uppercase().starts_with("FILE ") {
+            continue;
+        }
+        let (path, _fmt) = parse_file_line(&line[5..]);
+        if path.trim().is_empty() {
+            continue;
+        }
+        out.push(resolve_audio_path(&path, &cue_dir));
+    }
+    out
+}
+
 /// 镜像文件的元数据（时长 + 标签信息）
 struct FileMeta {
     duration: Option<f64>,

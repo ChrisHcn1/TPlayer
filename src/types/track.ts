@@ -92,8 +92,15 @@ export interface Playlist {
 
 /** 扫描进度 */
 export interface ScanProgress {
-  /** 当前阶段 */
-  stage: 'idle' | 'discovering' | 'parsing' | 'writing' | 'done' | 'failed'
+  /**
+   * 当前阶段
+   *
+   * - `discovering` / `parsing` / `writing`：扫描阶段（快速占位入库）
+   * - `backfilling`：**后台补解析阶段**——扫描已结束，后台线程继续解析
+   *   占位条目的元数据 / CUE 分轨 / SACD 分轨；本地深度解析、网络仅读文件头。
+   *   该阶段的进度即「后台解析中 x/y」。
+   */
+  stage: 'idle' | 'discovering' | 'parsing' | 'writing' | 'backfilling' | 'done' | 'failed'
   /** 已处理文件数 */
   processed: number
   /** 发现的文件总数 */
