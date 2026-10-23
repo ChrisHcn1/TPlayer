@@ -15,7 +15,6 @@ import { usePlayerStore } from '../../stores/player'
 import { useLibraryStore } from '../../stores/library'
 import { useLayout } from '../../composables/useLayout'
 import { useTrackCover } from '../../composables/useTrackCover'
-import { useTheme } from '../../composables/useTheme'
 import { useContextMenu, type MenuItem } from '../../composables/useContextMenu'
 import type { PlayMode } from '../../types'
 import ProgressBar from './ProgressBar.vue'
@@ -46,7 +45,6 @@ const {
 const { openAt } = useContextMenu()
 const { snapshot, sleepTimer } = storeToRefs(playerStore)
 const { coverUrl } = useTrackCover(() => snapshot.value.trackId)
-const { theme, toggleTheme } = useTheme()
 
 const track = computed(() => libraryStore.getTrack(snapshot.value.trackId))
 const hasTrack = computed(() => Boolean(track.value))
@@ -112,18 +110,6 @@ function openSleepMenu(event: MouseEvent): void {
       onClick: () => void playerStore.cancelSleepTimer(),
     })
   }
-  // 图标语义收敛：月亮（moon）只表示「主题/深浅色」，见设置页与命令面板；
-  // 睡眠定时改用专属 timer 图标，避免播放条上两枚月亮功能混淆。
-  // 主题切换入口收拢在本菜单内（原在 TitleBar / SideBar 各有一枚月亮）。
-  items.push(
-    { key: 'theme-divider', divider: true },
-    {
-      key: 'theme-toggle',
-      label: theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
-      icon: theme.value === 'dark' ? 'sun' : 'moon',
-      onClick: () => toggleTheme(),
-    },
-  )
   openAt(event.clientX, event.clientY, items, '睡眠定时器')
 }
 

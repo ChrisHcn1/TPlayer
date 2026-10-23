@@ -20,7 +20,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import pkg from '../../package.json'
 import { useSettingsStore } from '../stores/settings'
 import { useLibraryStore } from '../stores/library'
-import { useTheme, type ThemeName } from '../composables/useTheme'
+import { useTheme } from '../composables/useTheme'
 import { useToastStore } from '../stores/toast'
 import { useDialogStore } from '../stores/dialog'
 import { pickDirectory } from '../services/dialog'
@@ -109,7 +109,7 @@ const settingsStore = useSettingsStore()
 const libraryStore = useLibraryStore()
 const toastStore = useToastStore()
 const dialogStore = useDialogStore()
-const { theme, applyTheme } = useTheme()
+const { theme, toggleTheme } = useTheme()
 const { isCoverAccentEnabled, setCoverAccent } = useLayout()
 const router = useRouter()
 const route = useRoute()
@@ -155,10 +155,16 @@ onUnmounted(() => {
   unlistenWatcher?.()
 })
 
-const themeOptions: ReadonlyArray<{ key: ThemeName; label: string; icon: string }> = [
-  { key: 'dark', label: '深色', icon: 'moon' },
-  { key: 'light', label: '浅色', icon: 'sun' },
-]
+/**
+ * 主题控件：全应用只有标题栏一枚主题图标与设置页这一个主题控件，
+ * 原先「深色 / 浅色」两个选项按钮收敛为单个切换按钮（点击即在两者间切换），
+ * 图标随当前主题变化（深色=月亮，浅色=太阳）。
+ */
+const themeIcon = computed(() => (theme.value === 'dark' ? 'moon' : 'sun'))
+const themeLabel = computed(() => (theme.value === 'dark' ? '深色' : '浅色'))
+const themeToggleLabel = computed(() =>
+  theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
+)
 
 const isTauri = computed(() => isTauriRuntime())
 const appVersion = computed(() => pkg.version)
@@ -359,16 +365,15 @@ async function resetSettings(): Promise<void> {
           <p class="setting-card__desc">主题选择会立即生效并持久化。</p>
           <div class="theme-options">
             <button
-              v-for="option in themeOptions"
-              :key="option.key"
               type="button"
-              class="theme-option"
-              :class="{ 'theme-option--active': theme === option.key }"
-              @click="applyTheme(option.key)"
+              class="theme-option theme-option--active"
+              :aria-label="themeToggleLabel"
+              :title="themeToggleLabel"
+              @click="toggleTheme()"
             >
-              <Icon :name="option.icon" :size="20" />
-              <span>{{ option.label }}</span>
-              <Icon v-if="theme === option.key" name="check" :size="15" class="theme-option__check" />
+              <Icon :name="themeIcon" :size="20" />
+              <span>{{ themeLabel }}</span>
+              <span class="theme-option__hint">{{ themeToggleLabel }}</span>
             </button>
           </div>
         </section>
@@ -1133,6 +1138,7 @@ async function resetSettings(): Promise<void> {
 }
 
 /* ---- 主题卡片 ---- */
+/* 单一主题控件（原为「深色 / 浅色」两个选项卡，收敛为一个切换按钮） */
 .theme-options {
   display: flex;
   gap: var(--space-3);
@@ -1141,10 +1147,10 @@ async function resetSettings(): Promise<void> {
 .theme-option {
   position: relative;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: var(--space-2);
-  width: 120px;
+  gap: var(--space-3);
+  width: 100%;
   padding: var(--space-4) var(--space-3);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
@@ -1152,6 +1158,7 @@ async function resetSettings(): Promise<void> {
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
+  text-align: left;
 }
 
 .theme-option:hover {
@@ -1164,10 +1171,11 @@ async function resetSettings(): Promise<void> {
   border-color: var(--color-brand);
 }
 
-.theme-option__check {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
+/* 控件内的当前主题名与「点击切换到 XX」提示 */
+.theme-option__hint {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }
 
 /* ---- 关于 ---- */

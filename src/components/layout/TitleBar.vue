@@ -25,6 +25,7 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { useCommandPalette } from '../../composables/useCommandPalette'
+import { useTheme } from '../../composables/useTheme'
 import { router } from '../../router'
 import { resolveNavLabel } from '../../i18n/nav'
 import { isTauriRuntime } from '../../services/ipc'
@@ -33,6 +34,14 @@ import SearchBox from '../common/SearchBox.vue'
 import Icon from '../common/Icon.vue'
 
 const { open: openCommandPalette } = useCommandPalette()
+const { theme, toggleTheme } = useTheme()
+
+/** 主题切换按钮图标：深色显示月亮（点击切浅色），浅色显示太阳（点击切深色）。
+ *  主界面只保留这一枚主题图标（原 SideBar 也有一枚，已去重）。 */
+const themeIcon = computed(() => (theme.value === 'dark' ? 'moon' : 'sun'))
+const themeLabel = computed(() =>
+  theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
+)
 
 /** 窗口控制是否渲染：非 Tauri 环境（浏览器调试）不渲染，避免出现无响应按钮（§4.3） */
 const hasWindowControls = computed(() => isTauriRuntime())
@@ -93,9 +102,19 @@ function handleDragDoubleClick(event: MouseEvent) {
       <span class="title-bar__shortcut" aria-hidden="true">Ctrl K</span>
     </div>
 
-    <!-- 右：设置 + 窗口控制（可交互区域，需排除窗口拖拽）。
-         主题切换已并入播放条月亮图标统一入口（月亮图标合并），此处不再重复展示。 -->
+    <!-- 右：主题切换 + 设置 + 窗口控制（可交互区域，需排除窗口拖拽）。
+         主题切换按 §4.3 固定在标题栏，全应用仅此一枚主题图标。 -->
     <div class="title-bar__right u-no-drag">
+      <button
+        type="button"
+        class="title-bar__btn"
+        :aria-label="themeLabel"
+        :title="themeLabel"
+        @click="toggleTheme()"
+      >
+        <Icon :name="themeIcon" :size="16" />
+      </button>
+
       <RouterLink class="title-bar__btn" to="/settings" :aria-label="resolveNavLabel('nav.settings')" :title="resolveNavLabel('nav.settings')">
         <Icon name="settings" :size="16" />
       </RouterLink>

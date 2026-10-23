@@ -51,23 +51,37 @@ foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe', 'sacd_extract.exe')) {
     }
 }
 
-if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-    if (Test-Path $localKey) {
-        $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path $localKey).Path
-        Write-Host "[build] 未设置 TAURI_SIGNING_PRIVATE_KEY，回落使用本地密钥: $localKey" -ForegroundColor DarkGray
-    } else {
-        throw @(
-            '未找到升级签名密钥。请任选一种方式提供：'
-            '  1) 设置环境变量 TAURI_SIGNING_PRIVATE_KEY（私钥字符串或 .key 文件路径）；'
-            '  2) 放置私钥到 src-tauri\.tauri-signing\TPlayerNext.key。'
-            '私钥有密码时还需设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。'
-            '可用 `npm run tauri signer generate` 生成密钥对（公钥写入 tauri.conf.json）。'
-        ) -join [Environment]::NewLine
+# 仅当开启升级产物签名时才需要私钥；createUpdaterArtifacts=false 时跳过（直接出安装包）
+$needSigning = $true
+try {
+    $cfg = Get-Content (Join-Path $root 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
+    if ($cfg.bundle.createUpdaterArtifacts -eq $false) { $needSigning = $false }
+} catch { Write-Warning '[build] 无法解析 tauri.conf.json，按需要签名处理。' }
+
+if ($needSigning) {
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+        if (Test-Path $localKey) {
+            $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path $localKey).Path
+            Write-Host "[build] 未设置 TAURI_SIGNING_PRIVATE_KEY，回落使用本地密钥: $localKey" -ForegroundColor DarkGray
+        } else {
+            throw @(
+                '未找到升级签名密钥。请任选一种方式提供：'
+                '  1) 设置环境变量 TAURI_SIGNING_PRIVATE_KEY（私钥字符串或 .key 文件路径）；'
+                '  2) 放置私钥到 src-tauri\.tauri-signing\TPlayerNext.key。'
+                '私钥有密码时还需设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。'
+                '可用 `npm run tauri signer generate` 生成密钥对（公钥写入 tauri.conf.json）。'
+                '若只是打包安装包、暂不需要自动升级签名，把 tauri.conf.json 的'
+                'bundle.createUpdaterArtifacts 设为 false 即可跳过签名。'
+            ) -join [Environment]::NewLine
+        }
     }
+} else {
+    Write-Host '[build] createUpdaterArtifacts=false，跳过升级签名（仅生成安装包）。' -ForegroundColor DarkGray
 }
 
+
 # 无密码密钥可留空；有密码必须在环境变量中提供
-if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+if ($needSigning -and $null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
     Write-Warning '[build] TAURI_SIGNING_PRIVATE_KEY_PASSWORD 未设置；若私钥有密码，签名会失败。'
 }
 
