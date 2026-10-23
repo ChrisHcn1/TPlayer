@@ -15,11 +15,9 @@ use crate::error::{AppError, AppResult};
 use crate::library::models::{
     disc_key, Album, Artist, LibraryStats, Playlist, RecentEntry, ScanProgress, ScanStage, Track,
 };
-use crate::library::scan::{
-    collect_import_tracks, cue_files_in_dir, parse_track, scan_directory_fast,
-};
+use crate::library::scan::{collect_import_tracks, discover_cue_files, parse_track, scan_directory_fast};
 use crate::library::sacd::SacdDisc;
-use crate::library::cue::{parse_cue, referenced_audio_files};
+use crate::library::cue::parse_cue;
 use crate::AppState;
 
 /// 启动一次曲库扫描（增量）
@@ -154,11 +152,19 @@ pub(crate) fn spawn_lazy_backfill(
 
         let total = (local.len() + remote.len()) as u32;
         let mut processed = 0u32;
-        let known_cue_tracks = match app_state.library.lock() {
-            Ok(g) => g.cue_tracks(),
-            Err(_) => return,
+        let (known_cue_tracks, local_roots) = {
+            let library = app_state.library.lock().unwrap();
+            let known = library.cue_tracks();
+            let config = app_state.config.lock().unwrap();
+            let roots: Vec<PathBuf> = config
+                .library_dirs
+                .iter()
+                .map(PathBuf::from)
+                .filter(|r| !is_network_path(r.to_string_lossy().as_ref()))
+                .collect();
+            (known, roots)
         };
-        let mut ctx = ResolveContext::new(known_cue_tracks);
+        let mut ctx = ResolveContext::new(known_cue_tracks, &local_roots);
 
         for (batch, depth) in [(local, ResolveDepth::Deep), (remote, ResolveDepth::Shallow)] {
             let mut upserts: Vec<Track> = Vec::new();
@@ -168,7 +174,21 @@ pub(crate) fn spawn_lazy_backfill(
                 if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                let outcome = resolve_placeholder(&placeholder, depth, &mut ctx);
+                // 单条坏数据（坏 ISO / 坏 CUE）不能把整条后台线程带崩，
+                // 否则排在后面的曲目（含 CUE 分轨）会全部漏解析。
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    resolve_placeholder(&placeholder, depth, &mut ctx)
+                }));
+                let outcome = match outcome {
+                    Ok(o) => o,
+                    Err(_) => {
+                        eprintln!(
+                            "[library] 解析占位时 panic，跳过该条目: {}",
+                            placeholder.file_path
+                        );
+                        ResolveOutcome::empty()
+                    }
+                };
                 if !outcome.upserts.is_empty() {
                     upserts.extend(outcome.upserts.iter().cloned());
                     resolved.extend(outcome.upserts.iter().cloned());
@@ -233,123 +253,49 @@ impl ResolveOutcome {
     }
 }
 
-/// 解析上下文：跨条目复用的目录级 CUE 索引 + 已入库分轨索引。
+/// 解析上下文：跨条目复用的**全局** CUE 索引 + 库内已入库分轨索引。
 struct ResolveContext {
-    /// 目录 → 该目录下的 .cue 清单（路径, mtime, cue 引用的音频文件）
-    dir_cues: HashMap<String, DirCues>,
-    /// 目录 → 该目录 .cue 解析出的全部分轨（懒解析，按需填充）
-    dir_cue_tracks: HashMap<String, Vec<Track>>,
-    /// 已入库的 CUE 分轨：整碟键 → (cue 文件 mtime, 分轨列表)
-    known_discs: HashMap<(String, String), (i64, Vec<Track>)>,
-}
-
-/// 一个目录下的 .cue 清单。
-struct DirCues {
-    /// (cue 路径, mtime, cue 引用的音频文件)
-    files: Vec<(PathBuf, i64, Vec<PathBuf>)>,
+    /// 整碟键 → 本次扫描一次性解析出的 CUE 分轨（来自库内全部 .cue 文件）。
+    ///
+    /// 关键：复刻旧版 `scan_directory` 的覆盖度——CUE 与镜像**不必同级**，
+    /// 只要 CUE 引用的音频文件就是库内某个镜像即可（按整碟键匹配）。
+    cue_by_disc: HashMap<(String, String), Vec<Track>>,
+    /// 库内已入库的 CUE 分轨（按整碟键索引），用于清理「CUE 已删 / 改名」后
+    /// 残留的失效分轨（避免列表里留下重复条目）。
+    known_discs: HashMap<(String, String), Vec<Track>>,
 }
 
 impl ResolveContext {
-    /// 以「库内已入库的 CUE 分轨」构建上下文。
+    /// 以「库内已入库的 CUE 分轨」+「本地曲库根目录」构建上下文。
     ///
-    /// 分轨的 modified_at 即解析时 cue 文件的 mtime（见 cue::parse_cue），
-    /// 用来判断「CUE 是否已变更」，避免每次扫描都重解析全部 CUE。
-    fn new(cue_tracks: Vec<Track>) -> Self {
-        let mut known_discs: HashMap<(String, String), (i64, Vec<Track>)> = HashMap::new();
-        for t in cue_tracks {
-            let Some(key) = disc_key(&t.file_path) else {
-                continue;
-            };
-            let mtime = t.modified_at;
-            let entry = known_discs.entry(key).or_insert_with(|| (mtime, Vec::new()));
-            entry.1.push(t);
+    /// 一次性递归发现并解析本地曲库内**全部** .cue 文件（网络共享不解析 CUE
+    /// 分轨），建立整碟键 → 分轨索引。这与旧版 `scan_directory` 行为一致，
+    /// 因此镜像与 CUE 不同级、或整碟镜像文件名与 CUE 引用不一致时也能正确拆轨。
+    fn new(known_cue_tracks: Vec<Track>, local_roots: &[PathBuf]) -> Self {
+        // 库内已入库分轨：按整碟键索引（清理失效分轨用）
+        let mut known_discs: HashMap<(String, String), Vec<Track>> = HashMap::new();
+        for t in known_cue_tracks {
+            if let Some(key) = disc_key(&t.file_path) {
+                known_discs.entry(key).or_default().push(t);
+            }
         }
+
+        // 全局一次性发现并解析所有 CUE（镜像与 CUE 不必同级）
+        let mut cue_by_disc: HashMap<(String, String), Vec<Track>> = HashMap::new();
+        for root in local_roots {
+            for cue in discover_cue_files(root) {
+                for track in parse_cue(&cue) {
+                    if let Some(key) = disc_key(&track.file_path) {
+                        cue_by_disc.entry(key).or_default().push(track);
+                    }
+                }
+            }
+        }
+
         Self {
-            dir_cues: HashMap::new(),
-            dir_cue_tracks: HashMap::new(),
+            cue_by_disc,
             known_discs,
         }
-    }
-
-    /// 目录下的 .cue 清单（惰性发现 + 缓存）：同目录多个镜像只扫一次目录。
-    fn dir_cues(&mut self, dir: &Path) -> &DirCues {
-        let key = dir.to_string_lossy().to_string();
-        self.dir_cues.entry(key).or_insert_with(|| DirCues {
-            files: cue_files_in_dir(dir)
-                .into_iter()
-                .map(|cue| {
-                    let mtime = std::fs::metadata(&cue)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let refs = referenced_audio_files(&cue);
-                    (cue, mtime, refs)
-                })
-                .collect(),
-        })
-    }
-
-    /// 目录下的 .cue 分轨（全量，懒解析 + 缓存）。
-    fn dir_cue_tracks(&mut self, dir: &Path) -> Vec<Track> {
-        let key = dir.to_string_lossy().to_string();
-        if let Some(tracks) = self.dir_cue_tracks.get(&key) {
-            return tracks.clone();
-        }
-        let cues: Vec<PathBuf> = self
-            .dir_cues(dir)
-            .files
-            .iter()
-            .map(|(p, _, _)| p.clone())
-            .collect();
-        let mut tracks = Vec::new();
-        for cue in cues {
-            tracks.extend(parse_cue(&cue));
-        }
-        self.dir_cue_tracks.insert(key, tracks.clone());
-        tracks
-    }
-
-    /// 引用该整碟的 .cue 文件的 mtime（None = 没有 cue 引用它）。
-    fn cue_mtime_for_disc(&mut self, dir: &Path, key: &(String, String)) -> Option<i64> {
-        self.dir_cues(dir)
-            .files
-            .iter()
-            .find(|(_, _, refs)| {
-                refs.iter()
-                    .any(|r| disc_key(r.to_string_lossy().as_ref()).as_ref() == Some(key))
-            })
-            .map(|(_, mtime, _)| *mtime)
-    }
-
-    /// 该整碟的 CUE 分轨是否已在库且 cue 未变更。
-    ///
-    /// `cue_mtime` 为 None 表示**没有任何 CUE 引用该整碟**（cue 被删 / 改名），
-    /// 此时已入库的分轨视为失效，需要重新解析（多半退回普通单曲）。
-    fn known_disc(&self, key: &(String, String), cue_mtime: Option<i64>) -> Option<Vec<Track>> {
-        let (mtime, tracks) = self.known_discs.get(key)?;
-        let cm = cue_mtime?;
-        if *mtime != cm {
-            // cue 文件已改动 → 需要重新解析
-            return None;
-        }
-        Some(tracks.clone())
-    }
-
-    /// 取出并移除该整碟已入库的分轨（重新解析 / 失效清理时用）。
-    fn take_known_disc(&mut self, key: &(String, String)) -> Vec<Track> {
-        self.known_discs
-            .remove(key)
-            .map(|(_, tracks)| tracks)
-            .unwrap_or_default()
-    }
-
-    /// 记录某张整碟的分轨（解析完成 / 已在库）。
-    fn remember_disc(&mut self, key: &(String, String), cue_mtime: Option<i64>, tracks: &[Track]) {
-        let mtime = cue_mtime.unwrap_or_else(|| tracks.first().map(|t| t.modified_at).unwrap_or(0));
-        self.known_discs
-            .insert(key.clone(), (mtime, tracks.to_vec()));
     }
 }
 
@@ -391,51 +337,42 @@ fn resolve_placeholder(
     // CUE 分轨（仅本地深度解析）。
     // 分轨的标题 / 专辑 / 时长全部来自 CUE 本身，不依赖镜像能否解析出元数据，
     // 故这一步排在 parse_track 之前（整碟镜像的元数据常为空）。
+    //
+    // 匹配基于「整碟键」（目录 + 基名），与镜像 / CUE 是否同级无关——只要 CUE
+    // 引用的音频文件就是库内这个镜像即可（复刻旧版 scan_directory 的覆盖度）。
     if depth == ResolveDepth::Deep {
-        if let Some(dir) = path.parent() {
-            if let Some(key) = disc_key(&placeholder.file_path) {
-                let cue_mtime = ctx.cue_mtime_for_disc(dir, &key);
-                // 分轨已在库且 cue 未变更 → 只需把整碟占位移除
-                if let Some(existing) = ctx.known_disc(&key, cue_mtime) {
-                    return ResolveOutcome {
-                        upserts: Vec::new(),
-                        removed: vec![placeholder.id.clone()],
-                        existing,
-                    };
-                }
-                // 需要（重新）解析本目录的 CUE
-                let matching: Vec<Track> = ctx
-                    .dir_cue_tracks(dir)
-                    .iter()
-                    .filter(|t| disc_key(&t.file_path).as_ref() == Some(&key))
-                    .cloned()
-                    .collect();
+        if let Some(key) = disc_key(&placeholder.file_path) {
+            // 情况一：某个 CUE 引用了该镜像 → 用分轨取代整碟占位
+            if let Some(matching) = ctx.cue_by_disc.get(&key) {
+                let matching = matching.clone();
                 // 旧分轨（cue 改名 / 改内容后 id 变化的那些）需清理；
                 // 注意**不能**删除本轮即将写入的同 id 分轨——apply_scan 先 upsert
                 // 后 remove，同 id 会把自己删掉。
-                let stale = ctx.take_known_disc(&key);
-                let matching_ids: std::collections::HashSet<&str> =
-                    matching.iter().map(|t| t.id.as_str()).collect();
-                let mut removed: Vec<String> = stale
-                    .iter()
-                    .map(|t| t.id.as_str())
+                let matching_ids: std::collections::HashSet<String> =
+                    matching.iter().map(|t| t.id.clone()).collect();
+                let mut removed: Vec<String> = ctx
+                    .known_discs
+                    .get(&key)
+                    .map(|tracks| tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+                    .into_iter()
                     .filter(|id| !matching_ids.contains(id))
-                    .map(|id| id.to_string())
                     .collect();
-                if !matching.is_empty() {
-                    ctx.remember_disc(&key, cue_mtime, &matching);
-                    removed.push(placeholder.id.clone());
-                    return ResolveOutcome {
-                        upserts: matching,
-                        removed,
-                        existing: Vec::new(),
-                    };
-                }
-                // 该整碟已不被任何 CUE 引用（cue 被删 / 改名）→ 退回普通单曲，
-                // 同时清掉失效的旧分轨，避免列表里留下重复条目。
-                // 注意：占位 id **不能**进移除清单——下面的普通单曲用的是同一个
-                // id（upsert 覆盖占位），同 id 先 upsert 后 remove 会把自己删掉。
+                removed.push(placeholder.id.clone());
+                return ResolveOutcome {
+                    upserts: matching,
+                    removed,
+                    existing: Vec::new(),
+                };
+            }
+            // 情况二：该整碟已不被任何 CUE 引用（cue 被删 / 改名）→ 退回普通单曲，
+            // 同时清掉失效的旧分轨，避免列表里留下重复条目。
+            // 注意：占位 id **不能**进本分支的「去重」移除——普通单曲用同一个 id
+            // （upsert 覆盖占位），同 id 先 upsert 后 remove 会把自己删掉。
+            if let Some(stale) = ctx.known_discs.get(&key) {
+                let mut removed: Vec<String> = stale.iter().map(|t| t.id.clone()).collect();
                 let Some(mut full) = parse_track(path) else {
+                    // 解析失败：保留占位（含失效旧分轨），交由播放时按需解析
                     return ResolveOutcome {
                         upserts: Vec::new(),
                         removed,
@@ -443,6 +380,7 @@ fn resolve_placeholder(
                     };
                 };
                 full.id = placeholder.id.clone();
+                removed.push(placeholder.id.clone());
                 return ResolveOutcome {
                     upserts: vec![full],
                     removed,
@@ -641,14 +579,22 @@ pub async fn library_resolve_track(
 ///
 /// 返回可播放的曲目列表：解析失败时返回原占位（前端提示暂不可解析）。
 fn resolve_one(app_state: &AppState, id: &str) -> Vec<Track> {
-    let (placeholder, known_cue_tracks) = {
+    let (placeholder, known_cue_tracks, local_roots) = {
         let library = app_state.library.lock().unwrap();
-        (library.get_track(id), library.cue_tracks())
+        let known = library.cue_tracks();
+        let config = app_state.config.lock().unwrap();
+        let roots: Vec<PathBuf> = config
+            .library_dirs
+            .iter()
+            .map(PathBuf::from)
+            .filter(|r| !is_network_path(r.to_string_lossy().as_ref()))
+            .collect();
+        (library.get_track(id), known, roots)
     };
     let Some(placeholder) = placeholder else {
         return Vec::new();
     };
-    let mut ctx = ResolveContext::new(known_cue_tracks);
+    let mut ctx = ResolveContext::new(known_cue_tracks, &local_roots);
     let outcome = resolve_placeholder(&placeholder, ResolveDepth::Deep, &mut ctx);
     if outcome.upserts.is_empty() && outcome.existing.is_empty() {
         // 解析失败：保留占位，交由前端提示

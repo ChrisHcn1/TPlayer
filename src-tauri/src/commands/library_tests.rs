@@ -90,7 +90,7 @@ fn deep_resolve_replaces_mirror_placeholder_with_cue_tracks() {
     write_cue(&dir);
 
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(Vec::new());
+    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     // 占位被分轨取代
@@ -113,7 +113,7 @@ fn deep_resolve_keeps_single_track_with_same_id_and_no_removal() {
     write_min_wav(&song);
 
     let ph = placeholder("ph-song", &song);
-    let mut ctx = ResolveContext::new(Vec::new());
+    let mut ctx = ResolveContext::new(vec![], &[]);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     // 普通单曲：同 id 覆盖占位，且**不能**把该 id 放进 removed
@@ -129,24 +129,30 @@ fn deep_resolve_keeps_single_track_with_same_id_and_no_removal() {
 }
 
 #[test]
-fn deep_resolve_reuses_already_known_cue_tracks() {
-    let dir = temp_dir("known");
-    let mirror = dir.join("Album.flac");
+fn deep_resolve_discovers_cue_in_subdir_of_root() {
+    // 复刻旧版 scan_directory 的覆盖度：CUE 与镜像不必同级。
+    // 这里 CUE 在 dir/Album.cue，但引用的音频在 dir/sub/CDImage.flac（子目录）。
+    // 仅查镜像同级目录的旧实现会漏掉，全局递归发现能正确拆轨。
+    let dir = temp_dir("cross_dir");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).expect("create sub");
+    let mirror = sub.join("CDImage.flac");
     std::fs::write(&mirror, b"not-a-real-flac").expect("write mirror");
-    write_cue(&dir);
+    let cue = "FILE \"sub/CDImage.flac\" WAVE\n\
+               TRACK 01 AUDIO\n  TITLE \"First\"\n  INDEX 01 00:00:00\n\
+               TRACK 02 AUDIO\n  TITLE \"Second\"\n  INDEX 01 00:00:30\n";
+    let mut f = std::fs::File::create(dir.join("Album.cue")).expect("create cue");
+    f.write_all(cue.as_bytes()).expect("write cue");
 
-    // 第一轮：解析出分轨
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(Vec::new());
-    let first = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
-    assert_eq!(first.upserts.len(), 2);
+    // 以 dir 为根递归发现 CUE（与后台补解析行为一致）
+    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
+    let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
-    // 第二轮：分轨已在库（且 cue 未变更）→ 不重复解析，只移除占位
-    let mut ctx2 = ResolveContext::new(first.upserts.clone());
-    let second = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx2);
-    assert!(second.upserts.is_empty(), "已入库的分轨不应重复写入");
-    assert_eq!(second.removed, vec!["ph-mirror".to_string()]);
-    assert_eq!(second.existing.len(), 2, "应复用已入库的分轨");
+    assert_eq!(outcome.removed, vec!["ph-mirror".to_string()]);
+    assert_eq!(outcome.upserts.len(), 2, "跨目录 CUE 也应拆出 2 条分轨");
+    assert_eq!(outcome.upserts[0].title, "First");
+    assert!(!outcome.removed.contains(&outcome.upserts[0].id));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -163,7 +169,7 @@ fn shallow_resolve_skips_virtual_tracks_for_network() {
     f.write_all(cue.as_bytes()).expect("write cue");
 
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(Vec::new());
+    let mut ctx = ResolveContext::new(vec![], &[]);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Shallow, &mut ctx);
 
     // 网络共享：只读文件头 → 只有普通单曲元数据，不产出 CUE 分轨
@@ -181,4 +187,67 @@ fn disc_key_matches_cue_reference_across_extensions() {
     let key_ape = disc_key("D:/music/Album.ape");
     assert_eq!(key_flac, key_ape);
     assert!(key_flac.is_some());
+}
+
+/// 写一段**真实可解析**的 WAV（有实际 PCM 数据，lofty 能读出时长）。
+/// 5 秒、44.1kHz、立体声、16bit。
+fn write_real_wav(path: &Path) {
+    let channels: u16 = 2;
+    let bits: u16 = 16;
+    let sample_rate: u32 = 44_100;
+    let byte_rate = sample_rate * channels as u32 * bits as u32 / 8;
+    let num_samples = sample_rate * 5; // 5 秒
+    let data_len = num_samples * channels as u32 * bits as u32 / 8;
+    let mut bytes: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&(channels * bits / 8).to_le_bytes());
+    bytes.extend_from_slice(&bits.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    // 静音填充（实际数值无所谓，时长由 data_len 决定）
+    bytes.extend(std::iter::repeat(0u8).take(data_len as usize));
+    let mut f = std::fs::File::create(path).expect("create wav");
+    f.write_all(&bytes).expect("write wav");
+}
+
+#[test]
+fn deep_resolve_real_cue_with_album_metadata() {
+    let dir = temp_dir("real_cue");
+    let mirror = dir.join("Album.wav");
+    write_real_wav(&mirror);
+    // 真实 CUE：含专辑级 TITLE/PERFORMER/REM，FILE 引用镜像，两轨带 INDEX
+    let cue = "REM DATE 1995\n\
+               REM GENRE Rock\n\
+               TITLE \"My Album\"\n\
+               PERFORMER \"My Artist\"\n\
+               FILE \"Album.wav\" WAVE\n\
+               TRACK 01 AUDIO\n  TITLE \"First Song\"\n  PERFORMER \"My Artist\"\n  INDEX 01 00:00:00\n\
+               TRACK 02 AUDIO\n  TITLE \"Second Song\"\n  PERFORMER \"My Artist\"\n  INDEX 01 00:02:00\n";
+    let mut f = std::fs::File::create(dir.join("Album.cue")).expect("create cue");
+    f.write_all(cue.as_bytes()).expect("write cue");
+
+    let ph = placeholder("ph-mirror", &mirror);
+    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
+    let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
+
+    assert_eq!(outcome.removed, vec!["ph-mirror".to_string()]);
+    assert_eq!(outcome.upserts.len(), 2, "应产出 2 条 CUE 分轨");
+    assert!(outcome.upserts.iter().all(|t| t.is_cue && !t.metadata_pending));
+    assert_eq!(outcome.upserts[0].title, "First Song");
+    assert_eq!(outcome.upserts[1].title, "Second Song");
+    assert_eq!(outcome.upserts[0].album, "My Album");
+    assert!(outcome.upserts[0].artists.iter().any(|a| a == "My Artist"));
+    // 时长来自真实 WAV：第 1 轨 = 2s，第 2 轨 = 5s - 2s = 3s
+    assert!((outcome.upserts[0].duration - 2.0).abs() < 0.5, "第1轨时长≈2s");
+    assert!((outcome.upserts[1].duration - 3.0).abs() < 0.5, "第2轨时长≈3s");
+    assert!(!outcome.removed.contains(&outcome.upserts[0].id));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

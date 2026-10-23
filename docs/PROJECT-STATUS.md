@@ -197,6 +197,11 @@ npm run typecheck  # 仅类型检查
   - 前端：`types/track.ts` 增 `backfilling` 阶段；`stores/library.ts` 把 `scan-progress` 监听从 `scan()` 临时监听改为**常驻**（此前扫描结束即注销，收不到后台阶段进度），新增 `isBackfilling` / `backfillLabel`；`App.vue` 消费 `removedIds`；`TitleBar.vue` 品牌名右侧显示「后台解析 x/y」徽标。
   - 前端可见时点：扫描结束即出现占位条目（文件名）→ 后台每批完成即增量可见（本地 CUE / SACD 分轨在对应批次到达时出现）→ 全部完成收起指示器；网络条目只更新元数据，分轨需点播放触发。
   - 测试：新增 `commands/library_tests.rs`（5 例）覆盖「镜像被 CUE 取代」「同 id 覆盖不得自删」「已入库分轨复用」「网络浅解析不产分轨」「整碟键跨扩展名一致」；cargo test 63 passed、vue-tsc 与 vitest 51 passed 零错误。
+- [x] 修复 CUE 跨目录漏解析回归 + 后台线程 panic 防护（2026-10-23 续）：
+  - 回归根因：上一版 `ResolveContext` 只查「镜像同级目录」的 `.cue`，而旧版 `scan_directory` 用 `discover_cue_files` **递归全树**发现所有 CUE 再按引用文件匹配；镜像与 CUE 不同级（或整碟镜像文件名与 CUE 引用不一致）时漏掉 → 表现为「CUE 没解析」。
+  - 修复：重写 `ResolveContext` —— 扫描开始**一次性递归发现并解析曲库内全部本地 .cue**（`discover_cue_files` 仅限本地根，网络不解析 CUE 分轨），建立「整碟键 → 分轨」索引；`resolve_placeholder` 按整碟键匹配，与镜像 / CUE 是否同级无关。复刻旧版覆盖度。
+  - 顺手给后台补解析逐条加 `catch_unwind` 防护：单条坏数据（坏 ISO / 坏 CUE）不再把整条线程带崩，避免后续 CUE 全部漏解析。
+  - 测试：新增 `deep_resolve_discovers_cue_in_subdir_of_root`（跨目录 CUE 拆轨），改写 `reuses_already_known_cue_tracks` 为新语义；cargo test 6 例全绿。
 
 #### 后期更新项目计划（未实施）
 - [x] 睡眠定时器（→ 已提前完成，见上）

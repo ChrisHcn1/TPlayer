@@ -191,28 +191,6 @@ fn discover_sacd_files(root: &Path) -> Vec<PathBuf> {
     without_junk(files)
 }
 
-/// 列出**本目录**（不递归）下的 .cue 文件。
-///
-/// 后台补解析按「镜像所在目录」就近查找 CUE：同一目录的多个镜像共用一份
-/// 解析结果（目录级缓存），避免逐文件重复遍历整棵目录树。
-pub(crate) fn cue_files_in_dir(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_cue = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("cue"));
-        if is_cue && path.is_file() {
-            files.push(path);
-        }
-    }
-    files
-}
-
 /// 生成稳定 ID（基于文件路径的 SHA-256 前 16 位 hex）
 fn track_id_from_path(path: &Path) -> String {
     let mut hasher = Sha256::new();
