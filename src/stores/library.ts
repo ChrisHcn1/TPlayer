@@ -46,6 +46,39 @@ export function isSacdMultich(track: Track): boolean {
   return String(track.sacdArea ?? '').toLowerCase() === 'multich'
 }
 
+/**
+ * 「同一首歌」去重键（与后端 `not_duplicate_song()` 口径一致）：
+ * 主艺人 + 标题 + 专辑 + 格式。
+ *  - 格式不同（flac / mp3 / ape 各一份）视为不同版本，都保留；
+ *  - SACD 虚拟分轨不参与（其立体声 / 5.1 两套由专辑页区域切换表达）；
+ *  - CUE 分轨标题带「曲目号 - 标题」且指向同一镜像，按此键也不相撞。
+ */
+function songDedupKey(track: Track): string {
+  const primary = (track.artists[0] ?? '').trim().toLowerCase()
+  return [primary, track.title.trim().toLowerCase(), track.album.trim().toLowerCase(), (track.format ?? '').trim().toLowerCase()].join('\u0001')
+}
+
+/**
+ * 列表兜底去重：同一首歌只保留首条（后端 `library_tracks` 已做同键去重，
+ * 这里再挡一层，防止旧库残留 / 增量合并路径漏折导致列表出现重复项）。
+ * 保持传入顺序，不做重排。
+ */
+function dedupeSongs(list: Track[]): Track[] {
+  const seen = new Set<string>()
+  const out: Track[] = []
+  for (const track of list) {
+    if (track.isSacd === true) {
+      out.push(track)
+      continue
+    }
+    const key = songDedupKey(track)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(track)
+  }
+  return out
+}
+
 export const useLibraryStore = defineStore('library', () => {
   /**
    * 全量曲目（含 SACD 的 5.1 环绕轨）。
@@ -166,9 +199,9 @@ export const useLibraryStore = defineStore('library', () => {
           libraryService.favoriteIds(),
           libraryService.recent(),
         ])
-      allTracks.value = trackList
+      allTracks.value = dedupeSongs(trackList)
       // 普通列表剔除 SACD 5.1 环绕轨（与立体声区同曲目，只差 `[5.1]` 后缀）
-      tracks.value = trackList.filter((track) => !isSacdMultich(track))
+      tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
       albums.value = albumList
       cueAlbums.value = cueList
       sacdAlbums.value = sacdList
@@ -267,7 +300,7 @@ export const useLibraryStore = defineStore('library', () => {
     if (updated.length > 0) {
       const byId = new Map(allTracks.value.map((track) => [track.id, track]))
       for (const track of updated) byId.set(track.id, track)
-      allTracks.value = [...byId.values()]
+      allTracks.value = dedupeSongs([...byId.values()])
       // 普通列表剔除 SACD 5.1 环绕轨，保持与 refresh() 的过滤口径一致
       tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
     }

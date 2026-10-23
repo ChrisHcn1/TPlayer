@@ -61,6 +61,38 @@ pub(crate) fn ext_supported(path: &Path) -> bool {
         .is_some_and(|ext| SUPPORTED_EXT.contains(&ext.to_lowercase().as_str()))
 }
 
+/// 系统 / NAS 的回收站、缩略图与快照目录名（按小写比较）。
+///
+/// 这些目录里的音频是**已删除文件的副本**（群晖 `#recycle`、Windows
+/// `$RECYCLE.BIN`、macOS `.Trashes`、Synology 缩略图 `@eaDir` 等）。
+/// 若被扫入曲库，会与真实歌曲形成大量重复，且标签常与原件不同（去重键
+/// 折不掉），因此一律不纳入扫描。
+fn is_junk_dir_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "#recycle"
+        || n == "#snapshot"
+        || n == "@eadir"
+        || n == "$recycle.bin"
+        || n == "system volume information"
+        || n == "lost+found"
+        || n == ".trashes"
+        || n.starts_with(".trash") // .Trash / .Trash-1000 / .Trashes
+}
+
+/// 路径任一段命中垃圾目录名即视为垃圾路径。
+fn is_junk_path(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(s) => s.to_str().is_some_and(is_junk_dir_name),
+        _ => false,
+    })
+}
+
+/// 过滤掉落在垃圾目录内的条目（各 `discover_*` 返回前统一调用）。
+fn without_junk(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
+    files.retain(|p| !is_junk_path(p));
+    files
+}
+
 /// 递归发现目录下所有音频文件
 ///
 /// Linux：走平台适配版 [`super::scan_linux::discover_files_checked`]——
@@ -69,7 +101,7 @@ pub(crate) fn ext_supported(path: &Path) -> bool {
 /// 其它平台：原栈式遍历（Windows 盘符路径语义，行为不变）。
 #[cfg(target_os = "linux")]
 pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
-    super::scan_linux::discover_files_checked(root, SUPPORTED_EXT).files
+    without_junk(super::scan_linux::discover_files_checked(root, SUPPORTED_EXT).files)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -92,7 +124,7 @@ pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    files
+    without_junk(files)
 }
 
 /// 递归发现目录下所有 .cue 索引文件（扫描与拖拽导入通用，Release 同样启用）。
@@ -100,7 +132,7 @@ pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
 /// Linux：同样走平台适配版（字节级扩展名匹配 + 错误收集）。
 #[cfg(target_os = "linux")]
 pub(crate) fn discover_cue_files(root: &Path) -> Vec<PathBuf> {
-    super::scan_linux::discover_files_checked(root, &["cue"]).files
+    without_junk(super::scan_linux::discover_files_checked(root, &["cue"]).files)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -123,7 +155,7 @@ pub(crate) fn discover_cue_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    files
+    without_junk(files)
 }
 
 /// 递归发现目录下所有 .iso 文件（用于 SACD ISO 分轨；Release 也启用，不限 debug）。
@@ -133,7 +165,7 @@ pub(crate) fn discover_cue_files(root: &Path) -> Vec<PathBuf> {
 /// 非 SACD 镜像（系统盘 / 游戏 ISO）静默忽略。
 #[cfg(target_os = "linux")]
 fn discover_sacd_files(root: &Path) -> Vec<PathBuf> {
-    super::scan_linux::discover_files_checked(root, &["iso"]).files
+    without_junk(super::scan_linux::discover_files_checked(root, &["iso"]).files)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -156,7 +188,7 @@ fn discover_sacd_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    files
+    without_junk(files)
 }
 
 /// 生成稳定 ID（基于文件路径的 SHA-256 前 16 位 hex）
@@ -534,7 +566,9 @@ pub fn scan_directory(
     let mut removed_ids: Vec<String> = existing
         .iter()
         .filter(|(id, path, _)| {
-            !seen_ids.contains(id) && !std::path::Path::new(path).exists()
+            let p = std::path::Path::new(path);
+            // 文件确实消失，或落在回收站/快照等垃圾目录（此前误入库）→ 清出曲库
+            !seen_ids.contains(id) && (!p.exists() || is_junk_path(p))
         })
         .map(|(id, _, _)| id.clone())
         .collect();
@@ -721,7 +755,9 @@ pub fn scan_directory_fast(
     let mut removed_ids: Vec<String> = existing
         .iter()
         .filter(|(id, path, _)| {
-            !seen_ids.contains(id) && !std::path::Path::new(path).exists()
+            let p = std::path::Path::new(path);
+            // 文件确实消失，或落在回收站/快照等垃圾目录（此前误入库）→ 清出曲库
+            !seen_ids.contains(id) && (!p.exists() || is_junk_path(p))
         })
         .map(|(id, _, _)| id.clone())
         .collect();
@@ -1109,5 +1145,45 @@ mod tests {
         let mut audio = vec![PathBuf::from(r"G:\AITEMP\Westlife-Mandy.mp3")];
         retain_sacd_derived(&mut audio, &HashMap::new());
         assert_eq!(audio.len(), 1);
+    }
+
+    #[test]
+    fn junk_directories_are_excluded() {
+        // 普通目录不受影响
+        assert!(!is_junk_path(Path::new(r"E:\KwDownload\song\小苹果.mp3")));
+        assert!(!is_junk_path(Path::new(r"G:\AITEMP\Westlife-Mandy.mp3")));
+        // 名字里含 trash/recycle 但并非目录段的文件名不被误伤
+        assert!(!is_junk_path(Path::new(r"E:\KwDownload\Trash Metal - Song.mp3")));
+        // 各类系统 / NAS 垃圾目录
+        for p in [
+            r"Y:\#recycle\Music\小苹果 - 筷子兄弟.mp3",
+            r"Y:\#snapshot\Music\a.flac",
+            r"D:\@eaDir\a.mp3",
+            r"E:\$RECYCLE.BIN\a.mp3",
+            r"C:\System Volume Information\a.wav",
+            r"/mnt/.Trash-1000/a.flac",
+            r"/home/u/.Trashes/a.mp3",
+            r"/lost+found/a.iso",
+        ] {
+            assert!(is_junk_path(Path::new(p)), "{p} 应被判为垃圾路径");
+        }
+    }
+
+    #[test]
+    fn without_junk_retains_normal_paths() {
+        let files = vec![
+            PathBuf::from(r"E:\KwDownload\song\a.mp3"),
+            PathBuf::from(r"Y:\#recycle\Music\b.mp3"),
+            PathBuf::from(r"G:\AITEMP\c.flac"),
+            PathBuf::from(r"E:\$RECYCLE.BIN\d.wav"),
+        ];
+        let kept = without_junk(files);
+        assert_eq!(
+            kept.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+            vec![
+                r"E:\KwDownload\song\a.mp3".to_string(),
+                r"G:\AITEMP\c.flac".to_string()
+            ]
+        );
     }
 }
