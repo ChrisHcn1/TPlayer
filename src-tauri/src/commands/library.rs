@@ -412,15 +412,15 @@ fn read_disk_cache(cache_dir: &std::path::Path, cache_key: &str) -> Option<Strin
 }
 
 /// 写磁盘缓存（内嵌/边车/在线任一来源成功后都落盘，下次启动免解析免联网）
+///
+/// 缓存是纯优化：写失败（目录不可写 / 磁盘满）时静默返回，不影响本次取封面，
+/// 也不向控制台刷诊断输出。
 fn write_disk_cache(cache_dir: &std::path::Path, track_id: &str, mime: &str, data: &[u8]) {
-    if let Err(err) = std::fs::create_dir_all(cache_dir) {
-        eprintln!("[cover] 创建缓存目录失败: {err}");
+    if std::fs::create_dir_all(cache_dir).is_err() {
         return;
     }
     let path = cache_dir.join(format!("{}.{}", cache_stem(track_id), cover::ext_for_mime(mime)));
-    if let Err(err) = std::fs::write(&path, data) {
-        eprintln!("[cover] 写入缓存失败: {err}");
-    }
+    let _ = std::fs::write(&path, data);
 }
 
 ///
@@ -696,17 +696,14 @@ pub fn library_add_dir(state: State<'_, AppState>, path: String) -> AppResult<()
 /// 从曲库白名单移除目录
 #[tauri::command]
 pub fn library_remove_dir(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let removed = {
+    {
         let mut library = state.library.lock().unwrap();
-        library.remove_tracks_under_dir(&path)?
-    };
+        library.remove_tracks_under_dir(&path)?;
+    }
     {
         let mut config = state.config.lock().unwrap();
         config.library_dirs.retain(|p| p != &path);
         config.save(&state.config_path)?;
-    }
-    if removed > 0 {
-        eprintln!("[library] 移除曲库目录 {path}，删除 {removed} 条曲目");
     }
     Ok(())
 }

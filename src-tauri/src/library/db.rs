@@ -145,7 +145,6 @@ fn recover_from_backup_if_needed(db_path: &Path) {
         return;
     }
     let _ = std::fs::remove_file(run_marker_path(db_path));
-    eprintln!("[library] 上次未干净退出或库已损坏，已从备份恢复曲库（回退到最后一次好状态）");
 }
 
 /// 只读打开做一次 `quick_check`，判断库文件是否完好

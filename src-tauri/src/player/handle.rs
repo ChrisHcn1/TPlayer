@@ -440,12 +440,12 @@ impl PlayerHandle {
                 // 时长兜底：曲库中时长为 0（lofty 无法解析的旧数据）时用 ffprobe 探测，
                 // 否则进度条不推进、自动连播失效
                 if self.snapshot.duration_ms == 0 {
+                    // 探测失败（文件不可读 / 格式不支持）时保持 0：进度条按
+                    // 「未知时长」渲染，不影响播放本身
                     if let Some(secs) =
                         super::engine::probe_duration(std::path::Path::new(&track.file_path))
                     {
                         self.snapshot.duration_ms = (secs * 1000.0) as u64;
-                    } else {
-                        eprintln!("[play] ffprobe 时长探测失败: {}", track.file_path);
                     }
                 }
                 self.position_offset_ms = resume_ms;
@@ -591,10 +591,8 @@ impl PlayerHandle {
             tried.insert(current.id.clone());
             match self.play_once(&current, pending_ctx.take(), app, true, resume_memory) {
                 Ok(()) => {
-                    if skipped > 0 {
-                        eprintln!("[play] 已自动跳过 {skipped} 首无法播放的曲目");
-                    }
-                    // 成功：统一播报最终曲目
+                    // 成功：统一播报最终曲目（跳过计数仅供内部调试，不刷控制台）
+                    let _ = skipped;
                     emit(
                         app,
                         PlaybackEvent::Track {
@@ -1219,9 +1217,9 @@ impl PlayerHandle {
                 // 预加载是内部优化，无需在界面上提示「正在准备下一首」
                 self.preloaded_track_id = Some(next_id);
             }
-            Err(e) => {
-                // 预加载失败：切歌时走普通 play（play_or_skip 会处理跳过）
-                eprintln!("[preload] 预加载下一曲失败 {}: {}", track.file_path, e);
+            Err(_) => {
+                // 预加载失败：切歌时走普通 play（play_or_skip 会处理跳过）。
+                // 预加载是内部优化，失败不影响播放，静默即可
             }
         }
     }

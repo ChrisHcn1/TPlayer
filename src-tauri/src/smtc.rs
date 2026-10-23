@@ -49,17 +49,13 @@ pub fn init(app: AppHandle) {
 
         let player = match MediaPlayer::new() {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!("[smtc] MediaPlayer 创建失败：{:?}", e);
-                return;
-            }
+            // 创建失败（极少见：系统媒体服务不可用）时静默退出——
+            // SMTC 是可选集成，失败不影响播放，也不向控制台刷诊断输出
+            Err(_) => return,
         };
         let controls = match player.SystemMediaTransportControls() {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("[smtc] 获取 SystemMediaTransportControls 失败：{:?}", e);
-                return;
-            }
+            Err(_) => return,
         };
 
         let _ = controls.SetIsEnabled(true);
@@ -96,9 +92,8 @@ pub fn init(app: AppHandle) {
             }
             Ok(())
         });
-        if let Err(e) = controls.ButtonPressed(Some(&handler)) {
-            eprintln!("[smtc] 注册 ButtonPressed 失败：{:?}", e);
-        }
+        // 注册失败时媒体键不可用，静默降级（不影响应用内播放控制）
+        let _ = controls.ButtonPressed(Some(&handler));
 
         // 消息泵 + 指令处理：所有 WinRT 调用都在本 STA 线程
         let mut msg = MSG::default();

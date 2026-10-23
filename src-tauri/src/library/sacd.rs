@@ -246,12 +246,6 @@ impl SacdDisc {
         };
         let frames = payload_len / DSD64_FRAME_BYTES;
 
-        // 诊断日志（终端可见）：记录本轨导出的字节范围与 DSD 参数，便于排查"白噪/无法播放"问题。
-        eprintln!(
-            "SACD_EXPORT track={} start_byte={} end_byte={} payload_len={} frames={} dsd_sr={} deint=byteL+byteR,sector=2048/32hdr",
-            track_index, start_byte, end_byte, payload_len, frames, self.dsd_sample_rate
-        );
-
         let mut out = File::create(out_path)?;
         write_dsf_header(
             &mut out,
@@ -325,10 +319,6 @@ impl SacdDisc {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        eprintln!(
-            "SACD_EXTERNAL exe={:?} track={} multich={} iso={:?}",
-            exe, track_number, multich, self.iso_path
-        );
         let out = cmd.output()?;
         if !out.status.success() {
             let detail = String::from_utf8_lossy(&out.stderr);

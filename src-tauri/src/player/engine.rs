@@ -1434,14 +1434,6 @@ fn spawn_ffmpeg_decoder(
         None
     };
 
-    // 诊断日志（终端可见）：仅对 SACD(DSD) 记录实际解码命令与判定，便于排查白噪/无法播放。
-    if is_dsd {
-        eprintln!(
-            "SACD_DECODE ffmpeg={:?} codec_dsd={} ext_dsd={} src_ch={} out_ch={} out_rate={} filter={:?}",
-            ffmpeg, codec_dsd, ext_dsd, src_ch, out_ch, out_rate, audio_filter
-        );
-    }
-
     let mut cmd = crate::util::hidden_command(ffmpeg);
     if offset_ms > 0 {
         cmd.arg("-ss")

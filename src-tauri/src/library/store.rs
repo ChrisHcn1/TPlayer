@@ -1175,9 +1175,8 @@ fn migrate_legacy_json(conn: &mut Connection, legacy_json_path: &std::path::Path
     // 导入成功后备份旧文件（覆盖旧备份）
     let backup = legacy_json_path.with_extension("json.bak");
     let _ = std::fs::remove_file(&backup);
-    if let Err(e) = std::fs::rename(legacy_json_path, &backup) {
-        eprintln!("[library] 备份旧 library.json 失败: {e}");
-    }
+    // 备份失败不阻断启动：旧 library.json 保留在原地，后续仍可手动导入
+    let _ = std::fs::rename(legacy_json_path, &backup);
     Ok(())
 }
 

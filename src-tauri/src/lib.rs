@@ -167,7 +167,6 @@ pub fn run() {
                         .update_durations(&fixes)
                         .unwrap_or(0);
                     if updated > 0 {
-                        eprintln!("[library] 启动期校正 {updated} 条 SACD 分轨时长");
                         // 复用目录监控事件通知前端刷新曲库视图（时长列即时更新）
                         let _ = app_bg.emit(
                             "watcher://event",
@@ -509,17 +508,11 @@ fn migrate_legacy_app_data(current: &PathBuf) {
     if current.join("config.json").exists() {
         return;
     }
-    if let Err(e) = std::fs::create_dir_all(current) {
-        eprintln!("[migrate] 创建数据目录失败：{e}");
+    // 一次性迁移旧数据目录：失败不影响启动（用当前空配置继续），静默跳过
+    if std::fs::create_dir_all(current).is_err() {
         return;
     }
-    match copy_dir_all(&legacy, current) {
-        Ok(_) => eprintln!(
-            "[migrate] 已从 %APPDATA%\\TPlayer Next 迁移配置与曲库到新数据目录 {}",
-            current.display()
-        ),
-        Err(e) => eprintln!("[migrate] 迁移旧数据失败（不影响启动）：{e}"),
-    }
+    let _ = copy_dir_all(&legacy, current);
 }
 
 /// 递归拷贝目录（仅复制、不删除目标中已存在的其它文件）。
