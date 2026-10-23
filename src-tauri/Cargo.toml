@@ -77,6 +77,8 @@ windows = { version = "0.54", features = [
     "Foundation",
     "Media",
     "Media_Playback",
+    # Package::Current() 检测是否运行在 MSIX / Microsoft Store 容器内
+    "ApplicationModel",
     "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",

@@ -81,3 +81,9 @@ tauri-dev.err
 src-tauri/build*.log
 src-tauri/build*.err
 src-tauri/build*.txt
+
+# Microsoft Store 打包：机器相关覆盖配置（含证书指纹，不入库）
+src-tauri/tauri.store.override.json
+# MSIX/Store 打包产物（与 target 同级，按需保留）
+src-tauri/target/release/bundle/msix/
+src-tauri/target/release/bundle/msi/

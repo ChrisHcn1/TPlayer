@@ -56,12 +56,22 @@ pub struct AppState {
 /// lib 入口：构建 Tauri 应用并运行
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    builder = builder
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        // 应用自动升级（签名校验由 plugins.updater.pubkey 保证，配置见 tauri.conf.json）
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_fs::init());
+
+    // 应用自动升级（签名校验由 plugins.updater.pubkey 保证，配置见 tauri.conf.json）。
+    // 但经 Microsoft Store 分发的版本**不能**自带更新器（Store 政策要求更新只能走 Store），
+    // 否则审核会被拒。因此仅在「未打包进 MSIX / 非 Store 版」时注册更新器插件——
+    // 普通 NSIS 安装版保留 GitHub Releases 升级通道，Store 版由 Store 统一更新。
+    if !is_packaged_msix() {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder = builder.plugin(tauri_plugin_process::init());
+
+    builder
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -490,6 +500,23 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// 是否运行在 Microsoft Store / MSIX 打包容器中。
+///
+/// Store 版必须走 Store 更新、不能用自带更新器（否则审核被拒）；此函数据此决定是否注册
+/// updater 插件。原理：在非打包环境（普通 NSIS 安装、开发模式）下 `Package::Current()`
+/// 会返回错误，只有打包进 MSIX 时才成功，故用 `is_ok()` 区分。
+#[cfg(windows)]
+fn is_packaged_msix() -> bool {
+    use windows::ApplicationModel::Package;
+    // Package::Current() 失败（非打包）或取其 Id 失败（理论上不会）都视为非 Store 版
+    Package::Current().and_then(|p| p.Id()).is_ok()
+}
+
+#[cfg(not(windows))]
+fn is_packaged_msix() -> bool {
+    false
 }
 
 /// 一次性迁移旧版本（identifier = com.tplayer.next，数据目录 %APPDATA%\TPlayer Next）的数据到当前目录。
