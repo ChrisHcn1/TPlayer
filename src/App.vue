@@ -29,10 +29,12 @@ import { useTheme } from './composables/useTheme'
 import { useLayout } from './composables/useLayout'
 import { useCommandPalette } from './composables/useCommandPalette'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { listen } from '@tauri-apps/api/event'
 import { updateService } from './services/update'
 import { subscribeWatcher } from './services/watcher'
 import { useTrackCover } from './composables/useTrackCover'
 import { useCoverTheme } from './composables/useCoverTheme'
+import type { Track } from './types'
 import { isTauriRuntime, normalizeError } from './services/ipc'
 import {
   DEFAULT_SHORTCUTS,
@@ -77,6 +79,8 @@ const contentRef = ref<HTMLElement | null>(null)
 const isDragging = ref(false)
 /** 卸载时注销拖放监听 */
 let unlistenDrag: (() => void) | undefined
+/** 卸载时注销懒加载解析完成事件监听 */
+let unlistenResolved: (() => void) | undefined
 
 /**
  * 注册 Tauri 拖放事件：文件/目录拖入窗口时显示遮罩，松手后将真实路径交给曲库入库。
@@ -154,6 +158,7 @@ async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
 
 onUnmounted(() => {
   unlistenDrag?.()
+  unlistenResolved?.()
 })
 
 // 封面取色：跟随当前曲目封面维护全局强调色变量（播放条氛围光 / 放大层）
@@ -314,6 +319,20 @@ onMounted(async () => {
   subscribeWatcher(() => {
     void libraryStore.refresh()
   })
+
+  // 3.6) 两阶段懒加载：订阅后台补解析 / 播放时按需解析完成事件，
+  //      增量合并曲目元数据（不触发全量刷新，网络大目录 UI 即时响应）
+  listen<{ tracks: Track[] }>('library://tracks-resolved', (e) => {
+    if (Array.isArray(e.payload?.tracks) && e.payload.tracks.length > 0) {
+      libraryStore.applyResolvedTracks(e.payload.tracks)
+    }
+  })
+    .then((unsub) => {
+      unlistenResolved = unsub
+    })
+    .catch(() => {
+      unlistenResolved = undefined
+    })
 
   // 4) 静默检查更新：延迟 8s 不拖慢启动；仅发现新版本时提示，
   //    离线 / 更新通道尚未配置 / 浏览器预览等失败一律静默忽略

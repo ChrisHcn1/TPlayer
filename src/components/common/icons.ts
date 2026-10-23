@@ -111,6 +111,10 @@ export const ICONS: Record<string, string> = {
   'music-off': g('<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/><path d="m2 2 20 20"/>'),
   'cloud-offline': g('<path d="m2 2 20 20"/><path d="M17.5 19a4.5 4.5 0 0 0 .5-9 7 7 0 0 0-11.6-3.6"/>'),
   loader: g('<path d="M12 3a9 9 0 1 0 9 9"/>'),
+  // 睡眠/定时：秒表造型，与月亮（主题）区分开，避免播放条上两枚月亮语义混淆
+  timer: g(
+    '<circle cx="12" cy="13" r="8"/><path d="M12 9.5V13l2.5 1.8"/><path d="M9 2h6"/><path d="M12 2v3"/>',
+  ),
   'corner-down-left': g('<path d="m9 10-5 5 5 5"/><path d="M4 15h11a5 5 0 0 0 5-5V5"/>'),
 
   /* ---- M1 列表 / 排序 / 空态 / 歌单动作 ---- */

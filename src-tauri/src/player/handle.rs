@@ -1390,11 +1390,23 @@ pub fn spawn_progress_clock(
     app: AppHandle,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // 曲库「好状态」快照心跳：每 5 分钟尝试一次（db 内部按 5 分钟节流，
+        // 与扫描后的快照合并去重）。这样即便用户长时间不扫描、只改收藏/歌单/
+        // 最近播放，异常退出后的回退点也最多落后 5 分钟。
+        let mut last_snapshot = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
             {
                 if let Ok(mut h) = handle.lock() {
                     h.tick(&app);
+                }
+            }
+            if last_snapshot.elapsed() >= std::time::Duration::from_secs(300) {
+                last_snapshot = std::time::Instant::now();
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    if let Ok(library) = state.library.lock() {
+                        library.commit_good_snapshot();
+                    }
                 }
             }
             // 应用退出时进程终止，线程随之结束

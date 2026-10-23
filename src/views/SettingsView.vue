@@ -239,6 +239,16 @@ async function scanNow(): Promise<void> {
   }
 }
 
+/**
+ * 取消当前扫描：后端置位取消标志，快扫占位循环与后台补解析随即停止。
+ * 已写入的批次保留，剩余文件保持占位，下次扫描或播放时再解析——
+ * 网络共享 / 海量小文件场景下用户可主动中止，不必等待自然结束。
+ */
+async function cancelScanNow(): Promise<void> {
+  await libraryStore.cancelScan()
+  toastStore.info('已请求取消扫描（已入库部分保留）')
+}
+
 async function clearLyricsCache(): Promise<void> {
   await lyricsService.clearCache()
   toastStore.success('歌词缓存已清除')
@@ -475,6 +485,16 @@ async function resetSettings(): Promise<void> {
             <BaseButton variant="subtle" size="sm" :disabled="scanning" @click="scanNow">
               <Icon name="refresh" :size="15" />
               {{ scanning ? '扫描中…' : '立即扫描' }}
+            </BaseButton>
+            <BaseButton
+              v-if="scanning"
+              variant="subtle"
+              size="sm"
+              title="停止扫描（已入库部分保留）"
+              @click="cancelScanNow"
+            >
+              <Icon name="close" :size="15" />
+              取消扫描
             </BaseButton>
           </div>
         </section>

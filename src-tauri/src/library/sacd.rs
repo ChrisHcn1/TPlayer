@@ -34,8 +34,6 @@ const SACD_SECTOR_SIZE: u64 = 2048;
 /// Sony ScarletBooks ISO 每扇区块头长度（v9 实测确认：2048 字节扇区 = 32 字节块头 + 2016 字节 DSD 数据）。
 /// 不剥离这些块头会把 32 字节垃圾混入 DSD 位流 → 宽带白噪。
 const SACD_SECTOR_HEADER: u64 = 32;
-/// 每扇区有效 DSD 数据字节数（2048 − 32）
-const SACD_SECTOR_DATA: u64 = SACD_SECTOR_SIZE - SACD_SECTOR_HEADER;
 /// DSF 文件头字节数（DSD chunk 28 + fmt chunk 52 + data chunk 头 12）。
 pub(crate) const DSF_HEADER_BYTES: u64 = 92;
 /// SACD 导出缓存目录版本：导出/校验逻辑变更时递增，整体失效旧缓存，
@@ -483,6 +481,8 @@ impl SacdDisc {
                 sacd_track_index: i as u32,
                 sacd_area: Some(SacdArea::Stereo2ch),
                 sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
+                metadata_pending: false,
+                iso_placeholder: false,
             });
         }
 
@@ -531,6 +531,8 @@ impl SacdDisc {
                 sacd_track_index: (n + i) as u32,
                 sacd_area: Some(SacdArea::MultiCh),
                 sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
+                metadata_pending: false,
+                iso_placeholder: false,
             });
         }
         tracks

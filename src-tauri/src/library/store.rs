@@ -44,6 +44,8 @@ pub struct LegacyStats {
 /// 曲库存储：命令层通过它查询与修改用户数据
 pub struct LibraryStore {
     conn: Connection,
+    /// 数据库文件路径（崩溃回退的快照 / 运行标记都以它为基准）
+    db_path: PathBuf,
 }
 
 /// SQL 表达式：`file_path` 的目录部分（统一 '/' 分隔符）
@@ -118,7 +120,22 @@ impl LibraryStore {
             db::set_meta(&conn, "schema_version", &db::SCHEMA_VERSION.to_string())?;
         }
         // 预留：后续版本在此比对 schema_version 执行增量迁移
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            db_path,
+        })
+    }
+
+    /// 把当前库写成「好状态」快照（崩溃回退的还原点）。
+    ///
+    /// 扫描成功提交后调用；内部 5 分钟节流，频繁扫描不会反复全库拷贝。
+    pub fn commit_good_snapshot(&self) {
+        db::commit_good(&self.conn, &self.db_path);
+    }
+
+    /// 干净退出：清除运行标记，下次启动不做崩溃回退。
+    pub fn mark_clean_shutdown(&self) {
+        db::mark_clean(&self.db_path);
     }
 
     // ---- 曲目查询 ----
@@ -158,6 +175,15 @@ impl LibraryStore {
         self.conn
             .query_row("SELECT * FROM tracks WHERE id = ?1", [id], row_to_track)
             .ok()
+    }
+
+    /// 两阶段懒加载：返回所有尚未解析元数据的占位轨道（metadata_pending = 1）。
+    /// 供后台补解析（backfill）与「播放时按需解析」流程使用。
+    pub fn pending_tracks(&self) -> Vec<Track> {
+        let sql = "SELECT * FROM tracks WHERE metadata_pending = 1 ORDER BY added_at, id";
+        let mut stmt = self.conn.prepare(sql).expect("prepare pending_tracks");
+        let rows = stmt.query_map([], row_to_track).expect("query pending_tracks");
+        rows.flatten().collect()
     }
 
     /// 更新单曲 ReplayGain 增益（后台分析完成后写回；None 表示无数据则置空）
@@ -903,6 +929,14 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
             .get::<_, Option<String>>("sacd_area")?
             .and_then(|s| serde_json::from_str(&s).ok()),
         sacd_dsd_rate: row.get::<_, Option<String>>("sacd_dsd_rate")?,
+        metadata_pending: row
+            .get::<_, Option<i64>>("metadata_pending")?
+            .unwrap_or(0)
+            != 0,
+        iso_placeholder: row
+            .get::<_, Option<i64>>("iso_placeholder")?
+            .unwrap_or(0)
+            != 0,
     })
 }
 
@@ -918,8 +952,9 @@ fn upsert_track(
             id, title, album, album_id, duration, track_number, year,
             file_path, file_size, format, bitrate, sample_rate,
             has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json,
-            is_cue, cue_offset, is_sacd, sacd_track_index, sacd_area, sacd_dsd_rate
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+            is_cue, cue_offset, is_sacd, sacd_track_index, sacd_area, sacd_dsd_rate,
+            metadata_pending, iso_placeholder
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
         ON CONFLICT(id) DO UPDATE SET
             title       = excluded.title,
             album       = excluded.album,
@@ -942,7 +977,9 @@ fn upsert_track(
             is_sacd     = excluded.is_sacd,
             sacd_track_index = excluded.sacd_track_index,
             sacd_area   = excluded.sacd_area,
-            sacd_dsd_rate = excluded.sacd_dsd_rate
+            sacd_dsd_rate = excluded.sacd_dsd_rate,
+            metadata_pending = excluded.metadata_pending,
+            iso_placeholder   = excluded.iso_placeholder
         "#,
         params![
             track.id,
@@ -969,6 +1006,8 @@ fn upsert_track(
             track.sacd_track_index as i64,
             track.sacd_area.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default()),
             track.sacd_dsd_rate,
+            track.metadata_pending as i64,
+            track.iso_placeholder as i64,
         ],
     )
     .map_err(|e| AppError::Library(format!("写入曲目失败: {e}")))?;
@@ -1111,7 +1150,10 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         db::init_schema(&conn).expect("init schema");
         db::migrate(&conn).expect("migrate schema");
-        LibraryStore { conn }
+        LibraryStore {
+            conn,
+            db_path: std::env::temp_dir().join("tplayer-test-inmemory.db"),
+        }
     }
 
     /// 插入一条曲目（仅测试所需字段）

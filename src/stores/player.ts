@@ -15,6 +15,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import { createIdleSnapshot, playerService } from '../services/player'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
+import { useLibraryStore } from './library'
 import type {
   PlayContext,
   PlayMode,
@@ -195,6 +196,18 @@ export const usePlayerStore = defineStore('player', () => {
   /** 播放单曲；context 缺省时后端按"曲库全量"作为上下文 */
   async function play(trackId: string, context?: PlayContext): Promise<void> {
     await execute(async () => {
+      // 两阶段懒加载 - 阶段二：播放占位轨道前先按需解析元数据 / 封面 / CUE / SACD。
+      // 前端先以文件名渲染列表（占位 title 即文件名），点击播放时才触发补解析，
+      // 解析期间列表已可交互，不阻塞 UI。
+      const libraryStore = useLibraryStore()
+      const track = libraryStore.getTrack(trackId)
+      if (track?.metadataPending) {
+        const resolved = await libraryStore.resolveTrack(trackId)
+        if (resolved.length > 0) {
+          // CUE / SACD 场景占位已替换为分轨：播放返回列表第一首（与整碟镜像同一物理文件）
+          trackId = resolved[0].id
+        }
+      }
       if (context) currentContext.value = context
       // 切歌时同步重置进度，避免旧曲目进度残留到新曲目 Loading 窗口期
       snapshot.value = {

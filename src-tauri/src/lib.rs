@@ -37,6 +37,8 @@ pub struct AppState {
     pub library: Mutex<LibraryStore>,
     /// 应用配置
     pub config: Mutex<AppConfig>,
+    /// 扫描取消标志：`library_cancel_scan` 置位，快扫与后台补解析循环据此中止
+    pub scan_cancel: Arc<AtomicBool>,
     /// 配置文件路径
     pub config_path: PathBuf,
     /// 曲库数据文件路径
@@ -115,6 +117,7 @@ pub fn run() {
                 player: player_handle.clone(),
                 library: Mutex::new(library),
                 config: Mutex::new(config),
+                scan_cancel: Arc::new(AtomicBool::new(false)),
                 config_path,
                 library_path,
                 lyrics_offsets_path,
@@ -446,6 +449,7 @@ pub fn run() {
             commands::library::library_add_dir,
             commands::library::library_remove_dir,
             commands::library::library_import_files,
+            commands::library::library_resolve_track,
             commands::library::library_track_info,
             commands::library::library_list_playlists,
             commands::library::library_create_playlist,
@@ -478,6 +482,11 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(mut player) = state.player.lock() {
                         player.save_state();
+                    }
+                    // 干净退出：清除曲库「运行中」标记，下次启动不做崩溃回退。
+                    // 崩溃 / 强杀 / 卡死走不到这里，下次启动会按最后一次好状态还原。
+                    if let Ok(library) = state.library.lock() {
+                        library.mark_clean_shutdown();
                     }
                 }
             }

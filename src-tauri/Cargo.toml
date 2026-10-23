@@ -80,4 +80,8 @@ windows = { version = "0.54", features = [
     "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    # GetDriveTypeW：识别映射的网络盘符（后台补解析需跳过网络 IO）
+    "Win32_Storage_FileSystem",
+    # 注：ICoreWebView2* 接口由 wry 的 webview2-com 依赖链提供（见 wry 直接依赖），
+    # 不在 windows crate 的 feature 体系中，此处不启用任何 Win32_Web_WebView2 feature。
 ] }

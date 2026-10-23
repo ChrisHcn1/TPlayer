@@ -24,7 +24,6 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import { useTheme } from '../../composables/useTheme'
 import { useCommandPalette } from '../../composables/useCommandPalette'
 import { router } from '../../router'
 import { resolveNavLabel } from '../../i18n/nav'
@@ -33,16 +32,10 @@ import { windowService } from '../../services/window'
 import SearchBox from '../common/SearchBox.vue'
 import Icon from '../common/Icon.vue'
 
-const { theme, toggleTheme } = useTheme()
 const { open: openCommandPalette } = useCommandPalette()
 
 /** 窗口控制是否渲染：非 Tauri 环境（浏览器调试）不渲染，避免出现无响应按钮（§4.3） */
 const hasWindowControls = computed(() => isTauriRuntime())
-
-/** 主题按钮文案：显示"将要切换到的主题"，与 SideBar 底部主题按钮同源同文案 */
-const themeActionLabel = computed(() =>
-  resolveNavLabel(theme.value === 'dark' ? 'nav.theme-to-light' : 'nav.theme-to-dark'),
-)
 
 function handleSearchQuery(query: string) {
   const keyword = query.trim()
@@ -100,18 +93,9 @@ function handleDragDoubleClick(event: MouseEvent) {
       <span class="title-bar__shortcut" aria-hidden="true">Ctrl K</span>
     </div>
 
-    <!-- 右：主题切换 + 设置 + 窗口控制（可交互区域，需排除窗口拖拽） -->
+    <!-- 右：设置 + 窗口控制（可交互区域，需排除窗口拖拽）。
+         主题切换已并入播放条月亮图标统一入口（月亮图标合并），此处不再重复展示。 -->
     <div class="title-bar__right u-no-drag">
-      <button
-        type="button"
-        class="title-bar__btn"
-        :aria-label="themeActionLabel"
-        :title="themeActionLabel"
-        @click="toggleTheme"
-      >
-        <Icon :name="theme === 'dark' ? 'sun' : 'moon'" :size="16" />
-      </button>
-
       <RouterLink class="title-bar__btn" to="/settings" :aria-label="resolveNavLabel('nav.settings')" :title="resolveNavLabel('nav.settings')">
         <Icon name="settings" :size="16" />
       </RouterLink>

@@ -24,7 +24,6 @@ import { computed } from 'vue'
 import { RouterLink, useRoute, type RouteMeta } from 'vue-router'
 
 import { router } from '../../router'
-import { useTheme } from '../../composables/useTheme'
 import { useLayout } from '../../composables/useLayout'
 import { NAV_GROUPS, resolveGroupLabel, resolveNavLabel } from '../../i18n/nav'
 import Icon from '../common/Icon.vue'
@@ -79,7 +78,6 @@ const bottomItems = computed(
 )
 
 const route = useRoute()
-const { theme, toggleTheme } = useTheme()
 // 折叠状态与切换方法均来自布局外壳（§2.3 折叠三原则 1）：本组件不持有折叠标志
 const { isSidebarCollapsed, toggleSidebar } = useLayout()
 
@@ -87,12 +85,6 @@ const { isSidebarCollapsed, toggleSidebar } = useLayout()
 function isCurrent(name: string): boolean {
   return route.name === name || metaString(route.meta, 'parent') === name
 }
-
-/** 主题切换按钮显示"将要切换到的主题"（§4.2 底部固定组；文案与状态均来自 useTheme 单一事实源） */
-const themeActionLabel = computed(() =>
-  resolveNavLabel(theme.value === 'dark' ? 'nav.theme-to-light' : 'nav.theme-to-dark'),
-)
-const themeActionText = computed(() => `${resolveNavLabel('nav.theme')}：${themeActionLabel.value}`)
 
 /**
  * 折叠把手文案（§2.3 折叠三原则 1：状态由外壳统一持有）
@@ -151,8 +143,9 @@ const collapseHint = computed(() =>
     </div>
 
     <!--
-      底部固定组（§1.1 第 9 项 + §4.2）：设置项来自路由 nav=bottom，
-      另加主题切换与折叠按钮；折叠按钮固定在底部，与设置同级（§2.3 折叠三原则 1）
+      底部固定组（§1.1 第 9 项 + §4.2）：设置项来自路由 nav=bottom，另加折叠按钮；
+      折叠按钮固定在底部，与设置同级（§2.3 折叠三原则 1）。
+      主题切换按钮已移除：并入播放条月亮图标统一入口（月亮图标合并）。
     -->
     <div class="sidebar__footer">
       <RouterLink
@@ -166,17 +159,6 @@ const collapseHint = computed(() =>
         <Icon class="sidebar__icon" :name="item.icon" :size="20" />
         <span class="sidebar__label">{{ item.label }}</span>
       </RouterLink>
-
-      <button
-        type="button"
-        class="sidebar__item"
-        :aria-label="themeActionText"
-        :title="themeActionText"
-        @click="toggleTheme"
-      >
-        <Icon class="sidebar__icon" :name="theme === 'dark' ? 'sun' : 'moon'" :size="20" />
-        <span class="sidebar__label">{{ themeActionLabel }}</span>
-      </button>
     </div>
   </nav>
 </template>

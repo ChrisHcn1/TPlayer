@@ -52,6 +52,8 @@ export interface LibraryService {
   importFiles(paths: string[]): Promise<string[]>
   /** 获取指定曲目的完整元数据（含技术参数、内嵌歌词、封面 data URL）；曲目不存在返回 null */
   trackInfo(trackId: string): Promise<TrackInfo | null>
+  /** 两阶段懒加载：播放前按需解析占位轨道（元数据 / 封面 / CUE 分轨 / SACD 分轨），返回解析后的曲目列表 */
+  resolveTrack(trackId: string): Promise<Track[]>
   addLibraryDir(path: string): Promise<void>
   removeLibraryDir(path: string): Promise<void>
   listPlaylists(): Promise<Playlist[]>
@@ -86,6 +88,7 @@ const tauriLibrary: LibraryService = {
   removeTracks: (ids) => callCommand('library_remove_tracks', { ids }),
   importFiles: (paths) => callCommand<string[]>('library_import_files', { paths }),
   trackInfo: (trackId) => callCommand<TrackInfo | null>('library_track_info', { trackId }),
+  resolveTrack: (trackId) => callCommand<Track[]>('library_resolve_track', { trackId }),
   addLibraryDir: (path) => callCommand('library_add_dir', { path }),
   removeLibraryDir: (path) => callCommand('library_remove_dir', { path }),
   listPlaylists: () => callCommand<Playlist[]>('library_list_playlists'),

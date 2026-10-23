@@ -308,6 +308,8 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
         sacd_track_index: 0,
         sacd_area: None,
         sacd_dsd_rate: None,
+        metadata_pending: false,
+        iso_placeholder: false,
     })
 }
 
@@ -548,6 +550,186 @@ pub fn scan_directory(
     {
         progress.error = super::scan_linux::scan_error_summary(&dir_errors);
     }
+
+    progress.stage = ScanStage::Done;
+    progress.current_path = None;
+    emit(app, &progress);
+
+    ScanResult {
+        upserts,
+        removed_ids,
+        changed_count,
+    }
+}
+
+/// 构造轻量占位轨道（v6 两阶段懒加载）：仅写入文件名 / 路径 / 大小等轻量信息，
+/// 元数据、封面、CUE / SACD 分轨全部留待播放或后台异步补解析。
+///
+/// `is_iso` 为 true 时生成 SACD ISO 占位（`iso_placeholder=true`）：真实 ISO 尚未
+/// 解析成虚拟分轨，占位条目保证网络大目录下 SACD 内容可见、可触发解析。
+pub(crate) fn placeholder_track(path: &Path, is_iso: bool) -> Option<Track> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let file_size = metadata.len();
+    let format = if is_iso {
+        "iso".to_string()
+    } else {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default()
+    };
+    let title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "未知标题".to_string());
+
+    Some(Track {
+        id: track_id_from_path(path),
+        title,
+        artists: vec!["未知艺术家".to_string()],
+        album: "未知专辑".to_string(),
+        album_id: Some(super::models::album_id_of("未知专辑", "未知艺术家")),
+        duration: 0.0,
+        track_number: None,
+        year: None,
+        file_path: path.to_string_lossy().to_string(),
+        file_size,
+        format,
+        bitrate: None,
+        sample_rate: None,
+        has_cover: false,
+        replaygain_db: None,
+        replaygain_peak: None,
+        added_at: chrono::Utc::now().timestamp(),
+        modified_at,
+        is_cue: false,
+        cue_offset: None,
+        is_sacd: false,
+        sacd_track_index: 0,
+        sacd_area: None,
+        sacd_dsd_rate: None,
+        metadata_pending: true,
+        iso_placeholder: is_iso,
+    })
+}
+
+/// 两阶段懒加载 - 阶段一「前期快速加载」。
+///
+/// 与 `scan_directory` 的区别：
+///  - 逐文件**不做** `parse_track` 元数据解析（lofty / ffprobe 全部跳过）；
+///  - **不解析** CUE 分轨与 SACD ISO（sacd_extract），ISO 只生成占位条目；
+///  - 不读取封面 / 缩略图；
+///  - 只做目录遍历 + 文件名 / 路径 / 大小等轻量信息入库（占位轨道，
+///    `metadata_pending=true`），因此网络共享大目录（如 \\172.18.0.21\sound）
+///    加载耗时仅取决于目录遍历本身，UI 即时可渲染。
+///
+/// 阶段二（补解析）见 `commands/library.rs` 的 `library_resolve_track` 与后台
+/// `spawn_lazy_backfill`：播放某曲目时或空闲后台线程按需补做元数据 / 封面 /
+/// CUE 分轨 / SACD 解析，完成后再 apply_scan 覆盖占位轨道并推送增量事件。
+///
+/// 增量语义与完整扫描一致：mtime 未变且库内已有完整轨道（非 pending）的文件
+/// 不再生成占位，避免把已解析元数据覆盖回占位；磁盘上确已不存在的曲目移除。
+pub fn scan_directory_fast(
+    roots: &[PathBuf],
+    existing: &[(String, String, i64)],
+    app: &AppHandle,
+) -> ScanResult {
+    let mut progress = ScanProgress {
+        stage: ScanStage::Discovering,
+        processed: 0,
+        total: 0,
+        current_path: None,
+        error: None,
+    };
+    emit(app, &progress);
+
+    // 基线索引：path → (id, mtime)；用于「已有完整轨道不降级为占位」
+    let existing_by_path: std::collections::HashMap<String, (String, i64)> = existing
+        .iter()
+        .map(|(id, path, mtime)| (path.clone(), (id.clone(), *mtime)))
+        .collect();
+
+    // 发现阶段：仅遍历目录，不解析任何元数据
+    let mut all_audio = Vec::new();
+    let mut iso_files = Vec::new();
+    for root in roots {
+        #[cfg(target_os = "linux")]
+        {
+            all_audio.extend(super::scan_linux::discover_files_checked(root, SUPPORTED_EXT).files);
+            iso_files.extend(super::scan_linux::discover_files_checked(root, &["iso"]).files);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            all_audio.extend(discover_audio_files(root));
+            iso_files.extend(discover_sacd_files(root));
+        }
+    }
+
+    progress.total = (all_audio.len() + iso_files.len()) as u32;
+    progress.stage = ScanStage::Parsing;
+    emit(app, &progress);
+
+    // 轻量入库阶段：只生成占位轨道，不触碰元数据 / CUE / SACD 解析
+    let mut upserts = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(all_audio.len() + iso_files.len());
+    for (i, path) in all_audio.iter().enumerate() {
+        let path_str = path.to_string_lossy().to_string();
+        seen_ids.insert(track_id_from_path(path));
+
+        let mtime = file_mtime(path);
+        // 已有完整轨道（mtime 未变）不降级为占位；仅新增 / 变更文件生成占位
+        let keep_existing = existing_by_path
+            .get(&path_str)
+            .is_some_and(|(_, old_mtime)| *old_mtime == mtime && mtime != 0);
+        if !keep_existing {
+            if let Some(track) = placeholder_track(path, false) {
+                upserts.push(track);
+            }
+        }
+
+        progress.processed = (i + 1) as u32;
+        if i % 50 == 0 {
+            emit(app, &progress);
+        }
+    }
+
+    // SACD ISO：不解析，生成占位条目（同一 ISO 已在库中（占位或分轨）则跳过）
+    for (i, iso) in iso_files.iter().enumerate() {
+        let iso_str = iso.to_string_lossy().to_string();
+        seen_ids.insert(track_id_from_path(iso));
+        if !existing_by_path.contains_key(&iso_str) {
+            if let Some(track) = placeholder_track(iso, true) {
+                upserts.push(track);
+            }
+        }
+        progress.processed = (all_audio.len() + i + 1) as u32;
+        if i % 50 == 0 {
+            emit(app, &progress);
+        }
+    }
+
+    // 删除检测：与完整扫描同策略——仅当文件在磁盘上确已不存在时才删除
+    // （虚拟分轨与占位的 file_path 指向镜像 / ISO，磁盘仍在故不会误删）
+    let mut removed_ids: Vec<String> = existing
+        .iter()
+        .filter(|(id, path, _)| {
+            !seen_ids.contains(id) && !std::path::Path::new(path).exists()
+        })
+        .map(|(id, _, _)| id.clone())
+        .collect();
+    removed_ids.sort();
+
+    let changed_count = upserts.len();
+    progress.stage = ScanStage::Writing;
+    emit(app, &progress);
 
     progress.stage = ScanStage::Done;
     progress.current_path = None;

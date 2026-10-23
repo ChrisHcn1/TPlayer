@@ -232,6 +232,8 @@ pub fn parse_cue(cue_path: &Path) -> Vec<Track> {
             sacd_track_index: 0,
             sacd_area: None,
             sacd_dsd_rate: None,
+            metadata_pending: false,
+            iso_placeholder: false,
         });
     }
     tracks

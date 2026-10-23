@@ -252,6 +252,64 @@ export const useLibraryStore = defineStore('library', () => {
     scanProgress.value = progress
   }
 
+  /**
+   * 两阶段懒加载 - 增量更新：把后台补解析 / 播放时按需解析完成的新曲目
+   * 合并进曲库视图（按 id 替换，不触发全量刷新），并同步刷新专辑聚合视图。
+   * removedIds 用于替换场景：占位条目被后端删除（CUE 分轨 / SACD 虚拟分轨入库）时，
+   * 前端同步移除旧占位，避免幽灵条目。
+   */
+  function applyResolvedTracks(updated: Track[], removedIds: string[] = []): void {
+    const removed = new Set(removedIds)
+    if (removed.size > 0) {
+      allTracks.value = allTracks.value.filter((track) => !removed.has(track.id))
+      tracks.value = tracks.value.filter((track) => !removed.has(track.id))
+    }
+    if (updated.length > 0) {
+      const byId = new Map(allTracks.value.map((track) => [track.id, track]))
+      for (const track of updated) byId.set(track.id, track)
+      allTracks.value = [...byId.values()]
+      // 普通列表剔除 SACD 5.1 环绕轨，保持与 refresh() 的过滤口径一致
+      tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
+    }
+    void refreshAggregates()
+  }
+
+  /** 播放前解析占位轨道（两阶段懒加载 - 阶段二按需解析）；返回解析后的曲目列表 */
+  async function resolveTrack(trackId: string): Promise<Track[]> {
+    try {
+      const resolved = await libraryService.resolveTrack(trackId)
+      if (resolved.length > 0) {
+        // CUE / SACD 场景占位 id 已被后端替换为分轨 id：原占位不再存在于返回列表
+        const replaced = resolved.every((track) => track.id !== trackId)
+        applyResolvedTracks(resolved, replaced ? [trackId] : [])
+      }
+      return resolved
+    } catch (cause) {
+      error.value = normalizeError(cause).message
+      return []
+    }
+  }
+
+  /** 轻量刷新专辑/艺术家/统计聚合（懒加载增量更新后调用，避免全量重拉曲目） */
+  async function refreshAggregates(): Promise<void> {
+    try {
+      const [albumList, cueList, sacdList, artistList, libraryStats] = await Promise.all([
+        libraryService.albums(),
+        libraryService.cueAlbums(),
+        libraryService.sacdAlbums(),
+        libraryService.artists(),
+        libraryService.stats(),
+      ])
+      albums.value = albumList
+      cueAlbums.value = cueList
+      sacdAlbums.value = sacdList
+      artists.value = artistList
+      stats.value = libraryStats
+    } catch (cause) {
+      error.value = normalizeError(cause).message
+    }
+  }
+
   function setKeyword(value: string): void {
     keyword.value = value
   }
@@ -356,6 +414,9 @@ export const useLibraryStore = defineStore('library', () => {
     importDropped,
     cancelScan,
     applyScanProgress,
+    applyResolvedTracks,
+    resolveTrack,
+    refreshAggregates,
     setKeyword,
     toggleFavorite,
     recordPlayed,

@@ -49,6 +49,10 @@ export interface Track {
   sacdArea?: 'Stereo2ch' | 'MultiCh'
   /** 原始 DSD 采样率（DSD64=2822400） */
   sacdDsdRate?: number
+  /** 两阶段懒加载：元数据尚未解析（占位条目，仅文件名/路径/大小已入库） */
+  metadataPending?: boolean
+  /** 两阶段懒加载：SACD ISO 占位条目（尚未解析出虚拟分轨） */
+  isoPlaceholder?: boolean
 }
 
 /** 专辑（聚合视图，不落盘为独立实体） */

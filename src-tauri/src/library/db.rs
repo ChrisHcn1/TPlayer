@@ -6,21 +6,49 @@
 //! - meta 表保存 schema 版本与 last_scan_at 等标量；
 //! - 所有 Connection 方法只需要 &self，LibraryStore 由外层 Mutex 串行化即可。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本（变更表结构时递增并写迁移分支）
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
-/// 打开（必要时创建）曲库数据库并完成 PRAGMA / 建表
+/// 「好状态」备份文件：`library.db` → `library.db.bak`
+fn backup_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("db.bak")
+}
+
+/// 运行标记文件：`library.db` → `library.db.run`。
+/// 启动时写入、干净退出时删除；下次启动若仍存在，说明上次是崩溃 / 强杀 /
+/// 卡死未走正常退出流程，此时回退到最后一次好状态。
+fn run_marker_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("db.run")
+}
+
+/// 备份节流：避免每次扫描都做一次全库快照
+fn last_backup_slot() -> &'static Mutex<Option<Instant>> {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// 打开（必要时创建）曲库数据库并完成 PRAGMA / 建表。
+///
+/// 崩溃回退：打开前先检查上一次是否干净退出——
+///  - 运行标记仍在（上次崩溃 / 强杀 / 卡死），或
+///  - 库文件已损坏（`PRAGMA quick_check` 非 ok）
+/// 满足任一条件且存在 `.bak` 快照时，先把库还原成最后一次好状态再打开，
+/// 即「下次加载退回到最后一次正常状态」。无快照时保持原样尽力打开。
 pub fn open(db_path: &Path) -> AppResult<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| AppError::Library(format!("创建数据目录失败: {}", e)))?;
     }
+
+    recover_from_backup_if_needed(db_path);
 
     let conn = Connection::open(db_path)
         .map_err(|e| AppError::Library(format!("打开曲库数据库失败: {}", e)))?;
@@ -38,7 +66,97 @@ pub fn open(db_path: &Path) -> AppResult<Connection> {
     init_schema(&conn)?;
     migrate(&conn)?;
     migrate_data(&conn)?;
+
+    // 本次运行标记（干净退出时由 mark_clean 清除）
+    let _ = std::fs::write(run_marker_path(db_path), b"running");
     Ok(conn)
+}
+
+/// 干净退出：清除运行标记，下次启动不做回退。
+pub fn mark_clean(db_path: &Path) {
+    let _ = std::fs::remove_file(run_marker_path(db_path));
+}
+
+/// 把当前库写成「好状态」快照（`VACUUM INTO` 生成一致且紧凑的副本）。
+///
+/// 节流：5 分钟内不重复备份；调用方在扫描成功提交后调用。
+/// 先写临时文件再原子改名，避免强杀时留下半个快照。
+pub fn commit_good(conn: &Connection, db_path: &Path) {
+    {
+        let mut last = last_backup_slot().lock().unwrap();
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(300) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    write_backup(conn, db_path);
+}
+
+/// 立即写一次「好状态」快照（无节流；测试与需要强制刷新的场景使用）。
+pub(crate) fn write_backup(conn: &Connection, db_path: &Path) {
+    let bak = backup_path(db_path);
+    let tmp = db_path.with_extension("db.bak.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let ok = conn
+        .execute("VACUUM INTO ?1", [tmp.to_string_lossy().to_string()])
+        .is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, &bak).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// 需要回退时从 `.bak` 还原（删除 db 与其 WAL/SHM 后原子替换）。
+fn recover_from_backup_if_needed(db_path: &Path) {
+    if !db_path.exists() {
+        return;
+    }
+    let bak = backup_path(db_path);
+    if !bak.exists() {
+        // 没有好状态可回退；清掉过期运行标记，后续按新库/损坏库尽力打开
+        let _ = std::fs::remove_file(run_marker_path(db_path));
+        return;
+    }
+
+    let unclean_exit = run_marker_path(db_path).exists();
+    let corrupt = !db_is_healthy(db_path);
+    if !unclean_exit && !corrupt {
+        return;
+    }
+
+    let tmp = db_path.with_extension("db.restore");
+    let _ = std::fs::remove_file(&tmp);
+    if std::fs::copy(&bak, &tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // 主库与 WAL/SHM 必须一起清掉，否则陈旧 WAL 会污染还原后的库
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let stale = PathBuf::from(format!("{}{}", db_path.display(), suffix));
+        let _ = std::fs::remove_file(&stale);
+    }
+    if std::fs::rename(&tmp, db_path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let _ = std::fs::remove_file(run_marker_path(db_path));
+    eprintln!("[library] 上次未干净退出或库已损坏，已从备份恢复曲库（回退到最后一次好状态）");
+}
+
+/// 只读打开做一次 `quick_check`，判断库文件是否完好
+fn db_is_healthy(db_path: &Path) -> bool {
+    match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(conn) => conn
+            .query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0))
+            .map(|s| s.eq_ignore_ascii_case("ok"))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// 一次性数据迁移（区别于结构迁移 migrate）。
@@ -146,6 +264,21 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
         conn.execute_batch("ALTER TABLE tracks ADD COLUMN sacd_dsd_rate TEXT")
             .map_err(|e| AppError::Library(format!("迁移 schema v4 失败（sacd_dsd_rate）: {e}")))?;
     }
+    // —— v6：两阶段懒加载标记（轻量占位轨道 = 尚未解析元数据）——
+    if !has_column("metadata_pending") {
+        conn.execute_batch(
+            "ALTER TABLE tracks ADD COLUMN metadata_pending INTEGER NOT NULL DEFAULT 0",
+        )
+        .map_err(|e| AppError::Library(format!("迁移 schema v6 失败（metadata_pending）: {e}")))?;
+    }
+    if !has_column("iso_placeholder") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN iso_placeholder INTEGER NOT NULL DEFAULT 0")
+            .map_err(|e| AppError::Library(format!("迁移 schema v6 失败（iso_placeholder）: {e}")))?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_metadata_pending ON tracks(metadata_pending)",
+    )
+    .map_err(|e| AppError::Library(format!("迁移 schema v6 失败（索引 metadata_pending）: {e}")))?;
     Ok(())
 }
 
@@ -190,12 +323,18 @@ CREATE TABLE IF NOT EXISTS tracks (
     is_sacd            INTEGER NOT NULL DEFAULT 0,
     sacd_track_index   INTEGER NOT NULL DEFAULT 0,
     sacd_area          TEXT,
-    sacd_dsd_rate      TEXT
+    sacd_dsd_rate      TEXT,
+    -- v6 两阶段懒加载：1 = 轻量占位（仅文件名/大小/路径），元数据待后台解析
+    metadata_pending   INTEGER NOT NULL DEFAULT 0,
+    -- v6 SACD ISO 占位（真实 ISO 文件尚未解析成虚拟分轨，先占位让用户可播/可触发解析）
+    iso_placeholder    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
 -- CUE 去重查询（NOT EXISTS 子查询按 file_path / is_cue 匹配）走索引
 CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
 CREATE INDEX IF NOT EXISTS idx_tracks_is_cue ON tracks(is_cue);
+-- 注：idx_tracks_metadata_pending 由 migrate() 在 ALTER 补列之后创建，
+-- 避免旧库缺列时此处建索引导致 init_schema 失败（见 v6 迁移块）
 
 -- 曲目 ↔ 艺术家 关联（含主艺术家，position=0）
 CREATE TABLE IF NOT EXISTS track_artists (
@@ -255,4 +394,95 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
     )
     .map_err(|e| AppError::Library(format!("写入 meta({key}) 失败: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_recovery_tests {
+    use super::*;
+
+    /// 好状态快照 + 运行标记仍在（上次未干净退出）→ 下次打开前回退到快照
+    #[test]
+    fn restores_backup_after_unclean_exit() {
+        let dir = std::env::temp_dir().join(format!("tplayer-db-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.db");
+
+        {
+            let conn = open(&db).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('state', 'good')", [])
+                .unwrap();
+            write_backup(&conn, &db);
+        }
+        // 模拟崩溃：运行标记仍在，且库被写坏（追加垃圾字节）
+        let mut bytes = std::fs::read(&db).unwrap();
+        bytes.extend_from_slice(b"corrupted-tail");
+        std::fs::write(&db, &bytes).unwrap();
+        assert!(run_marker_path(&db).exists(), "应保留运行标记表示未干净退出");
+
+        let conn = open(&db).unwrap();
+        assert_eq!(
+            get_meta(&conn, "state").as_deref(),
+            Some("good"),
+            "应从快照还原曲库"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 干净退出后标记被清除 → 即使有快照也不回退（保留最新数据）
+    #[test]
+    fn no_restore_after_clean_shutdown() {
+        let dir = std::env::temp_dir().join(format!("tplayer-db-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.db");
+
+        {
+            let conn = open(&db).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('state', 'good')", [])
+                .unwrap();
+            write_backup(&conn, &db);
+            mark_clean(&db);
+        }
+        {
+            let conn = open(&db).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('added', 'new')", [])
+                .unwrap();
+            mark_clean(&db);
+        }
+        let conn = open(&db).unwrap();
+        assert_eq!(get_meta(&conn, "state").as_deref(), Some("good"));
+        assert_eq!(
+            get_meta(&conn, "added").as_deref(),
+            Some("new"),
+            "干净退出后不应回退，快照之后新增的数据应保留"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 库损坏（无运行标记，例如断电损坏）也能回退
+    #[test]
+    fn restores_backup_when_db_corrupt() {
+        let dir = std::env::temp_dir().join(format!("tplayer-db-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.db");
+
+        {
+            let conn = open(&db).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('state', 'good')", [])
+                .unwrap();
+            write_backup(&conn, &db);
+            mark_clean(&db); // 上次是干净退出的
+        }
+        std::fs::write(&db, b"not a sqlite database at all").unwrap();
+
+        let conn = open(&db).unwrap();
+        assert_eq!(
+            get_meta(&conn, "state").as_deref(),
+            Some("good"),
+            "库损坏时应回退到快照"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

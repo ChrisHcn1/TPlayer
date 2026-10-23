@@ -55,6 +55,13 @@ pub struct Track {
     pub sacd_area: Option<SacdArea>,
     #[serde(rename = "sacdDsdRate", default, skip_serializing_if = "Option::is_none")]
     pub sacd_dsd_rate: Option<String>,
+    /// v6 两阶段懒加载：true = 轻量占位轨道（仅文件名/路径/大小已就绪，
+    /// 元数据 / 封面 / CUE / SACD 尚未解析，待播放或后台异步补解析）
+    #[serde(rename = "metadataPending", default, skip_serializing_if = "is_false")]
+    pub metadata_pending: bool,
+    /// v6 SACD ISO 占位：真实 ISO 文件尚未解析成虚拟分轨时的占位条目
+    #[serde(rename = "isoPlaceholder", default, skip_serializing_if = "is_false")]
+    pub iso_placeholder: bool,
 }
 
 /// 整碟镜像判定键：(所在目录, 去掉扩展名的文件名)

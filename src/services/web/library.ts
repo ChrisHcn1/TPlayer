@@ -229,6 +229,11 @@ export const webLibrary = {
   },
 
   /* ---- 曲目详情（Web 预览返回基础 Track 补齐的简化版本，字段仅用于联调） ---- */
+  async resolveTrack(trackId: string): Promise<Track[]> {
+    const track = visibleTracks().find((item) => item.id === trackId)
+    return track ? [{ ...track, metadataPending: false }] : []
+  },
+
   async trackInfo(trackId: string): Promise<TrackInfo | null> {
     const track = visibleTracks().find((item) => item.id === trackId)
     if (!track) return null
