@@ -46,6 +46,33 @@
         }
       })()
     </script>
+    <script>
+      /*
+       * 屏蔽 WebView 原生右键菜单（Tauri/WebView2/WKWebView 默认弹出的系统菜单，
+       * 含「后退 / 刷新 / 另存为 / 检查」等，与应用自定义右键菜单冲突）。
+       *
+       * 方案：在 contextmenu 事件上 preventDefault()，仅抑制**原生**菜单；
+       * 事件本身仍正常派发——应用自己的 @contextmenu 自定义菜单（useContextMenu）
+       * 由独立监听器驱动，不受影响。
+       *
+       * 例外：可编辑元素（input / textarea / contenteditable / role=textbox）
+       * 保留原生编辑菜单，方便剪切 / 复制 / 粘贴。
+       */
+      (function () {
+        document.addEventListener('contextmenu', function (e) {
+          var t = e.target
+          var editable =
+            !!t &&
+            (t.tagName === 'INPUT' ||
+              t.tagName === 'TEXTAREA' ||
+              t.isContentEditable === true ||
+              (t.getAttribute && t.getAttribute('role') === 'textbox'))
+          if (!editable) {
+            e.preventDefault()
+          }
+        })
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>
