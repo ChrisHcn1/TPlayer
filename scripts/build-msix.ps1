@@ -33,14 +33,20 @@
 
 [CmdletBinding()]
 param(
-    # Store app name (must equal the reserved name in Partner Center)
+    # Partner Center -> 应用管理 -> 应用标识 -> "Identity Name"（预留的应用名，包名，不能含空格）
     [string]$IdentityName = 'TPlayer',
-    # "CN=<publisher GUID>" from Partner Center > App management > App identity
+    # Partner Center -> 应用管理 -> 应用标识 -> "Publisher"（形如 CN=1a2b3c4d-5e6f-...）
     [string]$Publisher = 'CN=00000000-0000-0000-0000-000000000000',
     # 4-part numeric version, e.g. 2.0.3.0
     [string]$Version = '2.0.3.0',
+    # Partner Center -> 应用清单 -> "Display name"（应用显示名）
     [string]$DisplayName = 'TPlayer',
-    [string]$PublisherDisplayName = 'TPlayer'
+    # Partner Center -> 合作伙伴设置 -> "Publisher display name"（发布者显示名称）
+    # Store 要求它与 manifest 的 Properties/PublisherDisplayName 完全一致，否则报
+    # "PublisherDisplayName 元素 ... 与发布者显示名称 ... 不匹配"。
+    [string]$PublisherDisplayName = 'TPlayer',
+    # 仅用于本地试打包：允许使用占位 Publisher（Store 一定会拒），默认禁止
+    [switch]$AllowPlaceholderPublisher
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,9 +75,27 @@ foreach ($b in $sdkBins) {
 if (-not $makeappx) { Fail 'makeappx.exe not found (install "Windows SDK" with the MSIX tooling)' }
 if (-not $signtool) { Fail 'signtool.exe not found (install "Windows SDK" with the MSIX tooling)' }
 if ($Publisher -match '00000000-0000-0000-0000-000000000000') {
-    Write-Host '[msix] WARNING: using the PLACEHOLDER publisher. The Store will reject this package.' -ForegroundColor Yellow
-    Write-Host '[msix]          Pass -Publisher "CN=<your Partner Center publisher GUID>" before submitting.' -ForegroundColor Yellow
+    if (-not $AllowPlaceholderPublisher) {
+        Write-Host '[msix] ERROR: -Publisher is still the placeholder value.' -ForegroundColor Red
+        Write-Host '[msix]        Get the real one from Partner Center > App management > App identity' -ForegroundColor Red
+        Write-Host '[msix]        ("Publisher", e.g. CN=1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d).' -ForegroundColor Red
+        Write-Host '[msix]        The Store rejects a package whose Identity/Publisher does not match your' -ForegroundColor Red
+        Write-Host '[msix]        account, so producing one now would only waste an upload.' -ForegroundColor Red
+        Write-Host '[msix]        (Pass -AllowPlaceholderPublisher for local packaging experiments only.)' -ForegroundColor Red
+        exit 1
+    }
+    Write-Host '[msix] WARNING: using the PLACEHOLDER publisher -- the Store will reject this package.' -ForegroundColor Yellow
 }
+if ($IdentityName -match '\s') {
+    Write-Host "[msix] ERROR: -IdentityName '$IdentityName' contains whitespace; a package identity name cannot." -ForegroundColor Red
+    exit 1
+}
+if (-not $PublisherDisplayName) {
+    Write-Host '[msix] ERROR: -PublisherDisplayName is required (Partner Center > publisher display name).' -ForegroundColor Red
+    exit 1
+}
+Write-Host "[msix] identity      : Name=$IdentityName  Publisher=$Publisher  Version=$Version"
+Write-Host "[msix] display names : DisplayName='$DisplayName'  PublisherDisplayName='$PublisherDisplayName'"
 
 $appExe = Join-Path $releaseDir 'TPlayer.exe'
 if (-not (Test-Path $appExe)) { Fail "TPlayer.exe not found in $releaseDir -- run 'npm run tauri -- build' first" }
