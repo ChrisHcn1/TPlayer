@@ -33,6 +33,13 @@ export interface PersistedSettings {
   replaygain: { enabled: boolean; targetLufs: number }
   watch: { enabled: boolean }
   quitOnClose: boolean
+  /** 自动更新相关状态（每日节流 / 跳过版本 / 安装记录） */
+  updater: {
+    autoCheck: boolean
+    lastCheckMs: number
+    skippedVersion: string | null
+    lastInstalledVersion: string | null
+  }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -49,6 +56,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const watch = ref({ enabled: true })
   // 关闭窗口时是否直接退出（默认 false = 隐藏到托盘驻留）
   const quitOnClose = ref(false)
+  // 自动更新相关状态（每日节流 / 跳过版本 / 安装记录）
+  const updaterAutoCheck = ref(true)
+  const lastUpdateCheckMs = ref(0)
+  const skippedUpdateVersion = ref<string | null>(null)
+  const lastInstalledVersion = ref<string | null>(null)
 
   /** 导出当前设置为持久化结构 */
   function toPersisted(): PersistedSettings {
@@ -61,6 +73,12 @@ export const useSettingsStore = defineStore('settings', () => {
       replaygain: { ...replaygain.value },
       watch: { ...watch.value },
       quitOnClose: quitOnClose.value,
+      updater: {
+        autoCheck: updaterAutoCheck.value,
+        lastCheckMs: lastUpdateCheckMs.value,
+        skippedVersion: skippedUpdateVersion.value,
+        lastInstalledVersion: lastInstalledVersion.value,
+      },
     }
   }
 
@@ -113,6 +131,22 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     if (typeof persisted.quitOnClose === 'boolean') {
       quitOnClose.value = persisted.quitOnClose
+    }
+    // 自动更新状态：旧配置可能缺 updater 段，缺省回落默认（开启 / 从未检查 / 无跳过）
+    const updater = persisted.updater
+    if (updater) {
+      if (typeof updater.autoCheck === 'boolean') {
+        updaterAutoCheck.value = updater.autoCheck
+      }
+      if (typeof updater.lastCheckMs === 'number' && Number.isFinite(updater.lastCheckMs)) {
+        lastUpdateCheckMs.value = updater.lastCheckMs
+      }
+      if (updater.skippedVersion === null || typeof updater.skippedVersion === 'string') {
+        skippedUpdateVersion.value = updater.skippedVersion
+      }
+      if (updater.lastInstalledVersion === null || typeof updater.lastInstalledVersion === 'string') {
+        lastInstalledVersion.value = updater.lastInstalledVersion
+      }
     }
   }
 
@@ -222,6 +256,30 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
+  /** 设置是否开启启动期自动检查更新 */
+  async function setUpdaterAutoCheck(next: boolean): Promise<void> {
+    updaterAutoCheck.value = next
+    persist()
+  }
+
+  /** 标记「已成功检查」，用于每日节流（仅在检查成功时调用，失败不标记以便次日重试） */
+  async function markUpdateChecked(): Promise<void> {
+    lastUpdateCheckMs.value = Date.now()
+    persist()
+  }
+
+  /** 记录用户跳过的版本（该版本不再提示，出现更新的版本才重新提示） */
+  async function setSkippedUpdateVersion(version: string | null): Promise<void> {
+    skippedUpdateVersion.value = version
+    persist()
+  }
+
+  /** 记录最近一次安装完成的版本（重启后据此提示「已是最新版本」并清除） */
+  async function setLastInstalledVersion(version: string | null): Promise<void> {
+    lastInstalledVersion.value = version
+    persist()
+  }
+
   /**
    * 恢复出厂默认（仅重置"设置"，不影响曲库文件与播放历史）
    * 主题不在此重置：由 useTheme.resetTheme() 单独负责，保证主题只有一个写入方。
@@ -235,6 +293,10 @@ export const useSettingsStore = defineStore('settings', () => {
     replaygain.value = { enabled: true, targetLufs: -14 }
     watch.value = { enabled: true }
     quitOnClose.value = false
+    updaterAutoCheck.value = true
+    lastUpdateCheckMs.value = 0
+    skippedUpdateVersion.value = null
+    lastInstalledVersion.value = null
     persist()
     void playerService.setCrossfade(true, 1000)
     void playerService.setReplaygain(true)
@@ -249,6 +311,10 @@ export const useSettingsStore = defineStore('settings', () => {
     replaygain,
     watch,
     quitOnClose,
+    updaterAutoCheck,
+    lastUpdateCheckMs,
+    skippedUpdateVersion,
+    lastInstalledVersion,
     restore,
     persist,
     setLocale,
@@ -262,6 +328,10 @@ export const useSettingsStore = defineStore('settings', () => {
     setReplaygainEnabled,
     setWatchEnabled,
     setQuitOnClose,
+    setUpdaterAutoCheck,
+    markUpdateChecked,
+    setSkippedUpdateVersion,
+    setLastInstalledVersion,
     reset,
   }
 })

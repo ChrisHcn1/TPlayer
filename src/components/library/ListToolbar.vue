@@ -3,6 +3,8 @@
  * 列表工具条（DESIGN §4.7）：高 --size-toolbar-h。
  * 左：大标题 + 副信息 + 主操作插槽；右：视图工具插槽 + 内联筛选框。
  */
+import { onBeforeUnmount, ref, watch } from 'vue'
+
 import SearchBox from '../common/SearchBox.vue'
 
 interface Props {
@@ -13,7 +15,7 @@ interface Props {
   filterPlaceholder?: string
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   subtitle: '',
   keyword: '',
   showFilter: true,
@@ -24,6 +26,54 @@ const emit = defineEmits<{
   (e: 'update:keyword', value: string): void
   (e: 'submit-keyword', value: string): void
 }>()
+
+/**
+ * 输入防抖时长（毫秒）。
+ *
+ * 性能：大曲库下每次按键都会触发一次全量过滤（O(n) 扫描 + 匹配），
+ * 逐键执行会阻塞输入；此处停顿时只过滤一次。回车提交立即生效，不等防抖。
+ * 对外契约不变：仍然抛出 `update:keyword` / `submit-keyword`，父组件用法无需调整。
+ */
+const DEBOUNCE_MS = 180
+
+/** 本地即时值：保证输入框回显不丢字（父级 prop 更新滞后时仍显示用户已输入内容） */
+const localKeyword = ref(props.keyword)
+let timer: ReturnType<typeof setTimeout> | null = null
+
+function cancelTimer(): void {
+  if (timer !== null) {
+    clearTimeout(timer)
+    timer = null
+  }
+}
+
+function onInput(value: string): void {
+  localKeyword.value = value
+  cancelTimer()
+  timer = setTimeout(() => {
+    timer = null
+    emit('update:keyword', localKeyword.value)
+  }, DEBOUNCE_MS)
+}
+
+function onSubmit(value: string): void {
+  cancelTimer()
+  localKeyword.value = value
+  emit('update:keyword', value)
+  emit('submit-keyword', value)
+}
+
+// 外部 keyword 变化（路由跳转 / 外部清空等）时同步本地值，并作废待发的防抖
+watch(
+  () => props.keyword,
+  (value) => {
+    if (value === localKeyword.value) return
+    cancelTimer()
+    localKeyword.value = value
+  },
+)
+
+onBeforeUnmount(cancelTimer)
 </script>
 
 <template>
@@ -42,9 +92,9 @@ const emit = defineEmits<{
         v-if="showFilter"
         variant="inline"
         :placeholder="filterPlaceholder"
-        :model-value="keyword"
-        @update:model-value="emit('update:keyword', $event)"
-        @submit="emit('submit-keyword', $event)"
+        :model-value="localKeyword"
+        @update:model-value="onInput"
+        @submit="onSubmit"
       />
     </div>
   </div>

@@ -286,6 +286,10 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
          ON tracks(lower(trim(title)), lower(trim(album)), lower(trim(format)))",
     )
     .map_err(|e| AppError::Library(format!("创建 song_key 索引失败: {e}")))?;
+    // 收集索引统计信息：SQLite 需要 ANALYZE 数据才会让查询规划器真正启用
+    // 表达式索引 / 复合索引。缺它时，大库下去重子查询可能退化成全表扫描，
+    // 表现为「启动后要等好几秒才出曲目」。幂等且开销极小。
+    let _ = conn.execute_batch("ANALYZE");
     Ok(())
 }
 

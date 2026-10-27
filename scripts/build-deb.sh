@@ -123,8 +123,9 @@ CARGO_BIN_NAME="${CARGO_BIN_NAME:-tplayer-next}"
 MAINTAINER="${MAINTAINER:-TPlayer Contributors <noreply@tplayer.local>}"
 HOMEPAGE="${HOMEPAGE:-https://github.com/ChrisHcn1/TPlayer}"
 SECTION="${SECTION:-sound}"
-# 桌面文件 StartupWMClass 默认取 Tauri 标识符（Linux 下 GTK 以标识符作为 app id /
-# WM_CLASS 的依据）；模板中另附 TPlayer / tplayer-next 候选，命中任一即可关联。
+# 桌面文件 StartupWMClass 取 Tauri 标识符：tauri.conf.json 已开启 app.enableGTKAppId，
+# 窗口 app_id / WM_CLASS 即为 identifier（com.tplayer），任务栏据此关联到
+# com.tplayer.desktop 并显示其 Icon。必须为**单值**（GNOME 整串比对，多值反而不匹配）。
 WM_CLASS="${WM_CLASS:-com.tplayer}"
 PROFILE="${PROFILE:-release}"
 RUST_TARGET="${RUST_TARGET:-$DEFAULT_TARGET}"
@@ -134,6 +135,13 @@ SKIP_FRONTEND="${SKIP_FRONTEND:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 RUN_LINTIAN="${RUN_LINTIAN:-auto}"
 RELEASE_DATE="${RELEASE_DATE:-$(date +%Y-%m-%d)}"
+
+# 占位符渲染所需变量提前初始化：render() 在步骤 4 早于下面的「运行时依赖」段
+# （DEPENDS/RECOMMENDS 正式赋值处）被调用；提前给默认值可避免 set -u 下报
+# 「未绑定变量」。desktop/metainfo/copyright/man 模板本身不含 @DEPENDS@/@RECOMMENDS@，
+# 此处空值不影响最终 control（control 在步骤 5 才渲染，彼时值已就绪）。
+DEPENDS="${DEPENDS:-}"
+RECOMMENDS="${RECOMMENDS:-}"
 
 # 旧包名（Linux 侧历史包名 tplayer-next）：新包 tplayer 通过
 # Conflicts/Replaces/Provides 接管，保证曾装过旧包的用户平滑升级。

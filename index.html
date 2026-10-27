@@ -41,6 +41,17 @@
             theme = 'dark'
           }
           document.documentElement.setAttribute('data-theme', theme)
+          /*
+           * 实验室·窗口底纹：窗口已常驻 transparent:true（见 tauri.conf.json），
+           * CSS 就绪前窗口是透明的，会露出桌面 / 白闪。这里按当前主题先垫一层
+           * 不透明底色作为首帧 Paint，CSS（main.css 的 body 背景）就绪后接管；
+           * 底纹功能开启时再由 lab-backdrop.css 把 body 置透明。
+           * 取值与 theme.css 的 --palette-neutral-950 / 亮色 --color-bg-base 对齐。
+           */
+          document.documentElement.style.setProperty(
+            '--boot-bg',
+            theme === 'light' ? '#f0f1f4' : '#0f1115'
+          )
         } catch (e) {
           /* localStorage 不可用（隐私模式/受限 WebView）时，保留静态默认值 dark */
         }
@@ -78,4 +89,10 @@
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
+  <style>
+    /* 首帧底色（由上方脚本按主题写入 --boot-bg）：窗口常驻 transparent 后的防露底/白闪兜底 */
+    body {
+      background: var(--boot-bg, #0f1115);
+    }
+  </style>
 </html>

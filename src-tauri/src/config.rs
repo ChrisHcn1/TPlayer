@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::player::engine::EqConfig;
 
 /// 持久化到 config.json 的应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,9 @@ pub struct AppConfig {
     /// 音量归一化 ReplayGain 配置（旧配置缺省时回落默认：开启、目标 -14 LUFS）
     #[serde(default)]
     pub replaygain: ReplayGainConfig,
+    /// 实验室均衡器配置（默认关闭，频段增益均为 0）
+    #[serde(default)]
+    pub eq: EqConfig,
     /// 目录自动监控配置（旧配置缺省时回落默认：开启）
     #[serde(default)]
     pub watch: WatchConfig,
@@ -37,6 +41,68 @@ pub struct AppConfig {
     /// true = 点击右上角 X 直接退出程序，不驻留托盘。
     #[serde(rename = "quitOnClose", default)]
     pub quit_on_close: bool,
+    /// 实验室（Lab）功能开关与状态。默认全关、空状态，绝不影响的既有功能。
+    #[serde(default)]
+    pub lab: LabConfig,
+    /// 自动更新相关持久化状态（每日节流 / 跳过版本 / 安装记录）。
+    #[serde(default)]
+    pub updater: UpdaterConfig,
+}
+
+/// 实验室配置：各实验功能开关。
+///
+/// 设计约束（确保与主项目完全隔离、不影响现有功能）：
+/// - 用 `id -> bool` 一张表驱动，**新增功能只改前端注册表**，无需改此结构；
+/// - 默认空表 → 所有实验功能默认关闭；
+/// - 仅由独立的 `lab_*` 命令读写，与 `settings_save`（整体替换）解耦，
+///   避免实验开关被设置的保存链路覆盖丢失。
+///
+/// 关于「上线」：实验功能只有「关闭 / 开启」两种状态；功能满足需求后由开发者把它
+/// 并入正式版（代码迁出 src/lab），届时从注册表移除条目即可，无需在此保留状态机。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LabConfig {
+    /// 功能 id → 是否开启（缺省视为关闭）
+    #[serde(rename = "features", default)]
+    pub features: std::collections::HashMap<String, bool>,
+}
+
+impl LabConfig {
+    /// 功能是否开启（缺省 false）
+    pub fn is_enabled(&self, id: &str) -> bool {
+        self.features.get(id).copied().unwrap_or(false)
+    }
+}
+
+/// 自动更新持久化状态
+///
+/// 与前端 settings store 的 `updater` 字段对齐；全部字段带 `#[serde(default)]`，
+/// 旧版本配置缺省时回落默认值，绝不因缺字段导致整体 `settings_save` 反序列化失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdaterConfig {
+    /// 是否在启动后自动静默检查更新（默认开启）
+    #[serde(rename = "autoCheck")]
+    pub auto_check: bool,
+    /// 上次成功检查的时间戳（毫秒），用于「每日首次」节流；0 表示从未检查
+    #[serde(rename = "lastCheckMs")]
+    pub last_check_ms: i64,
+    /// 用户选择跳过的版本号；该版本不再提示，出现更新的版本才再次提示
+    #[serde(rename = "skippedVersion")]
+    pub skipped_version: Option<String>,
+    /// 最近一次成功安装完成的版本号；下次启动据此一次性提示「已是最新版本」后清除
+    #[serde(rename = "lastInstalledVersion")]
+    pub last_installed_version: Option<String>,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            last_check_ms: 0,
+            skipped_version: None,
+            last_installed_version: None,
+        }
+    }
 }
 
 /// 目录自动监控配置
@@ -128,8 +194,11 @@ impl Default for AppConfig {
             online: OnlineConfig::default(),
             crossfade: CrossfadeConfig::default(),
             replaygain: ReplayGainConfig::default(),
+            eq: EqConfig::default(),
             watch: WatchConfig::default(),
             quit_on_close: false,
+            lab: LabConfig::default(),
+            updater: UpdaterConfig::default(),
         }
     }
 }

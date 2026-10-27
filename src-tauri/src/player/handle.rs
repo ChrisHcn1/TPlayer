@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
 use rand::Rng;
@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::error::{AppError, AppResult};
 use crate::library::models::Track;
 
-use super::engine::{spawn_engine, EngineCapabilities, EngineHandle};
+use super::engine::{spawn_engine, EngineCapabilities, EngineHandle, EqConfig};
 use super::persist::{self, PersistedPlayback};
 use super::state::{
     PlayContext, PlayMode, PlaybackEvent, PlaybackSnapshot, PlaybackStatus, SleepTimerStatus,
@@ -26,6 +26,39 @@ const MAX_AUTO_SKIP: usize = 20;
 
 /// 连续"异常秒切"多少首后判定解码链路不可用并停止（解码器缺失/批量损坏时避免无声快进）
 const ABRUPT_END_LIMIT: usize = 8;
+
+/// 后台 ReplayGain 响度分析的最大并发数：限制同时运行的 ffmpeg 全文件读取进程，
+/// 避免快速连播未分析曲目时瞬间 fan-out 数十个 ffmpeg 拖垮整机。
+const MAX_RG_CONCURRENT: usize = 4;
+
+/// 分析并发信号量（计数 + 条件变量实现，std 无内置 Semaphore）。
+struct RgSemaphore {
+    permits: Mutex<usize>,
+    cv: Condvar,
+}
+impl RgSemaphore {
+    const fn new(permits: usize) -> Self {
+        Self {
+            permits: Mutex::new(permits),
+            cv: Condvar::new(),
+        }
+    }
+    fn acquire(&self) {
+        let mut g = self.permits.lock().unwrap_or_else(|e| e.into_inner());
+        while *g == 0 {
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        *g -= 1;
+    }
+    fn release(&self) {
+        let mut g = self.permits.lock().unwrap_or_else(|e| e.into_inner());
+        *g += 1;
+        self.cv.notify_one();
+    }
+}
+static RG_SEM: RgSemaphore = RgSemaphore::new(MAX_RG_CONCURRENT);
+/// 进行中的分析（按 track_id 去重，避免同一首在分析中再次被触发重复拉起 ffmpeg）。
+static RG_INFLIGHT: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
 
 /// 自动连播预加载提前量（毫秒）：当前曲剩余时长小于该值时提前预解码下一曲
 const PRELOAD_LEAD_MS: u64 = 3000;
@@ -53,6 +86,10 @@ pub struct PlayerHandle {
     pub snapshot: PlaybackSnapshot,
     context: Option<PlayContext>,
     index: usize,
+    /// 随机播放的洗牌排列（队列下标的 Fisher-Yates 排列）。
+    /// 空 = 未生成（非随机模式或队列已变更待重建）；长度与队列不一致时按需重建。
+    /// 只存下标不存 id：队列内容变化（增删/remap）时无需同步，长度不符即重建。
+    shuffle_order: Vec<usize>,
     /// 全部曲目缓存（按 ID 索引），供 next/previous/自动连播查找文件路径
     track_map: HashMap<String, Track>,
     /// 位置计时
@@ -95,6 +132,7 @@ impl PlayerHandle {
             snapshot: PlaybackSnapshot::default(),
             context: None,
             index: 0,
+            shuffle_order: Vec::new(),
             track_map: HashMap::new(),
             position_offset_ms: 0,
             play_started_at: None,
@@ -169,6 +207,59 @@ impl PlayerHandle {
         self.track_map = tracks.into_iter().map(|t| (t.id.clone(), t)).collect();
     }
 
+    /// 增量更新曲目缓存（后台补解析每批调用）：只插入新/变更曲目、移除失效 id，
+    /// **不再整库重查 + 克隆**。避免每批都跑一遍全库去重 SQL 并重建 map（大库下
+    /// 该开销会长时间占用 library 锁，拖住主线程）。
+    pub fn apply_track_changes(&mut self, upserts: &[Track], removed: &[String]) {
+        for id in removed {
+            self.track_map.remove(id);
+        }
+        for track in upserts {
+            self.track_map.insert(track.id.clone(), track.clone());
+        }
+    }
+
+    /// 后台补解析把占位曲目替换成 CUE / SACD 分轨（id 变了）时，把当前曲目与播放队列里
+    /// 指向旧占位的引用平滑迁移到新分轨，避免后台解析打断正在进行的播放。
+    ///
+    /// 仅更新引用（显示 / 队列），**不动引擎**——引擎按文件路径播放，与前端 trackId 无关，
+    /// 正在进行的音频流不会因此停顿或重启。下一首 / 续播也基于更新后的队列继续。
+    pub fn remap_context(&mut self, remap: &HashMap<String, Vec<String>>) {
+        if remap.is_empty() {
+            return;
+        }
+        // 当前曲目：迁移到对应分轨的第一首（与占位同一物理文件，音频无缝延续）
+        if let Some(tid) = self.snapshot.track_id.clone() {
+            if let Some(repl) = remap.get(&tid) {
+                if let Some(first) = repl.first() {
+                    self.snapshot.track_id = Some(first.clone());
+                }
+            }
+        }
+        // 队列：把旧占位 id 就地替换为整组新分轨，保持专辑连续可播，并修正当前下标
+        if let Some(ctx) = self.context.as_mut() {
+            let mut changed = false;
+            let mut new_ids: Vec<String> = Vec::with_capacity(ctx.track_ids.len());
+            for id in &ctx.track_ids {
+                if let Some(repl) = remap.get(id) {
+                    changed = true;
+                    new_ids.extend(repl.iter().cloned());
+                } else {
+                    new_ids.push(id.clone());
+                }
+            }
+            if changed {
+                ctx.track_ids = new_ids;
+                // 当前下标重算：基于已迁移的 snapshot.track_id
+                if let Some(tid) = &self.snapshot.track_id {
+                    self.index = ctx.track_ids.iter().position(|x| x == tid).unwrap_or(self.index);
+                }
+                // 队列已变更：洗牌排列长度不符，下次 next_index 自动重建
+                self.shuffle_order.clear();
+            }
+        }
+    }
+
     /// 应用启动恢复：音量/静音/播放模式与播放队列上下文始终恢复；
     /// 断点曲目为原生可播的非 CUE 曲目时，恢复为 paused 态并定位到中断位置
     /// （引擎待首次 resume 装载）。冷门格式在 FFmpeg 缺失时需前端 WASM 整文件
@@ -218,6 +309,9 @@ impl PlayerHandle {
                 }
             }
         }
+
+        // 队列与下标已定型：按模式同步洗牌排列（随机模式以当前曲目为起点重建）
+        self.sync_shuffle_after_context_change();
 
         self.context.clone()
     }
@@ -378,6 +472,8 @@ impl PlayerHandle {
                 .position(|id| id == &track.id)
                 .unwrap_or(0);
             self.context = Some(ctx);
+            // 队列（上下文）既定：按模式同步洗牌排列（随机模式以当前曲目为起点重建）
+            self.sync_shuffle_after_context_change();
         } else if self.context.is_none() {
             let ids: Vec<String> = self.track_map.keys().cloned().collect();
             self.context = Some(PlayContext {
@@ -508,6 +604,8 @@ impl PlayerHandle {
                 .position(|id| id == &track.id)
                 .unwrap_or(0);
             self.context = Some(ctx);
+            // 队列（上下文）既定：按模式同步洗牌排列（随机模式以当前曲目为起点重建）
+            self.sync_shuffle_after_context_change();
         } else if self.context.is_none() {
             let ids: Vec<String> = self.track_map.keys().cloned().collect();
             self.context = Some(PlayContext {
@@ -666,6 +764,8 @@ impl PlayerHandle {
         if self.index >= ctx.track_ids.len() {
             self.index = ctx.track_ids.len().saturating_sub(1);
         }
+        // 队列已变更：洗牌排列长度不符，下次 next_index 自动重建（这里直接清空更直观）
+        self.shuffle_order.clear();
 
         // 被移除项正是预加载的下一曲：标记失效（切歌时 play 因路径不一致自动回收）
         if self.preloaded_track_id.as_deref() == Some(removed_id.as_str()) {
@@ -861,6 +961,9 @@ impl PlayerHandle {
 
     pub fn set_mode(&mut self, mode: PlayMode, app: &AppHandle) -> AppResult<()> {
         self.snapshot.mode = mode;
+        // 切到随机模式：按当前曲目重建洗牌排列（其余队列随机排）；
+        // 离开随机模式：清空排列释放内存
+        self.sync_shuffle_after_context_change();
         emit(app, PlaybackEvent::Mode { mode });
         self.save_state();
         Ok(())
@@ -886,6 +989,13 @@ impl PlayerHandle {
         self.engine.set_rate(r);
         emit(app, PlaybackEvent::Rate { rate: r });
         Ok(())
+    }
+
+    /// 下发实验室均衡器配置到引擎线程（频段增益 + 总开关）。
+    /// 新曲目装载时沿用新配置；已在播的曲目因 `PcmStreamSource` 已被 rodio
+    /// sink 持有、无法从外部访问，EQ 变更在下一首生效（前端可据此提示）。
+    pub fn set_eq(&mut self, cfg: EqConfig) {
+        self.engine.set_eq(cfg);
     }
 
     /// 下发交叉淡化参数到引擎线程（启用开关 + 时长毫秒）。
@@ -955,6 +1065,10 @@ impl PlayerHandle {
 
     /// 无标签曲目后台分析响度并写回曲库（仅开关开启时执行；写库+内存缓存双更新，
     /// 后续播放/预加载直接复用，避免重复分析）。
+    ///
+    /// 性能：受 `RG_SEM` 并发上限约束（默认 4），避免快速连播未分析曲目时瞬间
+    /// fan-out 数十个 ffmpeg 全文件读取进程；`RG_INFLIGHT` 按 track_id 去重，
+    /// 保证同一首曲目的分析至多执行一次。分析结果与原有逻辑完全一致。
     fn ensure_replaygain_analyzed(&self, app: &AppHandle, track: &Track) {
         let replaygain_enabled = app
             .try_state::<crate::AppState>()
@@ -967,7 +1081,28 @@ impl PlayerHandle {
         let file_path = track.file_path.clone();
         let app = app.clone();
         std::thread::spawn(move || {
-            let Some((gain_db, peak)) = crate::replaygain::analyze_loudness(&file_path) else {
+            // 去重：同一首已在分析中则跳过，避免重复拉起 ffmpeg
+            {
+                let mut inflight = RG_INFLIGHT
+                .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+                if !inflight.insert(track_id.clone()) {
+                    return;
+                }
+            }
+            // 受控并发：无空位时在此阻塞，避免播放期 ffmpeg 进程 fan-out
+            RG_SEM.acquire();
+            let result = crate::replaygain::analyze_loudness(&file_path);
+            RG_SEM.release();
+            {
+                let mut inflight = RG_INFLIGHT
+                .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+                inflight.remove(&track_id);
+            }
+            let Some((gain_db, peak)) = result else {
                 return;
             };
             if let Some(state) = app.try_state::<crate::AppState>() {
@@ -1224,16 +1359,84 @@ impl PlayerHandle {
         }
     }
 
-    /// 只读地取下一曲 id（不推进 index）。Shuffle 下预加载时随机选定，
+    /// 取下一曲 id（不推进 index）。Shuffle 下预加载时随机选定，
     /// on_track_ended 以 preloaded_track_id 为准定位 index，保证两者一致。
-    fn peek_next_track_id(&self) -> Option<String> {
+    /// 需 `&mut self`：Shuffle 模式会按需重建洗牌排列。
+    fn peek_next_track_id(&mut self) -> Option<String> {
         let idx = self.next_index()?;
         self.context
             .as_ref()
             .and_then(|c| c.track_ids.get(idx).cloned())
     }
 
-    fn next_index(&self) -> Option<usize> {
+    /// Fisher-Yates 洗牌 `0..n`，并把 `start` 旋到最前：
+    /// 保证「当前曲目仍是起点、其余按随机顺序播放」。
+    fn rebuild_shuffle_order(&mut self, n: usize, start: usize) {
+        if n == 0 {
+            self.shuffle_order.clear();
+            return;
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        let mut rng = rand::thread_rng();
+        for i in (1..n).rev() {
+            let j = rng.gen_range(0..=i);
+            order.swap(i, j);
+        }
+        // 把 start 旋到最前，使当前曲目从排列首部开始
+        if let Some(pos) = order.iter().position(|&x| x == start) {
+            order[..=pos].rotate_right(1);
+        }
+        self.shuffle_order = order;
+    }
+
+    /// 重新洗牌一轮（用于一轮播完），并避免把 `avoid` 放在第一位
+    /// （避免一轮结束时立刻重播刚播完的那首）。
+    fn reshuffle_avoiding(&mut self, n: usize, avoid: usize) {
+        if n == 0 {
+            self.shuffle_order.clear();
+            return;
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        let mut rng = rand::thread_rng();
+        for i in (1..n).rev() {
+            let j = rng.gen_range(0..=i);
+            order.swap(i, j);
+        }
+        if n > 1 && order[0] == avoid {
+            order.swap(0, 1);
+        }
+        self.shuffle_order = order;
+    }
+
+    /// 确保洗牌排列与当前队列匹配；不匹配则从当前曲目重建
+    fn ensure_shuffle_order(&mut self, n: usize) {
+        if self.shuffle_order.len() != n {
+            self.rebuild_shuffle_order(n, self.index.min(n.saturating_sub(1)));
+        }
+    }
+
+    /// 当前曲目在洗牌排列中的位置
+    fn shuffle_pos_of(&self, n: usize) -> usize {
+        self.shuffle_order
+            .iter()
+            .position(|&x| x == self.index)
+            .unwrap_or(0)
+            .min(n.saturating_sub(1))
+    }
+
+    /// 上下文（队列）变更后同步洗牌排列：
+    /// - 随机模式且队列 > 1：以当前曲目为起点重建洗牌排列；
+    /// - 否则清空排列（节省内存，非随机模式不依赖它）。
+    fn sync_shuffle_after_context_change(&mut self) {
+        // 延迟构建洗牌排列：不在「起播路径」上同步做 Fisher-Yates，避免大队列阻塞
+        // 起播。当前曲目（self.index）天然成为下一轮排列的首位——`ensure_shuffle_order`
+        // 首次被 `next_index` 调用时才按当前曲目重建并旋到最前（详见该方法）。
+        // 即使用户点「播放全部」时曲目很多，被选中的那首也会立刻开始播放，其余在后台
+        // 洗牌（约 50ms 后的预加载 / 切歌时才用到），无需等待重排完成。
+        self.shuffle_order.clear();
+    }
+
+    fn next_index(&mut self) -> Option<usize> {
         let ctx = self.context.as_ref()?;
         if ctx.track_ids.is_empty() {
             return None;
@@ -1249,15 +1452,20 @@ impl PlayerHandle {
             }
             PlayMode::RepeatAll => Some((self.index + 1) % ctx.track_ids.len()),
             PlayMode::Shuffle => {
-                if ctx.track_ids.len() == 1 {
+                let n = ctx.track_ids.len();
+                if n <= 1 {
                     Some(0)
                 } else {
-                    let mut rng = rand::thread_rng();
-                    let mut n = rng.gen_range(0..ctx.track_ids.len());
-                    while n == self.index {
-                        n = rng.gen_range(0..ctx.track_ids.len());
+                    self.ensure_shuffle_order(n);
+                    let pos = self.shuffle_pos_of(n);
+                    if pos + 1 < n {
+                        Some(self.shuffle_order[pos + 1])
+                    } else {
+                        // 一轮播完：重新洗牌继续（随机模式不停止），
+                        // 避免立刻重播刚播完的那首
+                        self.reshuffle_avoiding(n, self.index);
+                        Some(self.shuffle_order[0])
                     }
-                    Some(n)
                 }
             }
         }
@@ -1319,7 +1527,7 @@ impl PlayerHandle {
 
     /// 预览「下一首」id（不改队列索引）：命令层据此预取 Track，
     /// 再以 `advance_and_play` 在同一临界区内完成推进 + 起播。
-    pub fn peek_next_id(&self) -> Option<String> {
+    pub fn peek_next_id(&mut self) -> Option<String> {
         let idx = self.next_index()?;
         self.context.as_ref()?.track_ids.get(idx).cloned()
     }

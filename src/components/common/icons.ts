@@ -124,6 +124,7 @@ export const ICONS: Record<string, string> = {
   'arrow-up': g('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>'),
   'arrow-down': g('<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>'),
   'arrow-up-down': g('<path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/>'),
+  'arrow-right': g('<path d="M5 12h14"/><path d="m13 5 7 7-7 7"/>'),
   'heart-off': g(
     '<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="m2 2 20 20"/>',
   ),

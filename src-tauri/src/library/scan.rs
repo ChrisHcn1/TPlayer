@@ -1,7 +1,10 @@
 //! 曲库扫描：遍历目录 + lofty 元数据解析
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
@@ -9,7 +12,18 @@ use tauri::{AppHandle, Emitter};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 
+use super::filename;
 use super::models::{album_id_of, ScanProgress, ScanStage, Track};
+use super::persist;
+use super::verify;
+
+use rayon::prelude::*;
+
+/// 实验室·元数据增强开关（默认关闭）。
+///
+/// 由 `lib.rs` 启动与 `lab_set_feature` 同步，避免在所有 `parse_track` 调用点
+/// 透传 flag（扫描 / 监控 / resolve 等多处都会触发解析）。零成本原子读。
+pub(crate) static ENHANCED_METADATA: AtomicBool = AtomicBool::new(false);
 
 /// 扫描支持的扩展名（索引范围 ≥ 播放范围：dsd/dts/ape 等可入库展示，
 /// 播放时若引擎无法解码会以明确错误事件反馈）
@@ -158,9 +172,31 @@ pub(crate) fn discover_cue_files(root: &Path) -> Vec<PathBuf> {
     without_junk(files)
 }
 
-/// 递归发现目录下所有 .iso 文件（用于 SACD ISO 分轨；Release 也启用，不限 debug）。
+/// 仅列举**单个目录内**的 `.cue` 文件（非递归），用于点播 / 增量补解析时的
+/// 局部发现。与 `discover_cue_files`（递归整棵子树）不同，它只扫给定目录，
+/// 开销极小，因此播放时按需解析不会为了找 CUE 而遍历整个曲库树、阻塞 UI。
 ///
-/// 所有 .iso 都会先收集到 scan_directory 的 `referenced` 中被排除，避免被当作
+/// 读取目录失败时静默返回空（best-effort），不影响解析主流程。
+pub(crate) fn list_cue_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return files,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("cue") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    without_junk(files)
+}
+
+/// 递归发现目录下所有 .iso 文件（用于 SACD ISO 分轨；Release 也启用，不限 debug）。
 /// 普通音频 parse_track 误入库；其中能成功解析为 SACD 的才进一步拆出虚拟分轨，
 /// 非 SACD 镜像（系统盘 / 游戏 ISO）静默忽略。
 #[cfg(target_os = "linux")]
@@ -199,6 +235,35 @@ fn track_id_from_path(path: &Path) -> String {
     result.iter().take(8).map(|b| format!("{:02x}", b)).collect()
 }
 
+/// 从文件路径**廉价**推断专辑 / 艺人（不读音频标签）：取父目录名作为专辑、
+/// 再上一层作为艺人。仅作占位期兜底显示，真实标签在滚动 / 播放按需解析后覆盖。
+///
+/// 常见布局 `…/艺人/专辑/01 - 曲目.flac` → album=专辑, artist=艺人；
+/// `…/专辑/01.flac` → album=专辑, artist=未知艺术家；文件直接在根 → 未知。
+pub(crate) fn infer_album_artist(path: &Path) -> (String, String) {
+    let dirs: Vec<String> = path
+        .parent()
+        .map(|p| {
+            p.components()
+                .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let album = dirs
+        .last()
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "未知专辑".to_string());
+    let artist = dirs
+        .iter()
+        .rev()
+        .nth(1)
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "未知艺术家".to_string());
+    (album, artist)
+}
+
 /// 解析单个音频文件的元数据
 pub(crate) fn parse_track(path: &Path) -> Option<Track> {
     let metadata = std::fs::metadata(path).ok()?;
@@ -231,26 +296,117 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
         has_cover,
         replaygain_db,
         replaygain_peak,
+        pending_parsed,
     ) = match lofty::read_from_path(path) {
         Ok(file) => {
             let tag = file.primary_tag().cloned();
             let props = file.properties();
-            let title = tag
-                .as_ref()
-                .and_then(|t| t.title().map(|s| s.to_string()))
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "未知标题".to_string())
-                });
-            let artists = tag
-                .as_ref()
-                .and_then(|t| t.artist().map(|a| split_artists(a.as_ref())))
-                .unwrap_or_else(|| vec!["未知艺术家".to_string()]);
-            let album = tag
+            let raw_title = tag.as_ref().and_then(|t| t.title().map(|s| s.to_string()));
+            let raw_artist = tag.as_ref().and_then(|t| t.artist().map(|s| s.to_string()));
+
+            let album_from_tag = tag
                 .as_ref()
                 .and_then(|t| t.album().map(|s| s.to_string()))
+                .filter(|a| !a.trim().is_empty() && a.trim() != "未知专辑");
+            let title_from_tag = raw_title.clone().filter(|t| !t.trim().is_empty());
+            let artist_from_tag = raw_artist
+                .clone()
+                .filter(|a| !a.trim().is_empty() && a.trim() != "未知艺术家");
+
+            // 持久化识别结果（附属文件）：只在标签缺失 / 未知占位时读取，
+            // 已有真实标签绝不覆盖；扫描时只多一次 stat，成本可忽略。
+            let sidecar = if title_from_tag.is_none()
+                || artist_from_tag.is_none()
+                || album_from_tag.is_none()
+            {
+                persist::read_sidecar(path)
+            } else {
+                None
+            };
+            let side_title = sidecar
+                .as_ref()
+                .map(|s| s.title.clone())
+                .filter(|t| !t.is_empty());
+            let side_artists = sidecar
+                .as_ref()
+                .map(|s| s.artists.clone())
+                .filter(|a| !a.is_empty());
+            let side_album = sidecar
+                .as_ref()
+                .map(|s| s.album.clone())
+                .filter(|a| !a.is_empty());
+
+            let fallback_title = || {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "未知标题".to_string())
+            };
+
+            let (title, artists, pending_parsed) = if let Some(side_artists) = side_artists {
+                // 附属文件中的艺术家是识别终值：直接采用，避免再次按 "/" 拆分
+                // 把 "AC/DC" 这类艺名误拆；标题同样优先使用已保存的终值。
+                let title = match title_from_tag.clone() {
+                    Some(t) if ENHANCED_METADATA.load(Ordering::SeqCst) => {
+                        clean_title_enhanced(&t).0
+                    }
+                    Some(t) => t,
+                    None => side_title.clone().unwrap_or_else(fallback_title),
+                };
+                (title, side_artists, None)
+            } else if ENHANCED_METADATA.load(Ordering::SeqCst) {
+                // 实验室·元数据增强：更完善的艺术家拆分 + 标题 feat. 规整
+                let title_in = title_from_tag
+                    .clone()
+                    .or_else(|| side_title.clone())
+                    .unwrap_or_else(fallback_title);
+                let artist_in = artist_from_tag.as_deref().unwrap_or("");
+                let artist_unknown = artist_from_tag.is_none();
+
+                // 艺术家未知且标题混排（"艺术家 - 歌曲" / "歌曲 - 艺术家" 等）：
+                // 先按文件名/标题本地拆出候选方向，再衔接 feat. 提取与艺术家拆分
+                let mut pending_parsed: Option<filename::Parsed> = None;
+                let (base_title, base_artist) = if artist_unknown {
+                    let (dir_album, dir_artist) = infer_album_artist(path);
+                    let ctx = filename::NameCtx {
+                        tag_artist: artist_in,
+                        parent_artist: (dir_artist != "未知艺术家").then_some(dir_artist.as_str()),
+                        parent_album: (dir_album != "未知专辑").then_some(dir_album.as_str()),
+                    };
+                    match filename::parse_stem(&title_in, &ctx) {
+                        Some(parsed) => {
+                            let (t, a) = match &parsed.local {
+                                Some(c) => (c.title.clone(), c.artist.clone()),
+                                // 方向不明且分隔符低置信：保持原样，交在线裁决
+                                None => (title_in.clone(), String::new()),
+                            };
+                            pending_parsed = Some(parsed);
+                            (t, a)
+                        }
+                        None => (title_in.clone(), artist_in.to_string()),
+                    }
+                } else {
+                    (title_in.clone(), artist_in.to_string())
+                };
+
+                let (clean_title, mut enh_artists) = enhanced_metadata(&base_title, &base_artist);
+                if enh_artists.is_empty() {
+                    enh_artists.push("未知艺术家".to_string());
+                }
+                (clean_title, enh_artists, pending_parsed)
+            } else {
+                let title = title_from_tag
+                    .or(side_title)
+                    .unwrap_or_else(fallback_title);
+                let artists = artist_from_tag
+                    .as_deref()
+                    .map(split_artists)
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or_else(|| vec!["未知艺术家".to_string()]);
+                (title, artists, None)
+            };
+            let album = album_from_tag
+                .or(side_album)
                 .unwrap_or_else(|| "未知专辑".to_string());
             let track_number = tag.as_ref().and_then(|t| t.track());
             let year = tag.as_ref().and_then(|t| t.year());
@@ -283,24 +439,36 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
                 has_cover,
                 replaygain_db,
                 replaygain_peak,
+                pending_parsed,
             )
         }
-        Err(_) => (
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "未知标题".to_string()),
-            vec!["未知艺术家".to_string()],
-            "未知专辑".to_string(),
-            None,
-            None,
-            0.0,
-            None,
-            None,
-            false,
-            None,
-            None,
-        ),
+        Err(_) => {
+            // 无法读取标签（格式不支持 / 文件损坏）：优先还原持久化的识别结果
+            let side = persist::read_sidecar(path);
+            let title = side
+                .as_ref()
+                .map(|s| s.title.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "未知标题".to_string())
+                });
+            let artists = side
+                .as_ref()
+                .map(|s| s.artists.clone())
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| vec!["未知艺术家".to_string()]);
+            let album = side
+                .as_ref()
+                .map(|s| s.album.clone())
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| "未知专辑".to_string());
+            (
+                title, artists, album, None, None, 0.0, None, None, false, None, None, None,
+            )
+        }
     };
 
     // 时长兜底：lofty 无法解析的格式（dsf/dff/dts/tta 等）用 ffprobe 探测，
@@ -308,6 +476,19 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
     if duration <= 0.0 {
         if let Some(probed) = crate::player::engine::probe_duration(path) {
             duration = probed;
+        }
+    }
+
+    // 实验室·元数据增强：本地拆分出候选的曲目进入在线校验队列
+    // （由扫描/导入完成后 drain，后台批量裁决后回写——见 verify 模块）
+    if let Some(parsed) = pending_parsed {
+        if !parsed.candidates.is_empty() {
+            verify::enqueue(verify::PendingVerify {
+                track_id: id.clone(),
+                local_title: title.clone(),
+                candidates: parsed.candidates,
+                duration_ms: (duration * 1000.0) as u64,
+            });
         }
     }
 
@@ -345,6 +526,66 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
     })
 }
 
+/// 曲目文本元数据是否仍为未知占位（未知标题 / 未知艺术家 / 未知专辑）。
+///
+/// 供「媒体播放 / 媒体信息提取 / 预播放加载」等读取文件头的流程判断是否需要
+/// 重新解析；占位轨与 CUE / SACD 虚拟轨由各自的解析链路处理，不在此重复读。
+pub(crate) fn needs_metadata_refresh(track: &Track) -> bool {
+    if track.metadata_pending || track.is_cue || track.is_sacd || track.iso_placeholder {
+        return false;
+    }
+    let artist_unknown = track.artists.is_empty()
+        || track
+            .artists
+            .iter()
+            .all(|a| a.trim().is_empty() || a.trim() == "未知艺术家");
+    track.title.trim().is_empty()
+        || track.title.trim() == "未知标题"
+        || artist_unknown
+        || track.album.trim().is_empty()
+        || track.album.trim() == "未知专辑"
+}
+
+/// 重新读取文件头的去重窗口：播放 / 预加载 / 滚动可见项都可能触发，
+/// 解析后仍未知时避免在窗口内反复做无谓 IO。
+const REFRESH_TTL: Duration = Duration::from_secs(300);
+
+fn refresh_marks() -> &'static Mutex<Vec<(String, Instant)>> {
+    static MARKS: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+    &MARKS
+}
+
+/// 重新读取文件头补全文本元数据（与扫描同一套逻辑：标签 → 附属文件 → 文件名拆分）。
+///
+/// 返回 `Some` 表示解析结果与库内值确有差异，调用方负责写库 / 更新播放器缓存；
+/// 无需刷新、命中窗口或结果未变一律返回 `None`。
+pub(crate) fn refresh_metadata_from_header(track: &Track) -> Option<Track> {
+    if !needs_metadata_refresh(track) {
+        return None;
+    }
+    let key = track.file_path.to_lowercase();
+    {
+        let mut marks = refresh_marks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        marks.retain(|(_, at)| now.duration_since(*at) < REFRESH_TTL);
+        if marks.iter().any(|(p, _)| p == &key) {
+            return None;
+        }
+        marks.push((key, now));
+    }
+
+    let mut full = parse_track(Path::new(&track.file_path))?;
+    full.id = track.id.clone();
+    // 加入时间以库内记录为准，避免重读文件头把旧曲目顶到「最近添加」
+    full.added_at = track.added_at;
+    if full.title == track.title && full.artists == track.artists && full.album == track.album {
+        return None;
+    }
+    Some(full)
+}
+
 /// 解析 ReplayGain TRACK_GAIN 标签（形如 "+3.21 dB" / "-2.5 dB" / "0.00 dB"）
 fn parse_replaygain_gain_db(raw: &str) -> Option<f32> {
     let trimmed = raw.trim();
@@ -373,6 +614,111 @@ fn split_artists(raw: &str) -> Vec<String> {
         .collect()
 }
 
+// ===== 实验室·元数据增强（enhanced-metadata）=====
+//
+// 目标：更完善地解析艺术家 / 专辑名称。在基础分隔符（/ ; ,）之外，额外处理：
+//  - 合作标记 `feat.` / `ft.` / `featuring`，从标题或艺术家串中拆出合作者；
+//  - 分隔符 ` & ` 与 ` x `（必须带空格，避免误伤 AC/DC、3x 这类艺名 / 版本号）；
+//  - 合辑标识「群星 / VA / Various Artists」等归一为统一的 `Various Artists`。
+
+/// 实验室·元数据增强：规整标题里的合作艺人（feat.）并入艺术家列表，
+/// 同时按增强规则拆分艺术家。返回 `(标题, 艺术家列表)`。
+fn enhanced_metadata(title_in: &str, artist_in: &str) -> (String, Vec<String>) {
+    let (clean_title, title_coops) = clean_title_enhanced(title_in);
+    let mut artists = parse_artists_enhanced(artist_in);
+    for c in title_coops {
+        if !artists.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
+            artists.push(c);
+        }
+    }
+    (clean_title, artists)
+}
+
+/// 标题增强：剥离 `feat.` / `ft.` 合作段，返回干净标题与抽出的合作艺人。
+fn clean_title_enhanced(title: &str) -> (String, Vec<String>) {
+    let (remain, coops) = extract_featuring(title);
+    (remain.trim().to_string(), coops)
+}
+
+/// 艺术家增强：归一合辑标识并按分隔符拆分成多位艺术家（含 feat. 合作者）。
+pub(crate) fn parse_artists_enhanced(raw: &str) -> Vec<String> {
+    let normalized = normalize_various_artists(raw);
+    let (remain, coops) = extract_featuring(&normalized);
+    let mut out = split_on_delimiters(&remain);
+    for c in coops {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        out.push("未知艺术家".to_string());
+    }
+    out
+}
+
+/// 把 `feat.` / `ft.` / `featuring` 合作标记从句中分离。
+///
+/// 返回去掉合作段后的剩余文本，以及抽出的合作艺人（已按分隔符拆分）。
+/// 例：`"Song (feat. X & Y)"` → `("Song", ["X", "Y"])`；`"Song ft. Z"` → `("Song", ["Z"])`。
+fn extract_featuring(text: &str) -> (String, Vec<String>) {
+    let lower = text.to_lowercase();
+    let markers: &[&str] = &["featuring ", "feat. ", "feat ", "ft. ", "ft "];
+    let mut best: Option<(usize, usize)> = None;
+    for m in markers {
+        if let Some(pos) = lower.find(m) {
+            let better = match best {
+                None => true,
+                Some((p, _)) => pos < p,
+            };
+            if better {
+                best = Some((pos, m.len()));
+            }
+        }
+    }
+    let Some((pos, mlen)) = best else {
+        return (text.to_string(), Vec::new());
+    };
+    let before = &text[..pos];
+    let after = text[pos + mlen..].trim_end();
+    // 去掉合作段可能的闭合括号，再按分隔符拆出每位合作者
+    let after = after.strip_suffix(')').unwrap_or(after);
+    let coops = split_on_delimiters(after);
+    let remain = before
+        .trim_end_matches(|c: char| c == ' ' || c == '(' || c == '[')
+        .trim()
+        .to_string();
+    (remain, coops)
+}
+
+/// 按艺术家分隔符拆分：`/ ; ,` 为基础，并额外处理 ` & ` 与 ` x `（带空格）。
+fn split_on_delimiters(raw: &str) -> Vec<String> {
+    let mut expanded: Vec<String> = Vec::new();
+    for piece in raw.split(['/', ';', ',']).map(|s| s.trim().to_string()) {
+        for sub in piece.split(" & ").map(|s| s.trim().to_string()) {
+            for sub2 in sub.split(" x ").map(|s| s.trim().to_string()) {
+                if !sub2.is_empty() {
+                    expanded.push(sub2);
+                }
+            }
+        }
+    }
+    expanded
+}
+
+/// 归一合辑标识为统一的 `Various Artists`。
+fn normalize_various_artists(raw: &str) -> String {
+    let t = raw.trim();
+    let low = t.to_lowercase();
+    let is_va = matches!(
+        low.as_str(),
+        "various artists" | "various artist" | "va" | "v.a." | "v.a" | "群星" | "群星专辑" | "群星合辑" | "compilation" | "compilations" | "compliation" | "comp" | "various"
+    );
+    if is_va {
+        return "Various Artists".to_string();
+    }
+    t.to_string()
+}
+
 /// 读取文件 mtime（秒）；无法读取时返回 0（退化为总是重新解析）
 fn file_mtime(path: &Path) -> i64 {
     std::fs::metadata(path)
@@ -386,15 +732,20 @@ fn file_mtime(path: &Path) -> i64 {
 ///
 /// 执行增量扫描并推送进度事件。
 ///
-/// `existing` 为库内 (id, file_path, modified_at) 基线：
+/// `existing` 为库内 (id, file_path, modified_at, metadata_pending) 基线：
 ///  - mtime 未变的音频文件跳过元数据解析（大曲库二次扫描几乎零成本）；
 ///  - 新增 / 变更音频文件重新解析进 upserts；
 ///  - CUE 分轨每轮重新解析（id 稳定，upsert 会保留 added_at）；
 ///  - 基线中磁盘已消失的曲目（按 id 判定）进 removed_ids。
+///
+/// `force = true` 时音频逐文件 mtime 跳过全部失效（全量重解析，用于
+/// lab 开关切换后按新模式刷新旧曲目）；删除检测与 SACD ISO 跳过仍按基线，
+/// 不会因 force 误删条目或重复拆轨。
 pub fn scan_directory(
     roots: &[PathBuf],
-    existing: &[(String, String, i64)],
+    existing: &[(String, String, i64, bool)],
     app: &AppHandle,
+    force: bool,
 ) -> ScanResult {
     let mut progress = ScanProgress {
         stage: ScanStage::Discovering,
@@ -405,10 +756,11 @@ pub fn scan_directory(
     };
     emit(app, &progress);
 
-    // 基线索引：path → (id, mtime)；用于音频文件增量跳过
-    let existing_by_path: std::collections::HashMap<String, (String, i64)> = existing
+    // 基线索引：path → (id, mtime, pending)；用于音频文件增量跳过。
+    // pending（占位未解析）即使 mtime 未变也要重新解析，修复历史 0:00 占位。
+    let existing_by_path: std::collections::HashMap<String, (String, i64, bool)> = existing
         .iter()
-        .map(|(id, path, mtime)| (path.clone(), (id.clone(), *mtime)))
+        .map(|(id, path, mtime, pending)| (path.clone(), (id.clone(), *mtime, *pending)))
         .collect();
 
     // 发现阶段：音频文件
@@ -464,44 +816,26 @@ pub fn scan_directory(
         }
     }
 
-    // SACD ISO 分轨（Release 也启用：整张 ISO 拆成虚拟多轨专辑）
+    // SACD ISO：**按需解析**——打开整张 ISO + 逐条探测时长很慢（大 ISO 可能数十秒），
+    // 放进扫描会拖慢加载。这里只生成 ISO 占位（列表可见、点击播放时 resolve_one
+    // 再拆虚拟分轨），并排除 ISO 本体避免被当作普通音频误入库。
     {
         let mut iso_files = Vec::new();
         for root in roots {
             iso_files.extend(discover_sacd_files(root));
         }
-        // 所有 .iso 先排除，避免被当作普通音频 parse_track 误入库
         for iso in &iso_files {
             referenced.insert(norm_path_for_match(iso));
-        }
-        // "只做 ISO"：按 ISO 所在目录收集其音轨标题（归一化），用于剔除同目录下
-        // 对同一张 ISO 手动解包产出的散落音频（.dsf/.dff 或标题匹配某条 ISO 音轨），
-        // 避免同一首歌以「ISO 虚拟轨 + 散落文件」两种来源重复入库。
-        let mut sacd_titles_by_dir: std::collections::HashMap<
-            PathBuf,
-            std::collections::HashSet<String>,
-        > = std::collections::HashMap::new();
-        for iso in &iso_files {
-            if let Some(mut disc) = super::sacd::SacdDisc::open(iso) {
-                // DST 压缩区按数据量推算会把时长压低（仅 ~40%），用 -P 探测真实时长
-                disc.probe_durations();
-                let tracks = disc.to_tracks();
-                if let Some(parent) = iso.parent() {
-                    let set = sacd_titles_by_dir
-                        .entry(parent.to_path_buf())
-                        .or_default();
-                    for t in &tracks {
-                        let n = normalize_title_for_dedup(&t.title);
-                        if !n.is_empty() {
-                            set.insert(n);
-                        }
-                    }
+            let iso_str = iso.to_string_lossy().to_string();
+            let unchanged = existing_by_path
+                .get(&iso_str)
+                .is_some_and(|(_, m, _)| *m == file_mtime(iso) && *m != 0);
+            if !unchanged {
+                if let Some(track) = placeholder_track(iso, true) {
+                    virtual_tracks.push(track);
                 }
-                virtual_tracks.extend(tracks);
             }
-            // 非 SACD 镜像（系统盘 / 游戏 ISO）已排除且静默忽略
         }
-        retain_sacd_derived(&mut all_audio, &sacd_titles_by_dir);
     }
 
     // 排除被 CUE / SACD 引用的镜像文件（规范化后比较，避免路径表示差异漏配，
@@ -527,27 +861,63 @@ pub fn scan_directory(
     let mut upserts = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> =
         std::collections::HashSet::with_capacity(all_audio.len() + virtual_tracks.len());
-    for (i, path) in all_audio.iter().enumerate() {
+
+    // 先收集需要（重新）解析的路径：已解析（非占位）且 mtime 未变的文件跳过
+    // （占位 pending 即使 mtime 不变也要重解，修复 0:00 占位；force 全量重解让新规则对旧曲目生效）。
+    let mut to_parse: Vec<PathBuf> = Vec::with_capacity(all_audio.len());
+    let mut unchanged_count = 0usize;
+    for path in &all_audio {
         let path_str = path.to_string_lossy().to_string();
         seen_ids.insert(track_id_from_path(path));
         progress.current_path = Some(path_str.clone());
-
         let mtime = file_mtime(path);
-        let unchanged = existing_by_path
-            .get(&path_str)
-            .is_some_and(|(_, old_mtime)| *old_mtime == mtime && mtime != 0);
-        if !unchanged {
-            if let Some(track) = parse_track(path) {
-                upserts.push(track);
-            }
-        }
-
-        progress.processed = (i + 1) as u32;
-        // 每 20 个推送一次进度，避免事件洪泛
-        if i % 20 == 0 {
-            emit(app, &progress);
+        let unchanged = !force
+            && existing_by_path
+                .get(&path_str)
+                .is_some_and(|(_, old_mtime, pending)| {
+                    !pending && *old_mtime == mtime && mtime != 0
+                });
+        if unchanged {
+            unchanged_count += 1;
+        } else {
+            to_parse.push(path.clone());
         }
     }
+
+    // 并行解析：受控线程池（上限 8）提升大库 / DSD 库解析吞吐；parse_track 除向
+    // Mutex 保护的校验队列入队外均为无副作用的纯解析，可安全并行。失败则回退串行。
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n_threads)
+        .build()
+        .ok();
+
+    // 分块并行：每块完成即推送一次进度，避免大库解析期间进度条长时间无反馈
+    const PARSE_CHUNK: usize = 256;
+    let mut parsed_count = 0usize;
+    for chunk in to_parse.chunks(PARSE_CHUNK) {
+        let parsed: Vec<Track> = match &pool {
+            Some(pool) => pool.install(|| {
+                chunk
+                    .par_iter()
+                    .filter_map(|p| parse_track(p))
+                    .collect()
+            }),
+            None => chunk.iter().filter_map(|p| parse_track(p)).collect(),
+        };
+        upserts.extend(parsed);
+        parsed_count += chunk.len();
+        // 进度语义与原串行实现一致：已跳过（mtime 未变）+ 已解析
+        progress.processed = (unchanged_count + parsed_count) as u32;
+        emit(app, &progress);
+    }
+
+    progress.current_path = None;
+    progress.processed = (all_audio.len() + virtual_tracks.len()) as u32;
+    emit(app, &progress);
 
     // 虚拟分轨（CUE / SACD）：每轮重新解析（id 稳定，upsert 会保留 added_at）
     for t in &virtual_tracks {
@@ -565,12 +935,12 @@ pub fn scan_directory(
     //    只是"没被发现"，同样必须保留。
     let mut removed_ids: Vec<String> = existing
         .iter()
-        .filter(|(id, path, _)| {
+        .filter(|(id, path, _, _)| {
             let p = std::path::Path::new(path);
             // 文件确实消失，或落在回收站/快照等垃圾目录（此前误入库）→ 清出曲库
             !seen_ids.contains(id) && (!p.exists() || is_junk_path(p))
         })
-        .map(|(id, _, _)| id.clone())
+        .map(|(id, _, _, _)| id.clone())
         .collect();
     removed_ids.sort();
 
@@ -623,13 +993,15 @@ pub(crate) fn placeholder_track(path: &Path, is_iso: bool) -> Option<Track> {
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "未知标题".to_string());
+    // 文件夹推断的专辑 / 艺人（廉价兜底，真实标签在滚动 / 播放按需解析后覆盖）
+    let (album, first_artist) = infer_album_artist(path);
 
     Some(Track {
         id: track_id_from_path(path),
         title,
-        artists: vec!["未知艺术家".to_string()],
-        album: "未知专辑".to_string(),
-        album_id: Some(super::models::album_id_of("未知专辑", "未知艺术家")),
+        artists: vec![first_artist.clone()],
+        album: album.clone(),
+        album_id: Some(super::models::album_id_of(&album, &first_artist)),
         duration: 0.0,
         track_number: None,
         year: None,
@@ -886,8 +1258,39 @@ pub(crate) fn collect_import_tracks(paths: &[PathBuf]) -> Vec<Track> {
     upserts
 }
 
+// 进度上报节流：扫描可能逐文件 emit（上千次 / 秒），海量 IPC 事件在
+// 主线程（同时承载 GTK 与 webview）排队，会把 UI 堵到「无响应」。
+// 这里限制为「阶段切换 或 距上次 ≥ 200ms」才真正下发，既保留进度观感，
+// 又把主线程 IPC 压力降到 ~5 次/秒。
+thread_local! {
+    static LAST_EMIT: RefCell<Option<(Instant, ScanStage)>> = const { RefCell::new(None) };
+}
+
 fn emit(app: &AppHandle, progress: &ScanProgress) {
-    let _ = app.emit("library://scan-progress", progress);
+    let now = Instant::now();
+    let should = LAST_EMIT.with(|cell| {
+        let mut g = cell.borrow_mut();
+        match *g {
+            None => {
+                *g = Some((now, progress.stage));
+                true
+            }
+            Some((t, stage)) => {
+                // 阶段切换（Discovering/Parsing/Writing/Done）或完成帧必发；
+                // 否则按时间间隔节流，避免解析阶段逐文件洪泛。
+                let force = progress.stage != stage || progress.stage == ScanStage::Done;
+                if force || now.duration_since(t) >= Duration::from_millis(200) {
+                    *g = Some((now, progress.stage));
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    });
+    if should {
+        let _ = app.emit("library://scan-progress", progress);
+    }
 }
 
 /// 规范化路径，用于「CUE / SACD 引用的整碟文件」与「扫描发现的音频文件」之间的比较。
@@ -1187,5 +1590,66 @@ mod tests {
                 r"G:\AITEMP\c.flac".to_string()
             ]
         );
+    }
+
+    /// 写一段可被 lofty 解析的静音 WAV（数据块非空，避免触发 ffprobe 兜底）。
+    fn write_short_wav(path: &Path) {
+        let channels: u16 = 2;
+        let bits: u16 = 16;
+        let sample_rate: u32 = 44_100;
+        let byte_rate = sample_rate * channels as u32 * bits as u32 / 8;
+        let data_len = (sample_rate / 5) * channels as u32 * bits as u32 / 8; // 0.2 秒
+        let mut bytes: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&(channels * bits / 8).to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend(std::iter::repeat(0u8).take(data_len as usize));
+        std::fs::write(path, bytes).expect("write wav");
+    }
+
+    /// 播放 / 信息提取 / 预加载共用的「重读文件头」入口：
+    /// 库内文本为未知占位时用同一套解析逻辑（标签 → 附属文件）补全，且 id / 加入时间不变。
+    #[test]
+    fn refresh_metadata_from_header_fills_unknown_from_sidecar() {
+        let dir = std::env::temp_dir().join(format!("tplayer-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let audio = dir.join("refresh_case.wav");
+        write_short_wav(&audio);
+        std::fs::write(
+            dir.join("refresh_case.wav.tplayer-meta.json"),
+            r#"{"version":1,"file":"refresh_case.wav","title":"真实标题","artists":["真实艺术家"],"album":"真实专辑","savedAt":"2026-01-01 00:00:00"}"#,
+        )
+        .expect("write sidecar");
+
+        let mut stale = parse_track(&audio).expect("应可解析");
+        stale.title = "未知标题".into();
+        stale.artists = vec!["未知艺术家".into()];
+        stale.album = "未知专辑".into();
+        assert!(needs_metadata_refresh(&stale), "未知占位应触发重读");
+
+        let refreshed = refresh_metadata_from_header(&stale).expect("应补全文本元数据");
+        assert_eq!(refreshed.title, "真实标题");
+        assert_eq!(refreshed.artists, vec!["真实艺术家".to_string()]);
+        assert_eq!(refreshed.album, "真实专辑");
+        assert_eq!(refreshed.id, stale.id, "id 必须保持稳定");
+        assert_eq!(refreshed.added_at, stale.added_at, "加入时间应保留");
+        // 补全后不再需要刷新，播放 / 信息提取不会重复读文件头
+        assert!(!needs_metadata_refresh(&refreshed));
+
+        // 已完成解析且文本完整的曲目：不触发重读
+        let known = parse_track(&audio).expect("应可解析");
+        assert!(!needs_metadata_refresh(&known));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

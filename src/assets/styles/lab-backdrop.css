@@ -1,0 +1,240 @@
+/* ==========================================================================
+   实验室 · 窗口底纹（theme-colors 实验功能，默认关闭）
+   --------------------------------------------------------------------------
+   生效条件：仅当 `<html data-backdrop="...">` 存在时命中；属性不存在（功能关闭）
+   时以下规则**全部不生效**，界面与现状像素级一致——body / .app-shell / 各表层
+   仍由 main.css、App.vue、各组件的原有不透明背景决定。
+
+   属性取值：
+     solid     —— 窗口透明 + 主题实底（纯 CSS，任何平台可用；原生材质不可用时的安全态）
+     native    —— OS 原生材质（Win Mica/Acrylic、macOS HudWindow）；表层降透明度让材质透出
+     wallpaper —— 自定义壁纸（JS 写入 --lab-wallpaper-image / --lab-wallpaper-size）
+     gradient  —— 预设渐变（JS 写入 --lab-gradient；停止色经 color-mix 跟随明暗主题）
+     texture   —— 纹理图案（JS 写入 --lab-texture / --lab-texture-tint；纯内联，不依赖外部图片）
+
+   防裸窗约束（硬性）：
+     1. `solid` 态底纹层恒画主题实底；
+     2. `native` 态**没有任何区域完全透明**——内容区 88%、表层 62% 的主题色打底，
+        即便原生材质被系统关闭 / DWM 忽略，窗体也只是「半透明」而非全透明裸窗；
+     3. 后端还会回读 DWM 确认材质真生效，未生效时前端直接改用 solid 态（双保险）。
+
+   依赖：CSS `color-mix()`（用户已确认允许）。WebView2 / WKWebView / 现代 WebKitGTK 均支持；
+   不支持的极老引擎会忽略该声明 → 背景保持原不透明色，同样不会裸窗（只是无半透明效果）。
+   ========================================================================== */
+
+/* 底纹层：铺满全窗、置于全部内容之下。
+   说明：#app 带 isolation:isolate（自成层叠上下文），故 z-index:-1 的子层会落在
+   #app 栈底——位于外壳内容之下、body 背景之上，正是想要的「内容背后的底纹」。 */
+.app-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* 恒垫实底：solid 态直接可见；native 态置透明让位给 OS 材质 */
+  background-color: var(--color-bg-base);
+}
+
+/* ---- 公共：让出窗口给底纹层 / OS 材质（所有底纹模式都要透明化外壳） ---- */
+/* 关键：wallpaper / gradient / texture 模式下，若外壳保持不透明实底，
+   会完全盖住背后的 .app-backdrop 底纹层 —— 这正是「壁纸无效 / 渐变纹理不明显」的根因。
+   故对所有 data-backdrop 模式统一把 body 与 .app-shell 设为透明，由底纹层负责实底/图像。 */
+html[data-backdrop] body,
+html[data-backdrop] .app-shell {
+  background-color: transparent;
+}
+
+/* 圆角仅 native 态需要（macOS decorations:false + transparent 下必须，否则四角异常；
+   Windows 上配合 Mica/Acrylic 也更贴合原生材质）。其余模式底纹层已铺满全窗，无需圆角。 */
+html[data-backdrop='native'] .app-shell {
+  border-radius: var(--radius-lg, 10px);
+}
+
+/* ---- 原生质感：表层半透明，让 Mica / Acrylic / Vibrancy 透出 ---- */
+html[data-backdrop='native'] .app-backdrop {
+  /* 不画实底，否则盖住 OS 材质 */
+  background-color: transparent;
+}
+
+html[data-backdrop='native'] .app-shell__content {
+  /* 内容区 88% 主题面：材质透出的同时保证文字可读；材质失效时也不裸窗 */
+  background-color: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
+}
+
+html[data-backdrop='native'] .sidebar,
+html[data-backdrop='native'] .title-bar,
+html[data-backdrop='native'] .right-panel {
+  background-color: color-mix(in srgb, var(--color-bg-sidebar) 62%, transparent);
+  background-image: none; /* 关掉封面皮肤的极淡主色染，避免干扰原生材质 */
+}
+
+html[data-backdrop='native'] .player-bar {
+  background-color: color-mix(in srgb, var(--color-bg-elevated) 72%, transparent);
+  background-image: none;
+}
+
+/* ---- 纯色基底：窗口透明 + 主题实底（无原生材质时的安全态） ---- */
+html[data-backdrop='solid'] .app-shell__content {
+  /* 内容区透明，直接露出底纹层的主题实底 */
+  background-color: transparent;
+}
+
+html[data-backdrop='solid'] .sidebar,
+html[data-backdrop='solid'] .title-bar,
+html[data-backdrop='solid'] .right-panel {
+  /* 96% 打底：既露出一点实底层次，又保证与现状观感一致 */
+  background-color: color-mix(in srgb, var(--color-bg-sidebar) 96%, transparent);
+  background-image: none;
+}
+
+html[data-backdrop='solid'] .player-bar {
+  background-color: color-mix(in srgb, var(--color-bg-elevated) 96%, transparent);
+  background-image: none;
+}
+
+/* ---- 自定义壁纸：壁纸图层 + 半透明罩（保证文字可读） ------------------------- */
+/* 壁纸图由 JS 写入 CSS 变量 --lab-wallpaper-image / --lab-wallpaper-size
+   （见 src/lab/features/theme-colors.ts）；未导入时变量缺失，url("") 无效，
+   由下方实底兜底，不会出现空背景。 */
+html[data-backdrop='wallpaper'] .app-backdrop {
+  background-color: var(--color-bg-base);
+  background-image: var(--lab-wallpaper-image, none);
+  background-size: var(--lab-wallpaper-size, cover);
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* 壁纸上压一层极淡主题色罩：提升文字对比度，同时让壁纸与界面色调统一 */
+html[data-backdrop='wallpaper'] .app-backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-bg-base) 55%, transparent),
+    color-mix(in srgb, var(--color-bg-base) 78%, transparent)
+  );
+}
+
+html[data-backdrop='wallpaper'] .app-shell__content {
+  background-color: color-mix(in srgb, var(--color-bg-surface) 75%, transparent);
+}
+
+html[data-backdrop='wallpaper'] .sidebar,
+html[data-backdrop='wallpaper'] .title-bar,
+html[data-backdrop='wallpaper'] .right-panel {
+  background-color: color-mix(in srgb, var(--color-bg-sidebar) 66%, transparent);
+  background-image: none;
+}
+
+html[data-backdrop='wallpaper'] .player-bar {
+  background-color: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+  background-image: none;
+}
+
+/* ---- 预设渐变：渐变图层 + 浅压主题色罩（保证文字可读） ----------------------- */
+/* 渐变值由 JS 写入 CSS 变量 --lab-gradient（见 src/lab/features/theme-colors.ts），
+   停止色经 color-mix 与主题变量混色，明暗主题切换自动跟随。 */
+html[data-backdrop='gradient'] .app-backdrop {
+  background-color: var(--color-bg-base);
+  background-image: var(--lab-gradient, none);
+  background-size: cover;
+  background-position: center;
+}
+
+html[data-backdrop='gradient'] .app-shell__content {
+  background-color: color-mix(in srgb, var(--color-bg-surface) 74%, transparent);
+}
+
+html[data-backdrop='gradient'] .sidebar,
+html[data-backdrop='gradient'] .title-bar,
+html[data-backdrop='gradient'] .right-panel {
+  background-color: color-mix(in srgb, var(--color-bg-sidebar) 66%, transparent);
+  background-image: none;
+}
+
+html[data-backdrop='gradient'] .player-bar {
+  background-color: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+  background-image: none;
+}
+
+/* ---- 纹理图案：纯内联（repeating-gradient / 内联 SVG），不依赖外部图片 -------- */
+/* 纹理值由 JS 写入 CSS 变量 --lab-texture，淡色调 --lab-texture-tint 从主题次要
+   文本色派生，明暗主题下均可读。 */
+html[data-backdrop='texture'] .app-backdrop {
+  background-color: var(--color-bg-base);
+  background-image: var(--lab-texture, none);
+  background-repeat: repeat;
+}
+
+html[data-backdrop='texture'] .app-shell__content {
+  background-color: color-mix(in srgb, var(--color-bg-surface) 76%, transparent);
+}
+
+html[data-backdrop='texture'] .sidebar,
+html[data-backdrop='texture'] .title-bar,
+html[data-backdrop='texture'] .right-panel {
+  background-color: color-mix(in srgb, var(--color-bg-sidebar) 74%, transparent);
+  background-image: none;
+}
+
+html[data-backdrop='texture'] .player-bar {
+  background-color: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+  background-image: none;
+}
+
+/* 尊重系统「减少动态效果」偏好：关闭半透明混合，直接走各自实底（可读性优先） */
+@media (prefers-reduced-transparency) {
+  html[data-backdrop='native'] .app-shell__content,
+  html[data-backdrop='solid'] .app-shell__content,
+  html[data-backdrop='wallpaper'] .app-shell__content,
+  html[data-backdrop='gradient'] .app-shell__content,
+  html[data-backdrop='texture'] .app-shell__content,
+  html[data-backdrop='native'] .sidebar,
+  html[data-backdrop='native'] .title-bar,
+  html[data-backdrop='native'] .right-panel,
+  html[data-backdrop='native'] .player-bar,
+  html[data-backdrop='solid'] .sidebar,
+  html[data-backdrop='solid'] .title-bar,
+  html[data-backdrop='solid'] .right-panel,
+  html[data-backdrop='solid'] .player-bar,
+  html[data-backdrop='wallpaper'] .sidebar,
+  html[data-backdrop='wallpaper'] .title-bar,
+  html[data-backdrop='wallpaper'] .right-panel,
+  html[data-backdrop='wallpaper'] .player-bar,
+  html[data-backdrop='gradient'] .sidebar,
+  html[data-backdrop='gradient'] .title-bar,
+  html[data-backdrop='gradient'] .right-panel,
+  html[data-backdrop='gradient'] .player-bar,
+  html[data-backdrop='texture'] .sidebar,
+  html[data-backdrop='texture'] .title-bar,
+  html[data-backdrop='texture'] .right-panel,
+  html[data-backdrop='texture'] .player-bar {
+    background-color: var(--color-bg-surface);
+  }
+
+  html[data-backdrop='native'] .sidebar,
+  html[data-backdrop='native'] .title-bar,
+  html[data-backdrop='native'] .right-panel,
+  html[data-backdrop='solid'] .sidebar,
+  html[data-backdrop='solid'] .title-bar,
+  html[data-backdrop='solid'] .right-panel,
+  html[data-backdrop='wallpaper'] .sidebar,
+  html[data-backdrop='wallpaper'] .title-bar,
+  html[data-backdrop='wallpaper'] .right-panel,
+  html[data-backdrop='gradient'] .sidebar,
+  html[data-backdrop='gradient'] .title-bar,
+  html[data-backdrop='gradient'] .right-panel,
+  html[data-backdrop='texture'] .sidebar,
+  html[data-backdrop='texture'] .title-bar,
+  html[data-backdrop='texture'] .right-panel {
+    background-color: var(--color-bg-sidebar);
+  }
+
+  html[data-backdrop='native'] .player-bar,
+  html[data-backdrop='solid'] .player-bar,
+  html[data-backdrop='wallpaper'] .player-bar,
+  html[data-backdrop='gradient'] .player-bar,
+  html[data-backdrop='texture'] .player-bar {
+    background-color: var(--color-bg-elevated);
+  }
+}

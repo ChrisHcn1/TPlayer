@@ -10,6 +10,7 @@
  * M2 接通 Rust 后仅替换 services/player 的实现选择，store / 组件零改动。
  */
 import type {
+  EqBand,
   IPlayer,
   PlayContext,
   PlayMode,
@@ -149,6 +150,10 @@ export class WebPlayer implements IPlayer {
 
   async setReplaygain(_enabled: boolean): Promise<void> {
     /* 浏览器 mock 引擎无真实音频输出，ReplayGain 不生效，忽略即可 */
+  }
+
+  async setEq(_enabled: boolean, _bands: EqBand[]): Promise<void> {
+    /* 浏览器 mock 引擎无真实音频输出，均衡器不生效，忽略即可 */
   }
 
   async setSleepTimer(delayMs: number, waitTrackEnd: boolean): Promise<void> {

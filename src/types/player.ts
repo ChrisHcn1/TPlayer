@@ -5,6 +5,16 @@
  * 引擎差异全部由 Rust 侧 `PlayerEngine` trait 吸收（见 ARCHITECTURE.md）。
  */
 
+/** 均衡器单频段（与后端 `EqBand` 对齐） */
+export interface EqBand {
+  /** 中心频率（Hz） */
+  freq: number
+  /** 增益（dB，-15 ~ +15） */
+  gainDb: number
+  /** Q 值（0.1 ~ 10） */
+  q: number
+}
+
 /** 播放状态机状态 */
 export type PlaybackStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'stopped' | 'error'
 
@@ -92,6 +102,8 @@ export interface IPlayer {
   setCrossfade(enabled: boolean, durationMs: number): Promise<void>
   /** 设置音量归一化 ReplayGain 开关；浏览器 mock 忽略 */
   setReplaygain(enabled: boolean): Promise<void>
+  /** 设置实验室均衡器配置（频段增益 + 总开关）；浏览器 mock 忽略 */
+  setEq(enabled: boolean, bands: EqBand[]): Promise<void>
   /**
    * 设置睡眠定时器：delayMs 毫秒后到期；waitTrackEnd=true 时到期后播完当前曲目才停止
    * （delayMs=0 表示立即进入"播完当前曲目"等待）。

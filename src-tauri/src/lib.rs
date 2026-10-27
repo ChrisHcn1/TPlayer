@@ -122,6 +122,16 @@ pub fn run() {
                 let cfg = &config;
                 engine_handle.set_replaygain(cfg.replaygain.enabled);
             }
+            // 从配置下发实验室均衡器配置（默认关闭，频段增益均为 0）
+            {
+                let cfg = &config;
+                engine_handle.set_eq(cfg.eq.clone());
+            }
+            // 从配置下发生实验室·元数据增强开关（零成本原子读，供扫描解析使用）
+            crate::library::scan::ENHANCED_METADATA.store(
+                config.lab.is_enabled("enhanced-metadata"),
+                std::sync::atomic::Ordering::SeqCst,
+            );
 
             let state = AppState {
                 player: player_handle.clone(),
@@ -186,17 +196,8 @@ pub fn run() {
                 });
             }
 
-            // 启动后自动补解析历史占位轨道（早期扫描遗留、元数据未读的 0:00 条目）：
-            // 延迟数秒，避免与首屏加载 / 首次曲库刷新争抢 IO 与曲库锁；本地优先、网络随后，
-            // 完成后经 library://tracks-resolved 增量更新前端。用户点“扫描”时会再触发一次。
-            {
-                let app_bg = app_handle.clone();
-                let cancel = app.state::<AppState>().scan_cancel.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(4));
-                    commands::library::spawn_lazy_backfill(&app_bg, cancel);
-                });
-            }
+            // 不再启动后常驻后台补解析：解析已在「扫描」那一次全量完成（scan_directory），
+            // 启动即空转只会把界面卡成「未响应」。SACD 拆轨 / 精确时长等重活改按需（播放时）。
 
             // 显式给主窗口设置图标：Linux/X11·Wayland 下若不设置，窗口与任务栏
             // 会回退为系统默认（齿轮）图标；安装版另由 .desktop 提供图标。
@@ -445,6 +446,8 @@ pub fn run() {
             commands::player::player_set_crossfade,
             commands::player::player_set_replaygain,
             commands::player::player_set_rate,
+            commands::player::player_set_eq,
+            commands::player::player_get_eq,
             commands::player::player_set_sleep_timer,
             commands::player::player_cancel_sleep_timer,
             commands::player::player_sleep_timer_status,
@@ -470,7 +473,11 @@ pub fn run() {
             commands::library::library_add_dir,
             commands::library::library_remove_dir,
             commands::library::library_import_files,
+            commands::library::library_meta_verify_status,
+            commands::library::library_meta_verify_retry_track,
+            commands::library::library_meta_verify_log,
             commands::library::library_resolve_track,
+            commands::library::library_resolve_tracks,
             commands::library::library_track_info,
             commands::library::library_list_playlists,
             commands::library::library_create_playlist,
@@ -483,15 +490,30 @@ pub fn run() {
             commands::lyrics::lyrics_load,
             commands::lyrics::lyrics_save_offset,
             commands::lyrics::lyrics_clear_cache,
+            commands::lyrics::lyrics_sidecar_metadata,
             // 设置
             commands::settings::settings_load,
             commands::settings::settings_save,
+            // 实验室（功能开关，与主设置解耦）
+            commands::lab::lab_get,
+            commands::lab::lab_set_feature,
+            // 实验室·窗口底纹（原生材质运行时切换，免重启）
+            commands::lab::lab_window_set_effect,
+            // 实验室·窗口底纹（自定义壁纸：导入 / 查询 / 移除）
+            commands::lab::lab_import_wallpaper,
+            commands::lab::lab_wallpaper_path,
+            commands::lab::lab_remove_wallpaper,
+            // 实验室·窗口底纹（每日壁纸：Bing 每日图像，与 Edge 同源）
+            commands::lab::lab_fetch_daily_wallpaper,
+            commands::lab::lab_clear_daily_wallpaper,
             // 目录监控
             commands::watch::watcher_status,
             // 音频转换
             commands::converter::converter_start,
             commands::converter::converter_cancel,
             commands::converter::converter_probe_files,
+            // 自动更新：本机构建是否支持应用内更新（非 MSIX / 非 Store 版）
+            updater_available,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -529,6 +551,16 @@ fn is_packaged_msix() -> bool {
 #[cfg(not(windows))]
 fn is_packaged_msix() -> bool {
     false
+}
+
+/// 前端用于判断是否启用应用内更新。
+///
+/// 经 Microsoft Store 分发的 MSIX 版**不能**自带更新器（Store 政策要求更新只能走 Store），
+/// `is_packaged_msix()` 为 true 时后端不会注册 updater 插件。此命令让前端据此跳过检查，
+/// 避免对不存在的 updater 插件发起无效 IPC 与日志噪声。
+#[tauri::command]
+fn updater_available() -> bool {
+    !is_packaged_msix()
 }
 
 /// 一次性迁移旧版本（identifier = com.tplayer.next，数据目录 %APPDATA%\TPlayer Next）的数据到当前目录。

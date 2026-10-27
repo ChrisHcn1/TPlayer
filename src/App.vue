@@ -22,15 +22,19 @@ import { router } from './router'
 import { useSettingsStore } from './stores/settings'
 import { usePlayerStore } from './stores/player'
 import { useLibraryStore } from './stores/library'
+import { useLabStore } from './stores/lab'
+import { activateLabFeatures } from './lab/activate'
+import { backdropMode } from './lab/features/theme-colors'
 import { usePlaylistStore } from './stores/playlist'
 import { useToastStore } from './stores/toast'
 import { useStatsStore } from './stores/stats'
+import { useConverterStore } from './stores/converter'
+import { useUpdaterStore } from './stores/updater'
 import { useTheme } from './composables/useTheme'
 import { useLayout } from './composables/useLayout'
 import { useCommandPalette } from './composables/useCommandPalette'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { listen } from '@tauri-apps/api/event'
-import { updateService } from './services/update'
 import { subscribeWatcher } from './services/watcher'
 import { useTrackCover } from './composables/useTrackCover'
 import { useCoverTheme } from './composables/useCoverTheme'
@@ -50,6 +54,7 @@ import DesktopLyricsBar from './components/player/DesktopLyricsBar.vue'
 import NowPlayingOverlay from './components/player/NowPlayingOverlay.vue'
 import ToastContainer from './components/common/ToastContainer.vue'
 import DialogHost from './components/common/DialogHost.vue'
+import UpdateDialog from './components/common/UpdateDialog.vue'
 import ContextMenuHost from './components/common/ContextMenuHost.vue'
 import CommandPalette from './components/common/CommandPalette.vue'
 import Icon from './components/common/Icon.vue'
@@ -59,6 +64,8 @@ const playerStore = usePlayerStore()
 const libraryStore = useLibraryStore()
 const playlistStore = usePlaylistStore()
 const toastStore = useToastStore()
+const converterStore = useConverterStore()
+const updaterStore = useUpdaterStore()
 // applyTheme 为幂等操作：index.html 首屏脚本已按同一键写入 data-theme，
 // 这里再执行一次是为了把运行时响应式状态与 DOM 对齐。
 const { theme, applyTheme } = useTheme()
@@ -74,6 +81,13 @@ const {
 const commandPalette = useCommandPalette()
 const route = useRoute()
 const contentRef = ref<HTMLElement | null>(null)
+
+/** 当前是否处于「音频转换」页（独立路由 /converter 或设置-工具页签内嵌） */
+const isConverterPage = computed(
+  () =>
+    route.path === '/converter' ||
+    (route.path.startsWith('/settings') && route.params.tab === 'tools'),
+)
 
 /** 拖拽导入遮罩是否可见（仅 Tauri 环境注册拖放监听） */
 const isDragging = ref(false)
@@ -99,7 +113,12 @@ function setupDragImport(): void {
         case 'drop':
           isDragging.value = false
           if (payload.paths.length > 0) {
-            void loadDroppedAsPlaylist(payload.paths)
+            // 转换页：拖入即加入待转文件；其余页面：拖入即建播放列表并播放
+            if (isConverterPage.value) {
+              void converterStore.addPaths(payload.paths)
+            } else {
+              void loadDroppedAsPlaylist(payload.paths)
+            }
           }
           break
         default:
@@ -202,6 +221,15 @@ const shellColumns = computed(() => ({
 const SEEK_STEP_MS = 5_000
 /** 音量单步 */
 const VOLUME_STEP = 0.1
+
+/**
+ * 实验室·窗口底纹层是否渲染：功能开启 **且** 模式非 off。
+ * 关闭时完全不渲染该层，窗口外观与现状（不透明）完全一致。
+ */
+const labStoreForBackdrop = useLabStore()
+const labBackdropOn = computed(
+  () => labStoreForBackdrop.isEnabled('theme-colors') && backdropMode.value !== 'off',
+)
 
 /**
  * 全局快捷键（§6.1）：布局键 + 默认播放键全量注册。
@@ -312,8 +340,18 @@ onMounted(async () => {
   // 2) 设置：恢复非主题类偏好（语言、曲库目录、在线开关等）
   //    布局状态（§5.10）在 useLayout 模块首次加载时已读取并校验，此处不重复恢复
   await settingsStore.restore()
+  // 2.5) 实验室：加载实验功能开关，并激活「生效中」的功能（默认全关，零影响现有功能）
+  await useLabStore().init()
+  activateLabFeatures()
   // 3) 数据初始化：曲库 / 歌单 / 播放引擎（web 预览走 services/web 本地实现）
   await Promise.all([libraryStore.refresh(), playlistStore.refresh(), playerStore.init()])
+
+  // 3.4) 启动自动扫描（若用户开启「启动时自动扫描曲库」）：走「未变更则跳过」
+  //      智能扫描——曲目无变化时瞬时复用曲库 DB（已含完整解析/解码信息），
+  //      有变化时增量刷新，避免每次打开都重新遍历目录树与重新解析解码。
+  if (settingsStore.scanOnStartup) {
+    void libraryStore.scan()
+  }
 
   // 3.5) 目录自动监控：订阅增量同步事件，文件变化后自动刷新曲库
   subscribeWatcher(() => {
@@ -324,11 +362,38 @@ onMounted(async () => {
   //      增量合并曲目元数据（不触发全量刷新，网络大目录 UI 即时响应）。
   //      removedIds：整碟镜像被 CUE / SACD 分轨取代时，后端会移除占位条目，
   //      前端需同步移除，避免列表里残留「未知专辑」的幽灵条目。
+  //      重映射：占位被分轨取代后 id 变了，若当前曲目 / 队列正指向旧占位，
+  //      需平滑迁移到新分轨——否则后台解析会让「正在播放」悬空、队列出现失效条目。
+  //
+  //      缓冲合帧：后台补解析事件很密集（大曲库下每 32 条一批）。逐条
+  //      applyResolvedTracks 会反复整表去重 + 触发重渲染，把主线程拖垮。
+  //      这里累积到下一次合帧（约 300ms）再统一应用，把 N 次塌缩成少数几次。
+  let resolvedBufTracks: Track[] = []
+  let resolvedBufRemoved: string[] = []
+  let resolvedFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+  function flushResolvedBuffer() {
+    resolvedFlushTimer = null
+    const tracks = resolvedBufTracks
+    const removed = resolvedBufRemoved
+    resolvedBufTracks = []
+    resolvedBufRemoved = []
+    if (tracks.length === 0 && removed.length === 0) return
+    const remap = libraryStore.applyResolvedTracks(tracks, removed)
+    if (remap && Object.keys(remap).length > 0) {
+      playerStore.remapTrackIds(remap)
+    }
+  }
+
   listen<{ tracks: Track[]; removedIds?: string[] }>('library://tracks-resolved', (e) => {
     const tracks = Array.isArray(e.payload?.tracks) ? e.payload.tracks : []
     const removedIds = Array.isArray(e.payload?.removedIds) ? e.payload.removedIds : []
     if (tracks.length === 0 && removedIds.length === 0) return
-    libraryStore.applyResolvedTracks(tracks, removedIds)
+    resolvedBufTracks.push(...tracks)
+    resolvedBufRemoved.push(...removedIds)
+    if (resolvedFlushTimer == null) {
+      resolvedFlushTimer = setTimeout(flushResolvedBuffer, 300)
+    }
   })
     .then((unsub) => {
       unlistenResolved = unsub
@@ -337,19 +402,17 @@ onMounted(async () => {
       unlistenResolved = undefined
     })
 
-  // 4) 静默检查更新：延迟 8s 不拖慢启动；仅发现新版本时提示，
-  //    离线 / 更新通道尚未配置 / 浏览器预览等失败一律静默忽略
+  // 4) 应用内更新：初始化更新器（读取本机构建能力 + 跳过版本记录）
+  await updaterStore.init()
+  // 4.1) 安装完成后首启：一次性提示「已是最新版本」，随后清除标记
+  if (settingsStore.lastInstalledVersion) {
+    toastStore.success(`已是最新版本（v${settingsStore.lastInstalledVersion}）`)
+    void settingsStore.setLastInstalledVersion(null)
+  }
+  // 4.2) 每日首次后台静默检查：延迟 8s 不拖慢启动；仅发现新版本才弹确认框；
+  //      离线 / MSIX(Store) 版 / 浏览器预览一律静默忽略，绝不影响正常使用
   window.setTimeout(() => {
-    updateService
-      .check()
-      .then((update) => {
-        if (update) {
-          toastStore.info(`发现新版本 v${update.version}，可在「设置 → 更新」中下载安装`)
-        }
-      })
-      .catch(() => {
-        /* 静默：升级检查永不影响正常使用 */
-      })
+    void updaterStore.runDailyCheck()
   }, 8000)
 })
 
@@ -363,6 +426,13 @@ void router
     右面板关闭时其列宽为 0（而非 display:none），面板实例始终保留，开合不重建、不丢内部状态。
   -->
   <div class="app-shell" :style="shellColumns">
+    <!--
+      实验室·窗口底纹层（theme-colors 实验功能）：铺满全窗、置于内容之下。
+      仅在功能开启且模式非 off 时渲染；关闭时完全不渲染，观感与现状一致。
+      样式见 assets/styles/lab-backdrop.css。
+    -->
+    <div v-if="labBackdropOn" class="app-backdrop" aria-hidden="true" />
+
     <header class="app-shell__titlebar u-drag-region">
       <TitleBar />
     </header>
@@ -411,6 +481,7 @@ void router
     <!-- 全局浮层：Teleport 到 body，z 序由 theme.css 统一管理（toast > modal > dropdown） -->
     <ToastContainer />
     <DialogHost />
+    <UpdateDialog />
     <ContextMenuHost />
     <CommandPalette />
     <NowPlayingOverlay v-if="isNowPlayingOpen" />
@@ -420,8 +491,12 @@ void router
       <div v-if="isDragging" class="drag-overlay">
         <div class="drag-overlay__card">
           <Icon name="file-audio" :size="40" />
-          <p class="drag-overlay__title">松开以加载播放列表</p>
-          <p class="drag-overlay__hint">支持音频文件与文件夹（含 NAS / 网盘），自动建列表并播放</p>
+          <p class="drag-overlay__title">
+            {{ isConverterPage ? '松开以添加到待转文件' : '松开以加载播放列表' }}
+          </p>
+          <p class="drag-overlay__hint">
+            {{ isConverterPage ? '文件将加入「音频转换」待转列表，可随后选择格式并开始转换' : '支持音频文件与文件夹（含 NAS / 网盘），自动建列表并播放' }}
+          </p>
         </div>
       </div>
     </transition>

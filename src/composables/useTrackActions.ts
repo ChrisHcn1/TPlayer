@@ -13,6 +13,8 @@ import { usePlaylistStore } from '../stores/playlist'
 import { usePlayerStore } from '../stores/player'
 import { useDialogStore } from '../stores/dialog'
 import { useToastStore } from '../stores/toast'
+import { useLabStore } from '../stores/lab'
+import { useMetaRetryStore } from '../stores/metaRetry'
 
 export interface TrackMenuOptions {
   /** “播放”使用的列表上下文；缺省时按传入曲目自身构成 library 上下文 */
@@ -28,6 +30,8 @@ export function useTrackActions() {
   const playerStore = usePlayerStore()
   const dialogStore = useDialogStore()
   const toastStore = useToastStore()
+  const labStore = useLabStore()
+  const metaRetryStore = useMetaRetryStore()
   const { open } = useContextMenu()
 
   function playTracks(tracks: Track[], options: TrackMenuOptions): void {
@@ -37,7 +41,14 @@ export function useTrackActions() {
       sourceId: null,
       trackIds: tracks.map((track) => track.id),
     }
-    void playerStore.playFromContext(tracks[0]!.id, context)
+    // 随机播放模式 + 多首曲目：从队列中挑一首随机曲目作为起点，
+    // 后端再用 Fisher-Yates 洗牌排列后续曲目（一轮内每首各播一次）。
+    // 单首曲目（双击某行 / 菜单「播放」单曲）不随机，严格播用户点的那首。
+    const shuffle = playerStore.snapshot.mode === 'shuffle'
+    const startIndex = shuffle && tracks.length > 1
+      ? Math.floor(Math.random() * tracks.length)
+      : 0
+    void playerStore.playFromContext(tracks[startIndex]!.id, context)
   }
 
   function buildAddToPlaylistItems(tracks: Track[]): MenuItem[] {
@@ -157,6 +168,15 @@ export function useTrackActions() {
           onClick: () => router.push(`/artists/${encodeURIComponent(artist)}`),
         })
       }
+      // 实验室·元数据增强：单曲识别（只重新识别这一首，不影响其他曲目）
+      if (labStore.isEnabled('enhanced-metadata')) {
+        items.push({
+          key: 'meta-identify',
+          label: '识别元数据',
+          icon: 'refresh',
+          onClick: () => void identifyMetadata(track),
+        })
+      }
       items.push({ divider: true, key: 'd2' })
     }
 
@@ -169,6 +189,27 @@ export function useTrackActions() {
     })
 
     open(event, items, title, isSingle ? { trackId: tracks[0]!.id } : undefined)
+  }
+
+  /** 单曲识别：只重新解析 / 联网识别这一首曲目（结果记录进识别日志并自动保存） */
+  async function identifyMetadata(track: Track): Promise<void> {
+    const rec = await metaRetryStore.retry(track.id)
+    if (!rec) {
+      toastStore.error('识别未完成：请确认当前运行在桌面端，且该曲目仍在曲库中')
+      return
+    }
+    if (rec.status === 'ok') {
+      const saved =
+        rec.savedTo === 'tag'
+          ? '，已写入音频标签'
+          : rec.savedTo === 'sidecar'
+            ? '，已保存到附属文件'
+            : rec.savedTo === 'none'
+              ? `，保存失败${rec.saveDetail ? '：' + rec.saveDetail : ''}`
+              : ''
+      toastStore.success(`识别完成：${rec.detail}${saved}`)
+    } else if (rec.status === 'failed') toastStore.error(`未能识别：${rec.detail}`)
+    else toastStore.info(`识别完成：${rec.detail}`)
   }
 
   /** 批量收藏/取消收藏：以第一首当前状态为准统一取反 */

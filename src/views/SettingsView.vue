@@ -27,12 +27,13 @@ import { pickDirectory } from '../services/dialog'
 import { lyricsService } from '../services/lyrics'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
 import { getWatcherStatus, subscribeWatcher, type WatcherStatus } from '../services/watcher'
-import { updateService, type Update, type UpdateProgress } from '../services/update'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import ConverterView from './ConverterView.vue'
 import StatsView from './StatsView.vue'
+import LabView from './LabView.vue'
 import { useLayout } from '../composables/useLayout'
+import { useUpdaterStore } from '../stores/updater'
 import { useRoute, useRouter } from 'vue-router'
 
 type SettingsTab =
@@ -44,6 +45,7 @@ type SettingsTab =
   | 'online'
   | 'tools'
   | 'window'
+  | 'lab'
   | 'update'
   | 'about'
 
@@ -90,6 +92,7 @@ const TAB_GROUPS: ReadonlyArray<TabGroup> = [
     key: 'system',
     label: '系统',
     tabs: [
+      { key: 'lab', label: '实验室', icon: 'settings' },
       { key: 'window', label: '窗口', icon: 'square' },
       { key: 'update', label: '更新', icon: 'download' },
       { key: 'about', label: '关于', icon: 'info' },
@@ -237,7 +240,8 @@ async function removeLibraryDir(dir: string): Promise<void> {
 async function scanNow(): Promise<void> {
   scanning.value = true
   try {
-    await libraryStore.scan()
+    // 智能扫描：曲目自上次扫描未变更时直接复用曲库 DB（瞬时），否则增量刷新
+    await libraryStore.scan(false)
     if (libraryStore.error) toastStore.error('扫描失败：' + libraryStore.error)
     else toastStore.success('曲库扫描完成')
   } finally {
@@ -260,20 +264,31 @@ async function clearLyricsCache(): Promise<void> {
   toastStore.success('歌词缓存已清除')
 }
 
-// ---- 应用更新（Tauri Updater） -------------------------------------------
-type UpdateStatus =
-  | 'idle' // 尚未检查
-  | 'checking' // 正在检查
-  | 'up-to-date' // 已是最新
-  | 'available' // 发现新版本，等待用户确认
-  | 'downloading' // 下载安装中
-  | 'error' // 检查或下载失败
-  | 'unsupported' // 浏览器预览环境
+// ---- 应用更新（Tauri Updater，委托给 updater store）----------------
+const updaterStore = useUpdaterStore()
 
-const updateStatus = ref<UpdateStatus>('idle')
-const availableUpdate = ref<Update | null>(null)
-const updateError = ref('')
-const updateProgress = ref<UpdateProgress>({ downloaded: 0 })
+// 与模板兼容的状态别名（模板变量名保持不变，零改动）
+const updateStatus = computed(() => {
+  if (!updaterStore.available) return 'unsupported'
+  switch (updaterStore.phase) {
+    case 'checking':
+      return 'checking'
+    case 'available':
+      return 'available'
+    case 'downloading':
+      return 'downloading'
+    case 'installing':
+      return 'downloading'
+    case 'error':
+      return 'error'
+    default:
+      return updaterStore.update ? 'available' : 'up-to-date'
+  }
+})
+
+const availableUpdate = computed(() => updaterStore.update)
+const updateError = computed(() => updaterStore.error)
+const updateProgress = computed(() => updaterStore.progress)
 
 /** 下载百分比（服务端未返回总大小时为 null，只显示已下载量） */
 const updatePercent = computed<number | null>(() => {
@@ -292,35 +307,11 @@ const updateSizeText = computed(() => {
 })
 
 async function checkUpdates(): Promise<void> {
-  if (!isTauri.value) {
-    updateStatus.value = 'unsupported'
-    return
-  }
-  updateStatus.value = 'checking'
-  updateError.value = ''
-  try {
-    const update = await updateService.check()
-    availableUpdate.value = update
-    updateStatus.value = update ? 'available' : 'up-to-date'
-  } catch (error) {
-    updateStatus.value = 'error'
-    updateError.value = error instanceof Error ? error.message : String(error)
-  }
+  await updaterStore.manualCheck()
 }
 
 async function installUpdate(): Promise<void> {
-  updateStatus.value = 'downloading'
-  updateError.value = ''
-  updateProgress.value = { downloaded: 0 }
-  try {
-    // 下载完成后由安装器接管并自动重启；正常情况下此调用之后不再返回
-    await updateService.downloadAndInstall((progress) => {
-      updateProgress.value = progress
-    })
-  } catch (error) {
-    updateStatus.value = 'error'
-    updateError.value = error instanceof Error ? error.message : String(error)
-  }
+  await updaterStore.confirmInstall()
 }
 
 async function resetSettings(): Promise<void> {
@@ -630,6 +621,14 @@ async function resetSettings(): Promise<void> {
         <ConverterView />
       </div>
 
+      <!-- 实验室：实验功能开关（默认关闭、与现有功能隔离，可上线 / 废除） -->
+      <div v-else-if="activeTab === 'lab'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">实验室</h2>
+          <LabView />
+        </section>
+      </div>
+
       <!-- 窗口：关闭按钮行为 -->
       <div v-else-if="activeTab === 'window'" class="panel">
         <section class="setting-card">
@@ -741,20 +740,47 @@ async function resetSettings(): Promise<void> {
           <p class="about__tagline">本地优先的桌面音乐播放器</p>
 
           <p class="about__intro">
-            TPlayer 是基于 Tauri 2、Vue 3 与 Rust 重新构建的本地优先桌面音乐播放器。
-            所有曲目数据保存在本机 SQLite 数据库中，不依赖任何云服务即可完成曲库管理与播放；
-            在线能力作为可选增强存在，默认关闭。
+            TPlayer 是基于 Tauri 2、Vue 3 与 Rust 构建的本地优先桌面音乐播放器。所有曲目数据、
+            播放记录、收藏与歌单都保存在本机 SQLite 数据库（%APPDATA%\com.tplayer），不依赖任何云服务
+            即可完成曲库管理与播放。在线能力（歌词匹配、封面补全、元数据识别）作为可选增强存在，
+            默认关闭，开启后按需使用，且「上报本地曲库特征」仍需单独同意。
           </p>
 
           <h3 class="about__heading">主要特性</h3>
           <ul class="about__list">
-            <li>支持 18 种音频格式：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、DSF/DFF、DTS 等</li>
-            <li>播放队列与交叉淡化、多种播放模式、托盘控制与全局快捷键</li>
-            <li>专辑 / 艺术家自动聚合，CUE 分轨识别</li>
-            <li>封面自动匹配（内嵌标签 → 同名图片 → 目录封面 → 可选在线补全），并按封面主色生成界面皮肤</li>
-            <li>收藏、最近播放、自定义歌单，LRC 歌词与逐行偏移调整</li>
-            <li>万级曲库的增量扫描与虚拟滚动，SQLite 持久化，启动与浏览更快</li>
-            <li>内置应用内自动升级：更新包经数字签名校验，手动确认后安装，不会静默更新</li>
+            <li>
+              <strong>广格式支持</strong>：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、
+              DSF/DFF（DSD）、DTS 等 18 种音频格式；DSD 曲目默认转 PCM 播放，兼容绝大多数声卡。
+            </li>
+            <li>
+              <strong>播放体验</strong>：播放队列、交叉淡化（0–3 秒）、多种播放模式（顺序/单曲/随机/列表循环）、
+              音量归一化（ReplayGain，目标 -14 LUFS）、托盘控制与全局快捷键。
+            </li>
+            <li>
+              <strong>曲库管理</strong>：支持多目录白名单与增量扫描（仅重新解析变更文件）、专辑 / 艺术家自动聚合、
+              CUE 分轨识别、SACD ISO 解析（导出为临时 DSF 后解码）、元数据增强（标签优先、附属文件识别、文件名拆分）。
+            </li>
+            <li>
+              <strong>歌词与封面</strong>：LRC 歌词与逐行偏移校正（按曲目保存）；封面自动匹配（内嵌标签 → 同名图片 →
+              目录封面 → 可选在线补全），并按封面主色生成界面皮肤（氛围模式）。
+            </li>
+            <li>
+              <strong>播放历史与歌单</strong>：收藏、最近播放、自定义歌单、收听报告（播放时长 / 频次统计）。
+            </li>
+            <li>
+              <strong>性能与启动</strong>：万级曲库的虚拟滚动与 SQLite 持久化，启动与列表浏览更快；目录自动监控
+              可在后台感知曲库变更，无需手动重扫。
+            </li>
+            <li>
+              <strong>应用内自动升级</strong>：启动后每日首次静默检查更新，发现新版本时弹窗征求确认；用户确认后
+              自动下载（带进度、失败重试与断点续传）并安装，安装完成后提示「已是最新版本」。更新包经数字签名
+              校验，手动确认后安装，不会静默升级；也可在「设置 → 更新」手动检查。
+            </li>
+            <li>
+              <strong>实验室功能</strong>：均衡器（10 段频段 ±15 dB、多种预设）、皮肤配色（强调色 / 窗口底纹 /
+              渐变 / 纹理）、自定义壁纸（本地 / 每日 Bing）、元数据增强（联网校验补未知字段）、CUE/SACD 分轨转换。
+              默认全部关闭，与现有功能隔离，成熟后并入正式版。
+            </li>
           </ul>
 
           <h3 class="about__heading">隐私说明</h3>
@@ -768,6 +794,9 @@ async function resetSettings(): Promise<void> {
           <p class="about__intro">
             感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式转换）、
             minisign（升级签名）、Vue 与 Tauri 等开源项目。
+          </p>
+          <p class="about__intro">
+            特别感谢 格力森酒业、钱伟成、芥末墩儿、安安、忧蓝 对项目的支持与帮助。
           </p>
 
           <dl class="about">

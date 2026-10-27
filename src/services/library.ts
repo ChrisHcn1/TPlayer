@@ -26,7 +26,7 @@ function toAssetUrl(path: string | null): string | null {
 
 /** 曲库服务契约：Tauri 与 Web 两套实现必须满足同一边界 */
 export interface LibraryService {
-  scan(): Promise<void>
+  scan(force?: boolean): Promise<void>
   cancelScan(): Promise<void>
   tracks(): Promise<Track[]>
   /** 曲目封面（data URL，供播放条/取色使用）；无封面返回 null */
@@ -54,6 +54,8 @@ export interface LibraryService {
   trackInfo(trackId: string): Promise<TrackInfo | null>
   /** 两阶段懒加载：播放前按需解析占位轨道（元数据 / 封面 / CUE 分轨 / SACD 分轨），返回解析后的曲目列表 */
   resolveTrack(trackId: string): Promise<Track[]>
+  /** 按需批量解析（列表滚动到可见区时调用）：只补普通占位的标签 / 时长，返回解析出的曲目 */
+  resolveTracks(ids: string[]): Promise<Track[]>
   addLibraryDir(path: string): Promise<void>
   removeLibraryDir(path: string): Promise<void>
   listPlaylists(): Promise<Playlist[]>
@@ -67,7 +69,7 @@ export interface LibraryService {
 
 /** Tauri 实现：M2 命令接通前，新增命令在 Rust 侧未注册时会按错误路径进入 store 的 error 态 */
 const tauriLibrary: LibraryService = {
-  scan: () => callCommand('library_scan'),
+  scan: (force) => callCommand('library_scan', { force: !!force }),
   cancelScan: () => callCommand('library_cancel_scan'),
   tracks: () => callCommand<Track[]>('library_tracks'),
   cover: (trackId) => callCommand<string | null>('library_cover', { trackId }),
@@ -89,6 +91,7 @@ const tauriLibrary: LibraryService = {
   importFiles: (paths) => callCommand<string[]>('library_import_files', { paths }),
   trackInfo: (trackId) => callCommand<TrackInfo | null>('library_track_info', { trackId }),
   resolveTrack: (trackId) => callCommand<Track[]>('library_resolve_track', { trackId }),
+  resolveTracks: (ids) => callCommand<Track[]>('library_resolve_tracks', { ids }),
   addLibraryDir: (path) => callCommand('library_add_dir', { path }),
   removeLibraryDir: (path) => callCommand('library_remove_dir', { path }),
   listPlaylists: () => callCommand<Playlist[]>('library_list_playlists'),

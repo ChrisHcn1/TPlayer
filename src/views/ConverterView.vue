@@ -35,7 +35,6 @@ const converterStore = useConverterStore()
 const { files, settings, tasks, running, isTauri, finishedCount } = storeToRefs(converterStore)
 
 const dragOver = ref(false)
-const fileInputRef = ref<HTMLInputElement | null>(null)
 
 /** 有损格式不支持位深设置 */
 const lossyFormat = computed(
@@ -57,14 +56,11 @@ const taskStatusText = (task: (typeof tasks.value)[number]): string => {
   }
 }
 
-/** 选择待转文件：Tauri 用系统对话框（真实路径），浏览器降级为 input */
+/** 选择待转文件：Tauri 用系统对话框（真实路径）；浏览器由覆盖层 input 原生弹框 */
 async function onPickClick(): Promise<void> {
-  if (isTauri.value) {
-    const paths = await pickAudioFiles()
-    if (paths && paths.length > 0) await converterStore.addPaths(paths)
-    return
-  }
-  fileInputRef.value?.click()
+  if (!isTauri.value) return
+  const paths = await pickAudioFiles()
+  if (paths && paths.length > 0) await converterStore.addPaths(paths)
 }
 
 function onFileChange(event: Event): void {
@@ -76,7 +72,8 @@ function onFileChange(event: Event): void {
 
 function onDrop(event: DragEvent): void {
   dragOver.value = false
-  // Tauri WebView 拖拽拿到的是 File 对象（无绝对路径）：浏览器行为与 input 一致
+  // Tauri 的文件拖入由 App.vue 全局 onDragDropEvent 统一转发到 addPaths，这里只处理浏览器预览
+  if (isTauri.value) return
   const dropped = event.dataTransfer?.files
   if (dropped && dropped.length > 0) {
     void converterStore.addPaths(Array.from(dropped).map((file) => file.name))
@@ -86,6 +83,19 @@ function onDrop(event: DragEvent): void {
 async function onPickOutputDir(): Promise<void> {
   const dir = await pickDirectory()
   if (dir) converterStore.updateSettings({ outputDir: dir })
+}
+
+/** 待转文件类型：用于列表徽标与自动识别分轨源 */
+type FileKind = 'audio' | 'cue' | 'sacd'
+function fileKind(file: { name: string }): FileKind {
+  const ext = file.name.split('.').pop()?.toLowerCase()
+  if (ext === 'cue') return 'cue'
+  if (ext === 'iso') return 'sacd'
+  return 'audio'
+}
+function fileKindLabel(file: { name: string }): string {
+  const kind = fileKind(file)
+  return kind === 'cue' ? 'CUE' : kind === 'sacd' ? 'SACD' : '音频'
 }
 
 async function startConvert(): Promise<void> {
@@ -133,20 +143,24 @@ onMounted(() => {
         >
           <Icon name="folder-plus" :size="26" />
           <p class="dropzone__text">拖入音频文件，或点击选择</p>
-          <p class="dropzone__hint">支持 MP3 / FLAC / WAV / AAC / APE / DSD 等格式</p>
+          <p class="dropzone__hint">支持 MP3 / FLAC / WAV / AAC / APE / DSD 等；也可放入 .cue / .iso 自动按分轨解析</p>
           <input
-            ref="fileInputRef"
+            v-if="!isTauri"
+            class="dropzone__input"
             type="file"
             multiple
-            accept="audio/*,.dsf,.dff,.ape,.wv,.tta,.tak,.dts"
-            hidden
+            accept="audio/*,.dsf,.dff,.ape,.wv,.tta,.tak,.dts,.cue,.iso"
             @change="onFileChange"
           />
         </div>
 
         <ul v-if="files.length > 0" class="file-list">
           <li v-for="file in files" :key="file.id" class="file-list__item">
-            <Icon name="file" :size="16" />
+            <span
+              class="file-list__badge"
+              :class="`file-list__badge--${fileKind(file)}`"
+              :title="fileKindLabel(file)"
+            >{{ fileKindLabel(file) }}</span>
             <span class="file-list__name" :title="file.path">{{ file.name }}</span>
             <span v-if="file.sizeMb > 0" class="file-list__size u-tabular">{{ file.sizeMb }} MB</span>
             <button
@@ -354,6 +368,7 @@ onMounted(() => {
 
 /* ---- 拖放区 ---- */
 .dropzone {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -384,6 +399,16 @@ onMounted(() => {
   margin: 0;
   font-size: var(--font-size-xs);
   color: var(--color-text-disabled);
+}
+
+/* 覆盖整个拖放区的原生文件 input：浏览器预览下点击即原生弹框 */
+.dropzone__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .dropzone:focus-visible {
@@ -423,6 +448,28 @@ onMounted(() => {
   font-size: var(--font-size-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-list__badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-hover);
+}
+
+.file-list__badge--cue {
+  color: #fff;
+  background-color: rgba(122, 149, 255, 0.85);
+}
+
+.file-list__badge--sacd {
+  color: #fff;
+  background-color: rgba(120, 200, 160, 0.9);
 }
 
 .file-list__size {

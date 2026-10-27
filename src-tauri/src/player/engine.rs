@@ -3,13 +3,15 @@
 //! rodio 的 OutputStream/Sink 在 Windows 上非 Send（COM STA 绑定），
 //! 因此引擎运行在专用线程，PlayerHandle 通过 mpsc 通道发送命令。
 
+use std::f64::consts::PI;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::library::sacd::{cached_dsf_path, ensure_sacd_cache_fresh, SacdDisc};
@@ -450,6 +452,9 @@ enum EngineCommand {
     SetReplayGain(bool),
     /// 更新播放倍速（1.0 = 原速）；立即作用于当前曲目与待命预加载链路
     SetRate(f32),
+    /// 更新实验室均衡器配置（频段增益 + 总开关）；新建/接管链路时应用，已在播的链路
+    /// 通过 EqProcessor::set_config 热更新（下一帧即生效）。
+    SetEq(EqConfig),
 }
 
 /// 引擎句柄（Send）：PlayerHandle 通过它控制播放
@@ -554,6 +559,11 @@ impl EngineHandle {
         let _ = self.tx.send(EngineCommand::SetRate(rate));
     }
 
+    /// 更新实验室均衡器配置（频段增益 + 总开关）；新曲目装载时沿用新配置。
+    pub fn set_eq(&self, cfg: EqConfig) {
+        let _ = self.tx.send(EngineCommand::SetEq(cfg));
+    }
+
     /// 把预加载链路提升为当前曲目（旧曲目转入淡出）
     pub fn swap_to_next(&self) -> AppResult<()> {
         let (ack_tx, ack_rx) = mpsc::channel();
@@ -627,6 +637,9 @@ pub fn spawn_engine() -> EngineHandle {
                         }
                         EngineCommand::SetRate(rate) => {
                             let _ = engine.set_rate(rate);
+                        }
+                        EngineCommand::SetEq(cfg) => {
+                            engine.set_eq(cfg);
                         }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -715,6 +728,12 @@ struct RodioEngine {
     rate: f32,
     /// 是否处于用户暂停态（seek 时据此决定是否恢复出声，避免"暂停中拖进度条却开始播放"）
     paused: bool,
+    /// 实验室均衡器处理器（**与所有音源共享**）。
+    ///
+    /// `PcmStreamSource` / `EqSource` 各持一份 `Arc` 引用，故 `set_eq` 更新它即可
+    /// 让**正在播放**的曲目立即生效；滤波器状态不重置、系数走插值，不会爆音。
+    /// 旧实现是每轨独占一份 `EqProcessor`，改动只能等下一首装载时生效。
+    eq: Arc<Mutex<EqProcessor>>,
 }
 
 impl RodioEngine {
@@ -740,6 +759,12 @@ impl RodioEngine {
             replaygain_enabled: true,
             rate: 1.0,
             paused: false,
+            // 初始为默认（关闭）配置；启动时由 lib.rs 用 config.json 的 eq 段覆盖
+            eq: Arc::new(Mutex::new(EqProcessor::new(
+                44100,
+                2,
+                &EqConfig::default(),
+            ))),
         }
     }
 
@@ -913,11 +938,12 @@ impl RodioEngine {
         // - 其余整曲（无区间）：rodio 原生解码，低延迟直连。
         let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
             if let Some(idx) = sacd_track_index {
-                let (child, source, temp) = spawn_sacd_decoder(path, idx)?;
+                let (child, source, temp) = spawn_sacd_decoder(path, idx, &self.eq)?;
                 sink.append(source);
                 (Some(child), Some(temp))
             } else if !is_native_format(path) || range.is_some() {
-                let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
+                let (child, source) =
+                    spawn_ffmpeg_decoder(path, start_ms, duration_ms, &self.eq)?;
                 sink.append(source);
                 (Some(child), None)
             } else {
@@ -926,7 +952,9 @@ impl RodioEngine {
                 })?;
                 let decoder = rodio::Decoder::new(BufReader::new(file))
                     .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
-                sink.append(decoder);
+                // 原生解码此前直接进 sink，**完全绕过 EQ**（同一份设置对 DSF 生效、
+                // 对 flac 无效）。包一层 EqSource，两条链路共用同一个 EqProcessor。
+                sink.append(EqSource::new(decoder, &self.eq));
                 (None, None)
             };
 
@@ -983,11 +1011,12 @@ impl RodioEngine {
         // 解码源路由（同 play）：CUE 分轨/非原生走 ffmpeg 输入 seek，确保起点/时长可靠
         let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
             if let Some(idx) = sacd_track_index {
-                let (child, source, temp) = spawn_sacd_decoder(path, idx)?;
+                let (child, source, temp) = spawn_sacd_decoder(path, idx, &self.eq)?;
                 sink.append(source);
                 (Some(child), Some(temp))
             } else if !is_native_format(path) || range.is_some() {
-                let (child, source) = spawn_ffmpeg_decoder(path, start_ms, duration_ms)?;
+                let (child, source) =
+                    spawn_ffmpeg_decoder(path, start_ms, duration_ms, &self.eq)?;
                 sink.append(source);
                 (Some(child), None)
             } else {
@@ -996,7 +1025,9 @@ impl RodioEngine {
                 })?;
                 let decoder = rodio::Decoder::new(BufReader::new(file))
                     .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
-                sink.append(decoder);
+                // 原生解码此前直接进 sink，**完全绕过 EQ**（同一份设置对 DSF 生效、
+                // 对 flac 无效）。包一层 EqSource，两条链路共用同一个 EqProcessor。
+                sink.append(EqSource::new(decoder, &self.eq));
                 (None, None)
             };
 
@@ -1124,7 +1155,8 @@ impl RodioEngine {
         // SACD：临时 DSF 已在磁盘，直接带 -ss 重启 ffmpeg 进程定位到轨内偏移
         // （整轨 DSF，无需叠加基址；音频自然终止于该轨末尾）。
         if let Some(dsf) = playback.temp_file.clone() {
-            let (child, source) = spawn_ffmpeg_decoder(&dsf, position_ms, None)?;
+            let (child, source) =
+                spawn_ffmpeg_decoder(&dsf, position_ms, None, &self.eq)?;
             if let Some(old) = playback.ffmpeg_child.take() {
                 let mut old = old;
                 let _ = old.kill();
@@ -1162,7 +1194,8 @@ impl RodioEngine {
                 }
                 None => (position_ms, None),
             };
-            let (child, source) = spawn_ffmpeg_decoder(&path, abs_ms, dur_ms)?;
+            let (child, source) =
+                spawn_ffmpeg_decoder(&path, abs_ms, dur_ms, &self.eq)?;
             if let Some(old) = playback.ffmpeg_child.take() {
                 let mut old = old;
                 let _ = old.kill();
@@ -1217,6 +1250,14 @@ impl RodioEngine {
             playback.sink.set_speed(r);
         }
         Ok(())
+    }
+
+    /// 更新实验室均衡器配置，**正在播放的曲目立即生效**。
+    ///
+    /// 所有音源共享同一个 `EqProcessor`（各持 `Arc` 引用），此处更新后下一次取
+    /// 样本即按新系数过滤。配合 `Biquad` 的系数插值，拖动滑块时连续无爆音。
+    fn set_eq(&mut self, cfg: EqConfig) {
+        self.eq.lock().unwrap().set_config(&cfg);
     }
 
     /// 当前曲目是否已在引擎侧播完（sink 中无音源）。
@@ -1308,6 +1349,7 @@ fn guard_sacd_dsf(dsf_path: &Path) -> AppResult<()> {
 fn spawn_sacd_decoder(
     iso_path: &Path,
     track_index: u32,
+    eq: &Arc<Mutex<EqProcessor>>,
 ) -> AppResult<(Child, PcmStreamSource, PathBuf)> {
     let disc = SacdDisc::open(iso_path).ok_or_else(|| {
         AppError::Player(format!("无法解析 SACD ISO: {}", iso_path.display()))
@@ -1345,24 +1387,42 @@ fn spawn_sacd_decoder(
     if let Some(dir) = dsf_path.parent() {
         ensure_sacd_cache_fresh(dir);
     }
-    // 缓存校验：内置导出按精确字节数（旧版/截断即重导）；外部解码无法预知产出大小，
-    // 用「大于 DSF 头」判定存在性。导出前清理可能残留的历史文件。
+    // 缓存校验：按真实音频包抽取后载荷长度无法预先精确预测，改为与文件**自身 DSF 头**
+    // 声明的 file_size 比对（自校验，读 20 字节即可，避免每次播放都按估算值误判重导）；
+    // 外部解码同样无法预知产出大小，用「大于 DSF 头」判定存在性。
+    // 导出前清理可能残留的历史文件。
     let cache_valid = if use_external {
         dsf_path
             .metadata()
             .map(|m| m.len() > crate::library::sacd::DSF_HEADER_BYTES)
             .unwrap_or(false)
     } else {
-        dsf_path
-            .metadata()
-            .map(|m| m.len() == disc.exported_dsf_len(idx))
+        crate::library::sacd::dsf_declared_file_size(&dsf_path)
+            .and_then(|declared| {
+                dsf_path
+                    .metadata()
+                    .ok()
+                    .map(|m| m.len() == declared && m.len() > crate::library::sacd::DSF_HEADER_BYTES)
+            })
             .unwrap_or(false)
     };
     if !cache_valid {
         let _ = std::fs::remove_file(&dsf_path);
         if use_external {
-            disc.extract_track_via_external(meta.track_number, multich, &dsf_path)
-                .map_err(|e| AppError::Player(format!("解码 SACD 音轨失败: {}", e)))?;
+            // 外部 sacd_extract 可能因环境缺依赖而不可用（典型：Linux 缺 libxml2.so.2，
+            // 进程以退出码 127 报 "error while loading shared libraries"）。此时回退内置
+            // 裸 DSD 导出——v11 起内置导出按权威扇区/数据包结构抽取（已与 sacd_extract
+            // 在同 ISO 上验证逐字节一致），多数立体声区可直接正确解码；仅当内置也拒绝
+            // （真正的 DST 压缩区）才报错。
+            if let Err(e) = disc.extract_track_via_external(meta.track_number, multich, &dsf_path) {
+                let _ = std::fs::remove_file(&dsf_path);
+                disc.export_track_to_dsf(idx, &dsf_path).map_err(|inner| {
+                    AppError::Player(format!(
+                        "解码 SACD 音轨失败: sacd_extract 不可用（{e}）；内置导出亦失败（{inner}）。\
+                         若为 Linux 请安装 libxml2：sudo apt-get install -y libxml2"
+                    ))
+                })?;
+            }
         } else {
             disc.export_track_to_dsf(idx, &dsf_path)
                 .map_err(|e| AppError::Player(format!("导出 SACD 分轨为 DSF 失败: {}", e)))?;
@@ -1385,7 +1445,7 @@ fn spawn_sacd_decoder(
         guard_sacd_dsf(&dsf_path)?;
     }
     // 复用 ffmpeg 管道解码 DSF（ffmpeg 原生支持 DSF，由 dsd_lsbf 解码器直接输出 PCM）
-    let (child, source) = spawn_ffmpeg_decoder(&dsf_path, 0, None)?;
+    let (child, source) = spawn_ffmpeg_decoder(&dsf_path, 0, None, eq)?;
     Ok((child, source, dsf_path))
 }
 
@@ -1395,6 +1455,7 @@ fn spawn_ffmpeg_decoder(
     path: &Path,
     offset_ms: u64,
     duration_ms: Option<u64>,
+    eq: &Arc<Mutex<EqProcessor>>,
 ) -> AppResult<(Child, PcmStreamSource)> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
         AppError::Player(
@@ -1502,8 +1563,350 @@ fn spawn_ffmpeg_decoder(
 
     Ok((
         child,
-        PcmStreamSource::new(BufReader::new(stdout), src_ch, out_ch, out_rate, is_dsd),
+        PcmStreamSource::new(
+            BufReader::new(stdout),
+            src_ch,
+            out_ch,
+            out_rate,
+            is_dsd,
+            eq,
+        ),
     ))
+}
+
+/// 实验室·均衡器：手写双二阶（Biquad）峰值 EQ，作用于 `PcmStreamSource` 输出帧。
+///
+/// 不引入新 crate，避免依赖链与体积膨胀；峰值滤波器公式源自
+/// Robert Bristow-Johnson 的音频 EQ cookbook，对每个频段独立计算系数，
+/// 每声道维护一组滤波器状态（避免声道间串扰）。EQ 仅在 `enabled` 时生效，
+/// 关闭时原样透传，零开销。
+/// 频段定义。
+///
+/// 序列化用 camelCase（与前端一致，见 converter.rs 的约定）；`gainDb` 保留
+/// `gain_db` 别名以兼容早期写入 config.json 的旧数据——否则旧配置缺 `gainDb`
+/// 字段会让整个 `AppConfig` 反序列化失败（config.rs 记录过的历史坑）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqBand {
+    /// 频段中心频率（Hz）
+    pub freq: f32,
+    /// 增益（dB，-15 ~ +15）
+    #[serde(alias = "gain_db")]
+    pub gain_db: f32,
+    /// Q 值（带宽，0.1 ~ 10）
+    pub q: f32,
+}
+
+/// 均衡器配置：频段列表 + 总开关
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqConfig {
+    pub enabled: bool,
+    pub bands: Vec<EqBand>,
+}
+
+impl Default for EqConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bands: vec![
+                EqBand { freq: 60.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 170.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 310.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 600.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 1000.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 3000.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 6000.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 12000.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 14000.0, gain_db: 0.0, q: 1.0 },
+                EqBand { freq: 16000.0, gain_db: 0.0, q: 1.0 },
+            ],
+        }
+    }
+}
+
+/// 系数插值长度（样本数）：44.1kHz 下约 23ms——足够平滑到听不出爆音，
+/// 又短到拖动滑块时反馈即时。
+const EQ_RAMP_SAMPLES: u32 = 1024;
+
+/// 双二阶滤波器（峰值 EQ）：每声道每频段一套状态。
+///
+/// 系数带**斜坡过渡**：`retune` 只更新目标系数并启动插值，**不重置滤波器状态**
+/// （x1/x2/y1/y2）。旧实现 `*self = Self::new(...)` 会把状态清零，滤波器输出从
+/// 当前值瞬间跳到 0，高频段表现为明显「啪」声——实时拖动 EQ 滑块时每动一次响一次。
+/// 改为在 `EQ_RAMP_SAMPLES` 个样本内线性插值，状态与相位连续，听感平滑。
+#[derive(Debug, Clone)]
+struct Biquad {
+    b0: f32, b1: f32, b2: f32,
+    a1: f32, a2: f32,
+    /// 目标系数（`retune` 后逐步逼近）
+    t_b0: f32, t_b1: f32, t_b2: f32, t_a1: f32, t_a2: f32,
+    /// 插值起点系数
+    s_b0: f32, s_b1: f32, s_b2: f32, s_a1: f32, s_a2: f32,
+    /// 插值进度（已处理样本数）与总长度（0 = 无需插值）
+    ramp: u32,
+    ramp_len: u32,
+    x1: f32, x2: f32,
+    y1: f32, y2: f32,
+}
+
+impl Biquad {
+    fn new(sample_rate: u32, band: &EqBand) -> Self {
+        let (b0, b1, b2, a1, a2) = peaking_coeffs(sample_rate, band);
+        Self {
+            b0, b1, b2, a1, a2,
+            t_b0: b0, t_b1: b1, t_b2: b2, t_a1: a1, t_a2: a2,
+            s_b0: b0, s_b1: b1, s_b2: b2, s_a1: a1, s_a2: a2,
+            ramp: 0, ramp_len: 0,
+            x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0,
+        }
+    }
+
+    /// 更新目标系数并启动插值（保留滤波器状态，避免爆音）
+    fn retune(&mut self, sample_rate: u32, band: &EqBand) {
+        let (b0, b1, b2, a1, a2) = peaking_coeffs(sample_rate, band);
+        self.s_b0 = self.b0;
+        self.s_b1 = self.b1;
+        self.s_b2 = self.b2;
+        self.s_a1 = self.a1;
+        self.s_a2 = self.a2;
+        self.t_b0 = b0;
+        self.t_b1 = b1;
+        self.t_b2 = b2;
+        self.t_a1 = a1;
+        self.t_a2 = a2;
+        self.ramp = 0;
+        self.ramp_len = EQ_RAMP_SAMPLES;
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        if self.ramp < self.ramp_len {
+            self.ramp += 1;
+            let t = self.ramp as f32 / self.ramp_len as f32;
+            self.b0 = self.s_b0 + (self.t_b0 - self.s_b0) * t;
+            self.b1 = self.s_b1 + (self.t_b1 - self.s_b1) * t;
+            self.b2 = self.s_b2 + (self.t_b2 - self.s_b2) * t;
+            self.a1 = self.s_a1 + (self.t_a1 - self.s_a1) * t;
+            self.a2 = self.s_a2 + (self.t_a2 - self.s_a2) * t;
+        }
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// 峰值滤波器系数（RBJ cookbook），返回按 a0 归一化后的 (b0, b1, b2, a1, a2)。
+fn peaking_coeffs(sample_rate: u32, band: &EqBand) -> (f32, f32, f32, f32, f32) {
+    let f0 = band.freq.clamp(20.0, 20000.0) as f64 / sample_rate as f64;
+    let gain_db = band.gain_db.clamp(-15.0, 15.0) as f64;
+    let q = band.q.clamp(0.1, 10.0) as f64;
+    let a = 10.0f64.powf(gain_db / 40.0);
+    let w0 = 2.0 * PI * f0;
+    // alpha = sin(w0) / (2 * Q)
+    let alpha = w0.sin() / (2.0 * q);
+    let cos_w0 = w0.cos();
+
+    // 峰值滤波器系数（RBJ cookbook）
+    let b0 = 1.0 + alpha * a;
+    let b1 = -2.0 * cos_w0;
+    let b2 = 1.0 - alpha * a;
+    let a0 = 1.0 + alpha / a;
+    let a1 = -2.0 * cos_w0;
+    let a2 = 1.0 - alpha / a;
+
+    (
+        (b0 / a0) as f32,
+        (b1 / a0) as f32,
+        (b2 / a0) as f32,
+        (a1 / a0) as f32,
+        (a2 / a0) as f32,
+    )
+}
+
+/// 均衡器处理器：对交错 i16 样本帧逐声道应用 biquad EQ。
+#[derive(Debug, Clone)]
+pub struct EqProcessor {
+    config: EqConfig,
+    sample_rate: u32,
+    channels: u16,
+    /// 每声道每频段一组 biquad 状态
+    filters: Vec<Vec<Biquad>>,
+}
+
+impl EqProcessor {
+    pub fn new(sample_rate: u32, channels: u16, config: &EqConfig) -> Self {
+        let mut p = Self {
+            config: config.clone(),
+            sample_rate,
+            channels,
+            filters: Vec::new(),
+        };
+        // 新建即立即生效（无前值可插值）
+        p.rebuild_filters(false);
+        p
+    }
+
+    /// 按当前 `sample_rate` / `channels` / `config` 重建（或重新调谐）滤波器组。
+    ///
+    /// `ramp = true` 走系数插值，用于**实时改参数**（在播曲目不中断、无爆音）；
+    /// `ramp = false` 立即生效，用于新建与换轨。
+    ///
+    /// 注意：旧实现在构造时对所有频段一律用 `config.bands[0]` 调谐——10 个滤波器
+    /// 全是同一个 60Hz 峰值，等于整段 EQ 失效。此处按下标取各自频段。
+    fn rebuild_filters(&mut self, ramp: bool) {
+        let channels = self.channels as usize;
+        let bands = self.config.bands.len();
+        let shape_ok =
+            self.filters.len() == channels && self.filters.iter().all(|c| c.len() == bands);
+        if !shape_ok {
+            // 结构变化（声道数 / 频段数不同）→ 无从插值，直接重建
+            self.filters = (0..channels)
+                .map(|_| {
+                    (0..bands)
+                        .map(|b| Biquad::new(self.sample_rate, &self.config.bands[b]))
+                        .collect()
+                })
+                .collect();
+            return;
+        }
+        for c in 0..channels {
+            for b in 0..bands {
+                if ramp {
+                    self.filters[c][b].retune(self.sample_rate, &self.config.bands[b]);
+                } else {
+                    self.filters[c][b] = Biquad::new(self.sample_rate, &self.config.bands[b]);
+                }
+            }
+        }
+    }
+
+    /// 更新配置（频段参数变化时调用）。走系数插值，**正在播放的曲目立即生效**。
+    pub fn set_config(&mut self, config: &EqConfig) {
+        self.config = config.clone();
+        self.rebuild_filters(true);
+    }
+
+    /// 采样率 / 声道数变化时重新调谐。
+    ///
+    /// 原生解码（`rodio::Decoder`）的采样率与声道数**逐文件不同**（48000 / 96000 /
+    /// 单声道 / 5.1 皆可能），而滤波器系数必须由实际速率算出，故换轨时必须重调。
+    pub fn reconfigure(&mut self, sample_rate: u32, channels: u16, config: &EqConfig) {
+        self.sample_rate = sample_rate;
+        self.channels = channels;
+        self.config = config.clone();
+        self.rebuild_filters(false);
+    }
+
+    /// 处理**单个**交错样本（供 `EqSource` 逐样本调用）；`ch` 为声道索引。
+    ///
+    /// `PcmStreamSource` 用 `process_interleaved`（按帧批量，免逐样本加锁）；
+    /// 原生链路是 rodio 的 `Iterator`，只能逐样本，故另开此入口。两者共用同一组
+    /// 滤波器状态与系数。
+    #[inline]
+    pub fn process_sample(&mut self, ch: usize, sample: i16) -> i16 {
+        if !self.config.enabled || ch >= self.filters.len() {
+            return sample;
+        }
+        let mut x = sample as f32 / 32768.0;
+        for f in self.filters[ch].iter_mut() {
+            x = f.process(x);
+        }
+        (x * 32768.0).clamp(-32768.0, 32767.0) as i16
+    }
+
+    /// 对交错 i16 样本切片（长度 = channels * n_frames）就地应用 EQ。
+    /// 返回处理后的样本数（与输入相同）。
+    pub fn process_interleaved(&mut self, samples: &mut [i16]) {
+        if !self.config.enabled {
+            return;
+        }
+        let ch = self.channels as usize;
+        for frame in samples.chunks_mut(ch) {
+            for (c, sample) in frame.iter_mut().enumerate() {
+                let mut x = *sample as f32 / 32768.0;
+                for band_idx in 0..self.config.bands.len() {
+                    x = self.filters[c][band_idx].process(x);
+                }
+                *sample = (x * 32768.0).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+    }
+}
+
+/// 通用 EQ 包装源：为**任意** `Source<Item = i16>` 套上均衡器。
+///
+/// 存在的理由：原生解码分支（`rodio::Decoder`，mp3/flac/wav/ogg 等）此前直接进
+/// sink，**完全绕过 EQ**——同一份 EQ 设置对 DSF 生效、对 flac 毫无作用，行为不
+/// 一致且难以察觉。这里把解码器包一层，在其 `Iterator::next` 里逐样本应用同一组
+/// 滤波器，两条链路共用同一个 `EqProcessor`。
+///
+/// 声道轮换由 `ch_pos` 维护：rodio 的 `Iterator` 产出交错样本，故按 `channels()`
+/// 取模决定当前样本属于哪个声道。
+pub struct EqSource<S> {
+    inner: S,
+    eq: Arc<Mutex<EqProcessor>>,
+    channels: u16,
+    ch_pos: usize,
+}
+
+impl<S> EqSource<S>
+where
+    S: rodio::Source<Item = i16>,
+{
+    /// 包装一个音源，并按该音源的**实际**采样率 / 声道数重新调谐共享 EQ。
+    ///
+    /// 原生解码的速率与声道数逐文件不同（48000 / 96000 / 单声道 / 5.1 皆可能），
+    /// 而 biquad 系数必须由真实速率算出，故换轨必须重调；ffmpeg 链路同理。
+    pub fn new(inner: S, eq: &Arc<Mutex<EqProcessor>>) -> Self {
+        let channels = inner.channels();
+        let rate = inner.sample_rate();
+        let cfg = eq.lock().unwrap().config.clone();
+        eq.lock().unwrap().reconfigure(rate, channels, &cfg);
+        Self {
+            inner,
+            eq: Arc::clone(eq),
+            channels,
+            ch_pos: 0,
+        }
+    }
+}
+
+impl<S> Iterator for EqSource<S>
+where
+    S: rodio::Source<Item = i16>,
+{
+    type Item = i16;
+
+    fn next(&mut self) -> Option<i16> {
+        let s = self.inner.next()?;
+        let mut eq = self.eq.lock().unwrap();
+        let ch = self.ch_pos;
+        self.ch_pos = (self.ch_pos + 1) % self.channels.max(1) as usize;
+        Some(eq.process_sample(ch, s))
+    }
+}
+
+impl<S> rodio::Source for EqSource<S>
+where
+    S: rodio::Source<Item = i16>,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
 }
 
 /// ffmpeg PCM 管道音源（s16le / f32le 交错样本 → rodio::Source）
@@ -1539,6 +1942,11 @@ struct PcmStreamSource {
     out_pos: usize,
     /// 上次 read 不足一个完整样本的残余字节（跨块拼接，保证字节对齐）
     residual: Vec<u8>,
+    /// 实验室均衡器处理器（未启用时原样透传，零开销）。
+    ///
+    /// 与 `RodioEngine` **共享同一份**：改 EQ 时引擎侧更新它，正在播放的曲目
+    /// 立即生效（旧实现是每轨独占一份，改动要等到下一首才生效）。
+    eq: Arc<Mutex<EqProcessor>>,
 }
 
 impl PcmStreamSource {
@@ -1550,7 +1958,11 @@ impl PcmStreamSource {
         channels: u16,
         sample_rate: u32,
         float_input: bool,
+        eq: &Arc<Mutex<EqProcessor>>,
     ) -> Self {
+        // 按本流的实际速率/声道数重调共享 EQ（ffmpeg 链路速率由探测结果决定）
+        let cfg = eq.lock().unwrap().config.clone();
+        eq.lock().unwrap().reconfigure(sample_rate, channels, &cfg);
         Self {
             reader,
             src_channels: src_channels.max(1),
@@ -1563,6 +1975,7 @@ impl PcmStreamSource {
             out_frame: Vec::new(),
             out_pos: 0,
             residual: Vec::new(),
+            eq: Arc::clone(eq),
         }
     }
 
@@ -1618,6 +2031,9 @@ impl PcmStreamSource {
                 self.out_frame.clear();
                 self.out_frame
                     .extend(adapt_channels(frame, self.channels as usize));
+                // 实验室均衡器：对适配后的输出帧逐样本应用 EQ（未启用时原样透传）。
+                // 按帧批量加锁，避免逐样本 lock/unlock 的开销。
+                self.eq.lock().unwrap().process_interleaved(&mut self.out_frame);
                 self.out_pos = 0;
                 return true;
             }
@@ -1654,8 +2070,10 @@ fn adapt_channels(frame: &[i16], dst: usize) -> Vec<i16> {
         match src {
             1 => return vec![frame[0], frame[0]],
             6 => {
-                let l = frame[0] as f32 + 0.7071 * (frame[2] as f32 + frame[4] as f32);
-                let r = frame[1] as f32 + 0.7071 * (frame[2] as f32 + frame[5] as f32);
+                // 5.1 → 立体声下混：C/LFE 以 1/√2 权重并入左右
+                const DOWNMIX: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let l = frame[0] as f32 + DOWNMIX * (frame[2] as f32 + frame[4] as f32);
+                let r = frame[1] as f32 + DOWNMIX * (frame[2] as f32 + frame[5] as f32);
                 return vec![clamp_i16(l), clamp_i16(r)];
             }
             _ => {}
@@ -1735,7 +2153,14 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let (mut child, mut source, _dsf) = match spawn_sacd_decoder(Path::new(&iso), track_index) {
+        // EQ 由引擎与各音源共享（Arc），测试里就地建一份默认（关闭）的
+        let eq = std::sync::Arc::new(std::sync::Mutex::new(EqProcessor::new(
+            44100,
+            2,
+            &EqConfig::default(),
+        )));
+        let (mut child, mut source, _dsf) =
+            match spawn_sacd_decoder(Path::new(&iso), track_index, &eq) {
             Ok(x) => x,
             Err(e) => {
                 // DST 压缩 / 非标准布局的 ISO 应被明确拒绝（而非输出白噪）——同样算通过
@@ -1825,6 +2250,73 @@ mod tests {
         ));
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    /// 均衡器频响：只把第 0 段（60Hz）抬到 +15 dB，其余保持 0 dB。
+    ///
+    /// 期望：60Hz 正弦显著变响（≈ +15 dB ≈ 5.6 倍），1kHz 正弦基本不变。
+    ///
+    /// 这条同时是「构造时 10 段一律用 `bands[0]` 调谐」那个 bug 的回归闸：若各频段
+    /// 又被误用同一组系数，1kHz 也会被一起放大，第二条断言即失败。
+    #[test]
+    fn eq_boosts_only_its_own_band() {
+        const RATE: u32 = 44100;
+
+        let mut cfg = EqConfig::default();
+        cfg.enabled = true;
+        for b in cfg.bands.iter_mut() {
+            b.gain_db = 0.0;
+        }
+        cfg.bands[0].gain_db = 15.0;
+
+        /// 送 1 秒正弦过 EQ，丢弃前 0.5 秒让滤波器状态收敛，返回后 0.5 秒的 RMS。
+        ///
+        /// 每次用**全新**的 EqProcessor，避免上一次测量留下的滤波器状态影响本次结果。
+        ///
+        /// 幅度取 0.05（-26 dBFS）：+15 dB 后为 0.28 满量程，全程不削波——
+        /// 削波会产生谐波并污染 RMS，让「其它频段不受影响」的判断失真。
+        fn rms_after_eq(cfg: &EqConfig, freq: f32) -> f64 {
+            let mut eq = EqProcessor::new(RATE, 2, cfg);
+            let n = RATE as usize;
+            let mut frame = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                let s = (2.0 * PI * freq as f64 * i as f64 / RATE as f64).sin();
+                let v = (s * 0.05 * 32767.0) as i16;
+                frame.push(v); // L
+                frame.push(v); // R
+            }
+            let half = frame.len() / 2;
+            let mut tail = frame[half..].to_vec();
+            eq.process_interleaved(&mut tail);
+            let mut sum = 0.0f64;
+            for s in tail.iter() {
+                sum += (*s as f64 / 32768.0).powi(2);
+            }
+            (sum / tail.len() as f64).sqrt()
+        }
+
+        // 基线：EQ 关闭（默认）时原样透传
+        let default = EqConfig::default();
+        let base_60 = rms_after_eq(&default, 60.0);
+        let base_1k = rms_after_eq(&default, 1000.0);
+
+        let boost_60 = rms_after_eq(&cfg, 60.0);
+        let boost_1k = rms_after_eq(&cfg, 1000.0);
+
+        let ratio_60 = boost_60 / base_60;
+        let ratio_1k = boost_1k / base_1k;
+
+        // 60Hz：理论 +15 dB = 5.62 倍；实测约 5.53（i16 量化与收敛误差 ~1.7%）
+        assert!(
+            ratio_60 > 5.0 && ratio_60 < 6.0,
+            "60Hz 段应被抬升约 5.6 倍，实测 {ratio_60:.2} 倍"
+        );
+        // 1kHz：理论 1.0098 倍（+0.08 dB）。0 dB 的峰值滤波器数学上严格透明
+        // （b 系数与 a 系数完全相同），故其它频段不该有明显影响。
+        assert!(
+            ratio_1k > 0.95 && ratio_1k < 1.05,
+            "1kHz 不应被 60Hz 段影响（理论 1.01 倍），实测 {ratio_1k:.4} 倍"
+        );
     }
 
     #[test]
@@ -1955,7 +2447,7 @@ mod probe_tests {
         // L R C LFE Ls Rs = 1000 1000 1000 0 1000 1000
         let out = adapt_channels(&[1000, 1000, 1000, 0, 1000, 1000], 2);
         assert_eq!(out.len(), 2);
-        let expect = 1000f32 + 0.7071 * (1000f32 + 1000f32);
+        let expect = 1000f32 + std::f32::consts::FRAC_1_SQRT_2 * (1000f32 + 1000f32);
         assert!((out[0] as f32 - expect).abs() < 2.0, "L={} expect={}", out[0], expect);
         assert!((out[1] as f32 - expect).abs() < 2.0);
     }
@@ -1978,7 +2470,7 @@ mod probe_tests {
         // 回归：6ch 帧若被当 2ch 会帧错位成噪声；下混后首帧须等于 BS.775 结果
         let frame: Vec<i16> = vec![10, 20, 30, 40, 50, 60];
         let out = adapt_channels(&frame, 2);
-        let expect_l = 10f32 + 0.7071 * (30f32 + 50f32);
+        let expect_l = 10f32 + std::f32::consts::FRAC_1_SQRT_2 * (30f32 + 50f32);
         assert!((out[0] as f32 - expect_l).abs() < 2.0);
     }
 
@@ -1995,7 +2487,14 @@ mod probe_tests {
             eprintln!("DSF_6CH_TEST file missing; skipping");
             return;
         }
-        let (mut child, mut source) = spawn_ffmpeg_decoder(path, 0, None).expect("spawn ffmpeg");
+        // EQ 由引擎与各音源共享（Arc），测试里就地建一份默认（关闭）的
+        let eq = std::sync::Arc::new(std::sync::Mutex::new(EqProcessor::new(
+            44100,
+            2,
+            &EqConfig::default(),
+        )));
+        let (mut child, mut source) =
+            spawn_ffmpeg_decoder(path, 0, None, &eq).expect("spawn ffmpeg");
         use rodio::Source as _;
         // 源为 6ch，供给 rodio 的必须是设备声道（2ch），否则 rodio 会帧错位
         assert_eq!(source.channels(), 2, "多声道源须在输出侧适配为设备声道");

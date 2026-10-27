@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use serde_json;
 
 use crate::error::{AppError, AppResult};
 
@@ -376,23 +377,46 @@ impl LibraryStore {
             .collect()
     }
 
-    /// 增量扫描基线：(id, file_path, modified_at)
-    pub fn scan_snapshot(&self) -> Vec<(String, String, i64)> {
+    /// 增量扫描基线：(id, file_path, modified_at, metadata_pending)
+    ///
+    /// `metadata_pending` 供扫描判定：占位（未解析）条目即使 mtime 未变也要重新解析，
+    /// 避免历史遗留的 0:00 占位因「mtime 未变被跳过」而永远拿不到真实时长。
+    pub fn scan_snapshot(&self) -> Vec<(String, String, i64, bool)> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, file_path, modified_at FROM tracks")
+            .prepare("SELECT id, file_path, modified_at, metadata_pending FROM tracks")
             .expect("prepare scan_snapshot");
         stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)? != 0,
             ))
         })
         .expect("query scan_snapshot")
         .flatten()
         .collect()
-    }
+}
+
+/// 扫描根目录指纹清单（`meta.scan_roots_mtime`）的键名。
+///
+/// 记录「各扫描根目录路径 + 根目录自身 mtime」，用于「未变更则跳过扫描」优化：
+/// 下次扫描时若所有根目录 mtime 都与上次一致，说明自上次扫描以来未增删改名，
+/// 可直接复用曲库 DB（已含完整解析/解码信息），免去整棵目录树的遍历与逐文件解析。
+const META_SCAN_ROOTS: &str = "scan_roots_mtime";
+
+/// 持久化本次扫描的根目录指纹（路径 + 根目录 mtime）。
+pub fn save_scan_roots(&self, roots: &[(String, i64)]) -> AppResult<()> {
+    let json = serde_json::to_string(roots)
+        .map_err(|e| AppError::Library(format!("序列化扫描根清单失败: {e}")))?;
+    db::set_meta(&self.conn, Self::META_SCAN_ROOTS, &json)
+}
+
+/// 读取上次扫描的根目录指纹；无记录（首次扫描 / 库被清空）返回 `None`。
+pub fn load_scan_roots(&self) -> Option<Vec<(String, i64)>> {
+    db::get_meta(&self.conn, Self::META_SCAN_ROOTS).and_then(|s| serde_json::from_str(&s).ok())
+}
 
     ///
     /// 应用一次增量扫描结果（单事务）：

@@ -34,6 +34,26 @@ const SACD_SECTOR_SIZE: u64 = 2048;
 /// Sony ScarletBooks ISO 每扇区块头长度（v9 实测确认：2048 字节扇区 = 32 字节块头 + 2016 字节 DSD 数据）。
 /// 不剥离这些块头会把 32 字节垃圾混入 DSD 位流 → 宽带白噪。
 const SACD_SECTOR_HEADER: u64 = 32;
+
+/// ---- SACD 音频扇区/数据包解析常量（取自 sacd-ripper 的 scarletbook.h，权威值）----
+/// 每个 2048 字节 LSN 的数据区布局（v6 起采用）：
+///   audio_sector_header(1B) → 包信息头(2B × packet_info_count)
+///   → frame_info(3B × frame_info_count；DST 为 4B) → 若干数据包
+/// audio_sector_header 位域：bit0 dst_encoded、bit2-4 frame_info_count、bit5-7 packet_info_count。
+/// 包信息头位域：bit15 frame_start、bit12-14 data_type、bit0-10 packet_length。
+/// 旧版「机械跳过 32 字节、其余当连续 DSD」会把上述包头也当音频写入（实测比权威工具多出
+/// 约 22 字节/扇区的垃圾）→ 与音量无关的宽带噪声底，且时长偏长。
+const AUDIO_SECTOR_HEADER_SIZE: u64 = 1;
+const AUDIO_PACKET_INFO_SIZE: u64 = 2;
+/// DST 帧信息条目字节数；非 DST 取 `AUDIO_FRAME_INFO_SIZE - 1`（= 3）
+const AUDIO_FRAME_INFO_SIZE: u64 = 4;
+/// 单个数据包最大长度
+const MAX_PACKET_SIZE: u64 = 2045;
+/// 单声道单帧字节数（DSD64：SAMPLES_PER_FRAME 588 × 64 / 8 = 4704，取自 scarletbook.h）。
+/// 未压缩 2ch 完整帧 = `FRAME_SIZE_64 * 2` = 9408 字节。
+const FRAME_SIZE_64: usize = 4704;
+/// 音频数据包类型（另有 DATA_TYPE_SUPPLEMENTARY=3、DATA_TYPE_PADDING=7）
+const DATA_TYPE_AUDIO: u8 = 2;
 /// DSF 文件头字节数（DSD chunk 28 + fmt chunk 52 + data chunk 头 12）。
 pub(crate) const DSF_HEADER_BYTES: u64 = 92;
 /// SACD 导出缓存目录版本：导出/校验逻辑变更时递增，整体失效旧缓存，
@@ -50,7 +70,16 @@ pub(crate) const DSF_HEADER_BYTES: u64 = 92;
 /// v7：**修正去交错粒度**：真实 SACD 2ch DSD 是「每帧 588L+588R 平面」而非「逐字节 L,R 交错」。
 /// 旧 parity 去交错把同一声道奇偶字节拆为两路→单声道塌缩+混叠（听感为噪声）。改为帧平面去交错后
 /// 跨多轨得到正常立体声（声道独立、包络正相关）。升级以整体失效旧版（噪声）缓存。
-const SACD_CACHE_VERSION: &str = "v10";
+/// v11：**改为按权威扇区/数据包结构抽取**（对照 sacd-ripper 的 scarletbook_read.c /
+/// dsf.c，并用同 ISO 的 sacd_extract 输出做基准校验）：
+///   - 每个 2048 字节扇区的 **偏移 0** 即 audio_sector_header（不存在独立 32 字节扇区头），
+///     其后为 2B×N 包信息头 → 3B×M frame_info（非 DST）→ 若干数据包；只取 data_type=2 的音频包。
+///     旧版机械跳过 32 字节后把包头当音频写入 → 约 22 字节/扇区垃圾、与音量无关的宽带噪声底。
+///   - 去交错回到**逐字节 L,R 交错**：用 sacd_extract 的 DSF 逐字节比对验证，本方式下
+///     还原出的 L 声道与参考**完全一致**（前 32 字节逐字节相同），而帧平面去交错不匹配。
+///   - 位反转（MSB-first → DSF 的 LSB-first）保持不变。
+///   - 载荷长度改为抽取后回填 DSF 头，缓存改用文件自身头声明的大小做自校验。
+const SACD_CACHE_VERSION: &str = "v11";
 /// ScarletBooks ISO 头部扫描长度：覆盖 Master TOC / 碟级与曲目文本 / 两张 tracklist
 /// （本样本中全部位于 < 0x114000，取 0x140000 留足余量且不深入音频区）。
 const SB_HEAD_SCAN: u64 = 0x140000;
@@ -132,7 +161,7 @@ impl SacdDisc {
         // 尝试若干已知 Master TOC 偏移（不同压碟/抓轨工具可能不同）
         let mtoc_offsets = [
             0x20000u64 * SACD_SECTOR_SIZE, // 规范：LBA 0x20000（SACD 最常见）
-            0x00000u64 * SACD_SECTOR_SIZE, // 部分镜像 TOC 前移
+            0u64, // 部分镜像 TOC 前移（LBA 0）
             0x10000u64 * SACD_SECTOR_SIZE, // 部分抓轨偏移
             0x30000u64 * SACD_SECTOR_SIZE, // 部分压碟/抓轨工具偏移
             0x40000u64 * SACD_SECTOR_SIZE,
@@ -228,42 +257,33 @@ impl SacdDisc {
                  请先用 sacd_extract 等工具转换为 DSF 后入库播放",
             ));
         }
-        // 音轨在 ISO 中的字节范围：[本轨起始扇区, 下一轨起始扇区)；末轨到 audio_end_byte。
-        // v9：扇区前 32 字节为块头，DSD 数据从扇区边界 +32 开始（网格以数据起点为锚）。
-        let sector_start = t.start_lba * SACD_SECTOR_SIZE;
-        let start_byte = sector_start + SACD_SECTOR_HEADER;
-        let end_byte = if track_index + 1 < self.tracks.len() {
-            self.tracks[track_index + 1].start_lba * SACD_SECTOR_SIZE
+        // 音轨占用的扇区区间：[本轨起始扇区, 下一轨起始扇区)；末轨到音频区结束扇区。
+        // v6：audio_sector_header 位于每个扇区的偏移 0，故直接按 LBA 逐扇区解析。
+        let start_lba = t.start_lba;
+        let end_lba = if track_index + 1 < self.tracks.len() {
+            self.tracks[track_index + 1].start_lba
         } else {
-            self.audio_end_byte.max(start_byte + 1)
+            self.audio_end_byte.div_ceil(SACD_SECTOR_SIZE).max(start_lba + 1)
         };
+        let start_byte = start_lba * SACD_SECTOR_SIZE;
+        let end_byte = end_lba * SACD_SECTOR_SIZE;
 
-        // v9：块结构需剥离每扇区 32 字节块头；旧「SACDMTA」平坦布局直接取 frames 对应字节。
-        let payload_len = if self.block_headers {
-            sacd_block_payload_len(start_byte, end_byte)
-        } else {
-            t.frames * DSD64_FRAME_BYTES
-        };
-        let frames = payload_len / DSD64_FRAME_BYTES;
-
+        // 载荷长度无法预先精确预测（取决于实际音频包），先写占位 DSF 头，
+        // 抽取完成后按真实字节数回填。
         let mut out = File::create(out_path)?;
-        write_dsf_header(
-            &mut out,
-            frames,
-            2,
-            self.dsd_sample_rate,
-            payload_len,
-        )?;
+        write_dsf_header(&mut out, 0, 2, self.dsd_sample_rate, 0)?;
 
-        if self.block_headers {
-            export_dsd_blocks(&self.iso_path, &mut out, start_byte, end_byte)?;
+        let payload_len = if self.block_headers {
+            export_dsd_stream(&self.iso_path, &mut out, start_lba, end_lba)?
         } else {
-            // 旧「SACDMTA」布局：平坦 DSD 顺序拷贝，限制长度防止跨轨读入下一曲。
+            // 旧「SACDMTA」平坦布局：直接顺序拷贝，限制长度防止跨轨读入下一曲。
             let mut file = File::open(&self.iso_path)?;
             file.seek(SeekFrom::Start(start_byte))?;
             use std::io::Write;
-            let mut remaining = payload_len as usize;
+            let remaining_total = end_byte.saturating_sub(start_byte);
+            let mut remaining = remaining_total as usize;
             let mut buf = vec![0u8; 64 * 1024];
+            let mut written: u64 = 0;
             while remaining > 0 {
                 let to_read = remaining.min(buf.len());
                 let n = file.read(&mut buf[..to_read])?;
@@ -271,9 +291,15 @@ impl SacdDisc {
                     break;
                 }
                 out.write_all(&buf[..n])?;
+                written += n as u64;
                 remaining -= n;
             }
-        }
+            written
+        };
+
+        // 回填真实 DSF 头（file_size / sample_count / data_size）
+        out.seek(SeekFrom::Start(0))?;
+        write_dsf_header(&mut out, 0, 2, self.dsd_sample_rate, payload_len)?;
         Ok(())
     }
 
@@ -305,6 +331,7 @@ impl SacdDisc {
         std::fs::create_dir_all(&work)?;
 
         let mut cmd = crate::util::hidden_command(&exe);
+        apply_sacd_extract_env(&mut cmd);
         cmd.arg(if multich { "-m" } else { "-2" })
             .arg("-s") // 输出 DSF
             .arg("-t")
@@ -829,6 +856,22 @@ fn read_u16_be(buf: &[u8], off: usize) -> u16 {
     u16::from_be_bytes([buf[off], buf[off + 1]])
 }
 
+/// 读取已导出 DSF 头部自声明的文件总字节数（offset 12..20，DSD chunk 的 file_size）。
+///
+/// 用于缓存自校验：v6 起抽取按真实音频包组装，载荷长度**无法预先精确预测**，
+/// 故不再与 `exported_dsf_len` 的估算值比对，而是校验「文件实际大小 == 其自身 DSF 头
+/// 声明的大小」，既准确又只需读 20 字节。
+pub(crate) fn dsf_declared_file_size(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut f = File::open(path).ok()?;
+    let mut lead = [0u8; 20];
+    f.read_exact(&mut lead).ok()?;
+    if &lead[0..4] != b"DSD " {
+        return None;
+    }
+    Some(u64::from_le_bytes(lead[12..20].try_into().ok()?))
+}
+
 /// 逐字节位反转（MSB-first ↔ LSB-first）。
 ///
 /// SACD 立体声区 DSD 位流以 MSB-first 存储，而 DSF（ffmpeg 的 `dsd_lsbf` 解码器）
@@ -948,58 +991,129 @@ fn sacd_block_payload_len(start: u64, end: u64) -> u64 {
 ///    逐字节比对有 97% 不一致；改为逐字节交错后 0 误差。
 /// 3. **位序**：ISO 侧 DSD 为 MSB-first，DSF（`dsd_lsbf`）需 LSB-first → 逐字节位反转。
 ///
-/// `start` 必须是该轨**真实的 DSD 数据起点**（扇区边界 + 32，或轨内偏移），因为扇区网格的相位
-/// 以数据起点为锚；`end` 为该轨数据结束的扇区边界。输出按 DSF 平面布局（4096 字节/声道/块）。
-fn export_dsd_blocks<W: std::io::Write>(
+/// `start_lba`/`end_lba` 为该轨占用的扇区区间（audio_sector_header 位于每个 2048 字节
+/// 扇区的**偏移 0**，不存在独立的 32 字节扇区头）；扇区内按
+/// `audio_sector_header → 包信息头 → frame_info → 数据包` 解析，只取 `data_type==2` 的音频包。
+/// 输出按 DSF 平面布局（4096 字节/声道/块）。返回 DSD 载荷总字节数（L+R）。
+/// 输出一个完整的 2ch DSD 帧：帧内数据为「声道间逐字节交错」（dsf_write_frame 语义），
+/// 逐字节位反转（ISO 的 MSB-first → DSF 的 LSB-first）后分别追加到 L/R 缓冲。
+fn emit_frame(frame: &[u8], l_buf: &mut Vec<u8>, r_buf: &mut Vec<u8>, payload: &mut u64) {
+    let mut i = 0;
+    while i + 1 < frame.len() {
+        l_buf.push(reverse_bits(frame[i]));
+        r_buf.push(reverse_bits(frame[i + 1]));
+        i += 2;
+        *payload += 2;
+    }
+}
+
+fn export_dsd_stream<W: std::io::Write>(
     iso: &Path,
     w: &mut W,
-    start: u64,
-    end: u64,
-) -> std::io::Result<()> {
+    start_lba: u64,
+    end_lba: u64,
+) -> std::io::Result<u64> {
     const PLANAR_BLK: usize = 4096; // 与 write_dsf_header 的 block_size_per_channel 一致
-    let total = end.saturating_sub(start);
+    const SECTORS_PER_CHUNK: usize = 512;
+
     let mut file = File::open(iso)?;
-    file.seek(SeekFrom::Start(start))?;
-    let mut l_buf: Vec<u8> = Vec::with_capacity(PLANAR_BLK);
-    let mut r_buf: Vec<u8> = Vec::with_capacity(PLANAR_BLK);
-    let mut read_buf = vec![0u8; 64 * 1024];
-    let mut done = 0u64;
-    while done < total {
-        let pos = start + done;
-        // 下一个扇区边界（绝对位置）：到边界前的数据连续，边界处跳过 32 字节块头
-        let next_boundary = (pos / SACD_SECTOR_SIZE + 1) * SACD_SECTOR_SIZE;
-        let want = read_buf
-            .len()
-            .min(next_boundary.saturating_sub(pos).min(total - done) as usize);
-        let n = file.read(&mut read_buf[..want])?;
-        if n == 0 {
+    let mut l_buf: Vec<u8> = Vec::with_capacity(PLANAR_BLK * 2);
+    let mut r_buf: Vec<u8> = Vec::with_capacity(PLANAR_BLK * 2);
+    let mut chunk = vec![0u8; SECTORS_PER_CHUNK * SACD_SECTOR_SIZE as usize];
+    // 当前帧缓冲（攒满 9408 字节即为一完整 2ch 帧）
+    let mut frame_buf: Vec<u8> = Vec::with_capacity(FRAME_SIZE_64 * 2);
+    let mut payload: u64 = 0;
+    let mut lba = start_lba;
+
+    while lba < end_lba {
+        let want_sectors = (SECTORS_PER_CHUNK as u64).min(end_lba - lba);
+        let want_bytes = want_sectors as usize * SACD_SECTOR_SIZE as usize;
+        file.seek(SeekFrom::Start(lba * SACD_SECTOR_SIZE))?;
+        let mut filled = 0usize;
+        while filled < want_bytes {
+            match file.read(&mut chunk[filled..want_bytes]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => return Err(e),
+            }
+        }
+        if filled == 0 {
             break;
         }
-        // 逐字节 L,R 交错去交错 + 位反转（MSB-first → LSB-first）
-        let mut i = 0;
-        while i + 1 < n {
-            l_buf.push(reverse_bits(read_buf[i]));
-            r_buf.push(reverse_bits(read_buf[i + 1]));
-            i += 2;
+        let got = filled / SACD_SECTOR_SIZE as usize;
+
+        for s in 0..got {
+            let base = s * SACD_SECTOR_SIZE as usize;
+            let sector_end = base + SACD_SECTOR_SIZE as usize;
+            let h = chunk[base];
+            let dst_encoded = (h & 1) != 0;
+            let frame_info_count = ((h >> 2) & 7) as u64;
+            let packet_info_count = ((h >> 5) & 7) as u64;
+            let mut p = base + AUDIO_SECTOR_HEADER_SIZE as usize;
+
+            // 包信息头（2 字节/条）
+            let mut packets = Vec::<(bool, u8, usize)>::with_capacity(packet_info_count as usize);
+            for _ in 0..packet_info_count {
+                if p + 2 > sector_end {
+                    break;
+                }
+                let b0 = chunk[p];
+                let b1 = chunk[p + 1];
+                p += AUDIO_PACKET_INFO_SIZE as usize;
+                let frame_start = ((b0 >> 7) & 1) != 0;
+                packets.push((
+                    frame_start,
+                    (b0 >> 3) & 7,
+                    (((b0 & 7) as usize) << 8) | b1 as usize,
+                ));
+            }
+            // frame_info：非 DST 条目 3 字节，DST 4 字节
+            let fi_step = if dst_encoded {
+                AUDIO_FRAME_INFO_SIZE
+            } else {
+                AUDIO_FRAME_INFO_SIZE - 1
+            };
+            p += (fi_step * frame_info_count) as usize;
+
+            // 按帧组装：仅输出**完整**帧（channel_count × 4704 = 9408 字节），
+            // 丢弃尾部不完整的残帧——否则末尾会多出约 2.7 秒的填充垃圾，
+            // 表现为时长偏长（对照 sacd_extract 实测：不丢则多 1.94MB）。
+            for (frame_start, data_type, len) in packets {
+                let is_audio = data_type == DATA_TYPE_AUDIO && len > 0 && len as u64 <= MAX_PACKET_SIZE;
+                if frame_start && is_audio && frame_buf.len() == FRAME_SIZE_64 * 2 {
+                    // 上一帧完整 → 输出
+                    emit_frame(&mut frame_buf, &mut l_buf, &mut r_buf, &mut payload);
+                    frame_buf.clear();
+                }
+                if is_audio {
+                    let end = (p + len).min(sector_end);
+                    frame_buf.extend_from_slice(&chunk[p..end]);
+                    if frame_buf.len() >= FRAME_SIZE_64 * 2 {
+                        emit_frame(&mut frame_buf, &mut l_buf, &mut r_buf, &mut payload);
+                        frame_buf.clear();
+                    }
+                    while l_buf.len() >= PLANAR_BLK && r_buf.len() >= PLANAR_BLK {
+                        w.write_all(&l_buf[..PLANAR_BLK])?;
+                        w.write_all(&r_buf[..PLANAR_BLK])?;
+                        l_buf.drain(..PLANAR_BLK);
+                        r_buf.drain(..PLANAR_BLK);
+                    }
+                }
+                p += len;
+            }
         }
-        done += n as u64;
-        // 到达扇区边界且还有数据要读：跳过 32 字节块头（网格以数据起点为锚）
-        if start + done == next_boundary && done < total {
-            file.seek(SeekFrom::Start(next_boundary + SACD_SECTOR_HEADER))?;
-            done += SACD_SECTOR_HEADER;
-        }
-        // 凑满一整块（4096 L + 4096 R）即按平面布局写出
-        while l_buf.len() >= PLANAR_BLK && r_buf.len() >= PLANAR_BLK {
-            w.write_all(&l_buf[..PLANAR_BLK])?;
-            w.write_all(&r_buf[..PLANAR_BLK])?;
-            l_buf.drain(..PLANAR_BLK);
-            r_buf.drain(..PLANAR_BLK);
+        lba += got as u64;
+        if (got as u64) < want_sectors {
+            break;
         }
     }
-    // 收尾：写出残余（L/R 长度相等：每对交错字节各贡献 1 字节）
+    // 收尾：输出最后一个完整帧，丢弃不完整残帧
+    if frame_buf.len() == FRAME_SIZE_64 * 2 {
+        emit_frame(&mut frame_buf, &mut l_buf, &mut r_buf, &mut payload);
+    }
     w.write_all(&l_buf)?;
     w.write_all(&r_buf)?;
-    Ok(())
+    Ok(payload)
 }
 
 /// Sony ScarletBooks 变体解析（`SACDMTOC` / `SACDText` / `SACDTRL1` / `SACDTTxt`）。
@@ -1038,24 +1152,34 @@ fn parse_scarletbooks(
         return None;
     }
 
-    // 多声道（5.1）区曲目数：SACDTRL2 存在即含多声道区，项数 = 曲目数
-    // （该表值为时间码而非扇区号，故仅取数量；曲目顺序与立体声区一一对应）。
-    let multich_track_count = find_marker(buf, b"SACDTRL2")
-        .map(|trl2| {
-            let mut count = 0usize;
-            let mut q = trl2 + 8;
-            while count < 99 {
-                match read_u32_be(buf, q) {
-                    Some(v) if v > 0 => {
-                        count += 1;
-                        q += 4;
+    // 多声道（5.1）区曲目数：**必须存在 MULCHTOC（多声道区 TOC）才算有多声道区**。
+    //
+    // 旧逻辑「SACDTRL2 存在即含多声道区」会严重误判：SACDTRL2 的表值是**时间码**
+    // 而非扇区号，且部分只有立体声区的碟仍带残留 SACDTRL2。实测本碟就是这种情况——
+    // sacd_extract -P 报告 `Area count: 1 / Speaker config: 2 Channel`，头部只有
+    // TWOCHTOC、没有 MULCHTOC，旧逻辑却凭空注册出 16 首假的 `[5.1]` 轨。
+    // 这些轨会走 `use_external` 分支调用 sacd_extract，在缺 libxml2.so.2 的 Linux
+    // 上全部以退出码 127 失败（表现为「连续多首无法播放」）。
+    let multich_track_count = if find_marker(buf, b"MULCHTOC").is_some() {
+        find_marker(buf, b"SACDTRL2")
+            .map(|trl2| {
+                let mut count = 0usize;
+                let mut q = trl2 + 8;
+                while count < 99 {
+                    match read_u32_be(buf, q) {
+                        Some(v) if v > 0 => {
+                            count += 1;
+                            q += 4;
+                        }
+                        _ => break,
                     }
-                    _ => break,
                 }
-            }
-            count
-        })
-        .unwrap_or(0);
+                count
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     // 曲目标题与碟级文本
     let titles = parse_sb_text_table(buf, b"SACDTTxt");
@@ -1201,12 +1325,93 @@ fn resolve_sacd_extract() -> Option<PathBuf> {
     crate::player::engine::resolve_bin_tool("sacd_extract")
 }
 
+/// 为 `sacd_extract` 子进程注入可用的 libxml2。
+///
+/// 随包分发的 `sacd_extract` 链接的是旧 soname `libxml2.so.2`，而较新的发行版
+/// （如 Ubuntu 26.10）只提供 `libxml2.so.16`——直接运行会以退出码 127 报
+/// `libxml2.so.2: cannot open shared object file`，导致整张 DST 压缩的 SACD
+/// （如 Fourplay《Energy》的 2ch / 6ch 双区，共 20 首）完全无法播放。
+///
+/// 这里不写死任何版本或路径：运行时在系统库目录里查找任意可用的 `libxml2.so.*`，
+/// 若缺少 `.so.2` 就在临时目录建一个指向现成版本的兼容 symlink，并通过
+/// `LD_LIBRARY_PATH` 注入。原生已有 `.so.2`、或系统上根本没有 libxml2 时不干预，
+/// 由子进程自行报错（避免掩盖真实原因）。
+#[cfg(target_os = "linux")]
+fn apply_sacd_extract_env(cmd: &mut std::process::Command) {
+    if let Some(dir) = libxml2_compat_dir() {
+        let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        let value = if existing.is_empty() {
+            dir.to_string_lossy().into_owned()
+        } else {
+            format!("{}:{}", dir.to_string_lossy(), existing)
+        };
+        cmd.env("LD_LIBRARY_PATH", value);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_sacd_extract_env(_cmd: &mut std::process::Command) {}
+
+/// 返回需要前置到 `LD_LIBRARY_PATH` 的兼容目录；无需兼容层时返回 None。
+#[cfg(target_os = "linux")]
+fn libxml2_compat_dir() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var("LD_LIBRARY_PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    dirs.extend([
+        PathBuf::from("/usr/lib/x86_64-linux-gnu"),
+        PathBuf::from("/usr/lib/aarch64-linux-gnu"),
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/lib/x86_64-linux-gnu"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/usr/local/lib"),
+        PathBuf::from("/lib"),
+    ]);
+
+    // 原生就有 .so.2 → 无需兼容层
+    if dirs.iter().any(|d| d.join("libxml2.so.2").exists()) {
+        return None;
+    }
+
+    // 否则挑一个版本号最高的现成实现（libxml2 各 soname 间核心 XML API 兼容）
+    let mut best: Option<(u32, PathBuf)> = None;
+    for d in &dirs {
+        if let Ok(entries) = std::fs::read_dir(d) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if let Some(rest) = name.strip_prefix("libxml2.so.") {
+                    if let Ok(ver) = rest.parse::<u32>() {
+                        if best.as_ref().map(|(v, _)| ver > *v).unwrap_or(true) {
+                            best = Some((ver, e.path()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (_ver, target) = best?;
+
+    let dir = std::env::temp_dir().join("tplayer-sacd-libs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let link = dir.join("libxml2.so.2");
+    if link.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(&link);
+    }
+    std::os::unix::fs::symlink(&target, &link).ok()?;
+    Some(dir)
+}
+
 /// 调 `sacd_extract -P` 取每轨真实时长。
 ///
 /// `-P` 只解析 ISO 的区 TOC（不读音频数据），单碟耗时约几十毫秒，仅扫描期调用。
 fn probe_durations_via_external(iso: &Path) -> Option<Vec<f64>> {
     let exe = resolve_sacd_extract()?;
     let mut cmd = crate::util::hidden_command(&exe);
+    apply_sacd_extract_env(&mut cmd);
     cmd.arg("-P")
         .arg("-i")
         .arg(iso)
@@ -1330,6 +1535,66 @@ pub fn ensure_sacd_cache_fresh(dir: &Path) {
         let _ = std::fs::create_dir_all(dir);
         let _ = std::fs::write(&stamp, SACD_CACHE_VERSION);
     }
+}
+
+/// 扫描期预导出：把 ISO 内指定「两区合并索引」的虚拟轨导出为缓存 DSF（仅导出，不含解码）。
+///
+/// 与 `engine.rs::spawn_sacd_decoder` 的导出逻辑保持一致（含 `use_external` 判定与缓存校验）；
+/// 导出后**不做**白噪校验——播放链路的 `guard_sacd_dsf` 会兜底校验，并在异常时改由外部
+/// 解码重导，因此此处导出的 DSF 即使偶发异常也不会被当作白噪轰到声卡。
+///
+/// 返回缓存 DSF 路径；导出失败（如 sacd_extract 缺失 / 解码失败）返回 `Err`（调用方应容忍
+/// 单轨失败，不影响其余轨与整体拆轨）。
+pub(crate) fn pre_export_sacd_dsf(
+    iso_path: &Path,
+    disc: &SacdDisc,
+    idx: usize,
+) -> Result<PathBuf, String> {
+    let stereo_len = disc.tracks.len();
+    let (meta, multich) = if idx < stereo_len {
+        (&disc.tracks[idx], false)
+    } else {
+        let m = idx - stereo_len;
+        if m >= disc.multich_track_count {
+            return Err(format!(
+                "SACD 曲目索引越界：{}/{}",
+                idx,
+                stereo_len + disc.multich_track_count
+            ));
+        }
+        (&disc.tracks[m], true)
+    };
+    let multich = multich || meta.channels > 2;
+    let use_external = multich || disc.unsupported;
+    let dsf_path = cached_dsf_path(iso_path, idx)
+        .ok_or_else(|| "无法创建 SACD 临时缓存目录".to_string())?;
+    if let Some(dir) = dsf_path.parent() {
+        ensure_sacd_cache_fresh(dir);
+    }
+    // 缓存校验：内置导出按精确字节数（旧版/截断即重导）；外部解码无法预知产出大小，
+    // 用「大于 DSF 头」判定存在性。
+    let cache_valid = if use_external {
+        dsf_path
+            .metadata()
+            .map(|m| m.len() > DSF_HEADER_BYTES)
+            .unwrap_or(false)
+    } else {
+        dsf_path
+            .metadata()
+            .map(|m| m.len() == disc.exported_dsf_len(idx))
+            .unwrap_or(false)
+    };
+    if !cache_valid {
+        let _ = std::fs::remove_file(&dsf_path);
+        if use_external {
+            disc.extract_track_via_external(meta.track_number, multich, &dsf_path)
+                .map_err(|e| format!("解码 SACD 音轨失败: {e}"))?;
+        } else {
+            disc.export_track_to_dsf(idx, &dsf_path)
+                .map_err(|e| format!("导出 SACD 分轨为 DSF 失败: {e}"))?;
+        }
+    }
+    Ok(dsf_path)
 }
 
 #[cfg(test)]
@@ -1477,8 +1742,15 @@ mod sacd_export_tests {
 
         let out = std::env::temp_dir().join("tplayer_sacd_regress.dsf");
         disc.export_track_to_dsf(0, &out).expect("导出第 1 轨");
+        // v11：载荷长度按真实音频包确定并回填 DSF 头，故改为自校验
+        // （文件实际大小 == 其自身 DSF 头声明的 file_size），而非与估算值比对。
         let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
-        assert_eq!(len, disc.exported_dsf_len(0), "导出文件大小与预期不一致");
+        let declared = dsf_declared_file_size(&out).expect("DSF 头可读");
+        assert_eq!(len, declared, "导出文件大小与其 DSF 头声明不一致");
+        assert!(
+            len > DSF_HEADER_BYTES,
+            "导出载荷为空（len={len}）：扇区/数据包解析有误"
+        );
 
         let low = decode_band(&out, "lowpass=f=10000").expect("解码低频段");
         let high = decode_band(&out, "highpass=f=10000").expect("解码高频段");

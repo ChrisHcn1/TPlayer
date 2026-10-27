@@ -10,6 +10,7 @@
 import { listen } from '@tauri-apps/api/event'
 
 import type {
+  EqBand,
   IPlayer,
   PlayContext,
   PlayMode,
@@ -69,6 +70,8 @@ const tauriPlayer: IPlayer = {
     callCommand('player_set_crossfade', { enabled, durationMs }),
   setReplaygain: (enabled: boolean) =>
     callCommand('player_set_replaygain', { enabled }),
+  setEq: (enabled: boolean, bands: EqBand[]) =>
+    callCommand('player_set_eq', { enabled, bands }),
   setSleepTimer: (delayMs: number, waitTrackEnd: boolean) =>
     callCommand('player_set_sleep_timer', { delayMs, waitTrackEnd }),
   cancelSleepTimer: () => callCommand('player_cancel_sleep_timer'),

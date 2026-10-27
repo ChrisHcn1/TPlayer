@@ -234,6 +234,13 @@ export const webLibrary = {
     return track ? [{ ...track, metadataPending: false }] : []
   },
 
+  async resolveTracks(ids: string[]): Promise<Track[]> {
+    return ids
+      .map((id) => visibleTracks().find((item) => item.id === id))
+      .filter((t): t is Track => !!t)
+      .map((t) => ({ ...t, metadataPending: false }))
+  },
+
   async trackInfo(trackId: string): Promise<TrackInfo | null> {
     const track = visibleTracks().find((item) => item.id === trackId)
     if (!track) return null

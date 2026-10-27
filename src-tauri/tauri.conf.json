@@ -7,10 +7,11 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devUrl": "http://localhost:3100",
+    "devUrl": "http://localhost:3101",
     "frontendDist": "../dist"
   },
   "app": {
+    "enableGTKAppId": true,
     "withGlobalTauri": false,
     "windows": [
       {
@@ -23,14 +24,16 @@
         "resizable": true,
         "center": true,
         "decorations": false,
+        "transparent": true,
         "devtools": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": "default-src 'self'; script-src 'self' blob: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost asset:",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$AUDIO/**", "$HOME/Music/**", "$APPDATA/cover-cache/**"]
+        "scope": ["$AUDIO/**", "$HOME/Music/**", "$APPDATA/cover-cache/**", "$APPDATA/lab-wallpaper/**"]
       }
     }
   },

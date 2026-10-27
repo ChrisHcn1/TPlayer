@@ -20,6 +20,13 @@ export interface PersistedSettings {
   crossfade: { enabled: boolean; duration_ms: number }
   replaygain: { enabled: boolean; targetLufs: number }
   watch: { enabled: boolean }
+  /** 自动更新相关状态（每日节流 / 跳过版本 / 安装记录），与 Rust UpdaterConfig 对齐 */
+  updater?: {
+    autoCheck: boolean
+    lastCheckMs: number
+    skippedVersion: string | null
+    lastInstalledVersion: string | null
+  }
 }
 
 /** 加载设置：Tauri 走命令，浏览器走 localStorage */

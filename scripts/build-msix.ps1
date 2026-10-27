@@ -34,9 +34,9 @@
 [CmdletBinding()]
 param(
     # Partner Center -> 应用管理 -> 应用标识 -> "Identity Name"（预留的应用名，包名，不能含空格）
-    [string]$IdentityName = 'TPlayer',
+    [string]$IdentityName = 'D57E920A.TPlayer',
     # Partner Center -> 应用管理 -> 应用标识 -> "Publisher"（形如 CN=1a2b3c4d-5e6f-...）
-    [string]$Publisher = 'CN=00000000-0000-0000-0000-000000000000',
+    [string]$Publisher = 'CN=4A6BC8B4-7E26-46D4-8F71-B56966D06EB0',
     # 4-part numeric version, e.g. 2.0.3.0
     [string]$Version = '2.0.3.0',
     # Partner Center -> 应用清单 -> "Display name"（应用显示名）
@@ -44,7 +44,7 @@ param(
     # Partner Center -> 合作伙伴设置 -> "Publisher display name"（发布者显示名称）
     # Store 要求它与 manifest 的 Properties/PublisherDisplayName 完全一致，否则报
     # "PublisherDisplayName 元素 ... 与发布者显示名称 ... 不匹配"。
-    [string]$PublisherDisplayName = 'TPlayer',
+    [string]$PublisherDisplayName = '格力森',
     # 仅用于本地试打包：允许使用占位 Publisher（Store 一定会拒），默认禁止
     [switch]$AllowPlaceholderPublisher
 )

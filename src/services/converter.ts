@@ -69,8 +69,18 @@ class WebConverter implements ConverterService {
   async start(tasks: ConvertTaskStart[]): Promise<void> {
     if (tasks.length === 0) throw new Error('没有待转换的文件')
     if (this.timer !== null) throw new Error('已有转换任务在进行中')
-    this.queue = [...tasks]
-    this.total = tasks.length
+    // 浏览器预览：模拟后端 expand_input 的展开（.cue/.iso → 多条分轨，其余 → 单文件）
+    const work: ConvertTaskStart[] = []
+    for (const t of tasks) {
+      const ext = t.path.split('.').pop()?.toLowerCase()
+      if (ext === 'cue' || ext === 'iso') {
+        for (let i = 0; i < 3; i++) work.push({ id: `${t.id}#${i}`, path: `${t.path}#${i}` })
+      } else {
+        work.push(t)
+      }
+    }
+    this.queue = work
+    this.total = work.length
     this.currentProgress = 0
     this.cancelled = false
     this.timer = setInterval(() => this.tick(), 240)

@@ -1,15 +1,18 @@
 //! 音频转换模块：ffmpeg 批量转码（MP3 320k / FLAC / WAV / AAC 256k）
 //!
-//! 架构：命令层接收任务列表后交给专用线程顺序执行，进度经
+//! 架构：命令层接收任务列表后交给专用线程执行，进度经
 //! `converter://event` 推送前端（与 playback://event 同构的 tag+payload 结构）。
+//! 执行阶段为**受控并发**（worker 数 = 核数一半、上限 4），多个 ffmpeg 同时转码；
+//! 输出名在分配时串行预留，保证并行下不重名、不覆盖。
 //! 取消通过原子标志：任务间直接跳过，任务中 kill 当前 ffmpeg 子进程。
 //! 输出文件与源文件同名换扩展名，已存在时追加 " (n)" 编号，绝不覆盖。
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -17,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::{AppError, AppResult};
+use crate::library::cue;
+use crate::library::sacd::SacdDisc;
 use crate::player::engine::{probe_duration, resolve_ffmpeg};
 
 /// 转换任务输入（前端生成 ID，事件按此回执关联）
@@ -226,7 +231,11 @@ pub fn start_batch(
     Ok(count)
 }
 
-/// 转换工作线程主体：顺序执行任务，逐个推送事件，结束后推送 Finished
+/// 转换工作线程主体：把每个输入按类型展开为工作单元（普通音频 / CUE / SACD ISO），
+/// 顺序执行，逐个推送事件，结束后推送 Finished。
+///
+/// 统一流程：不再区分「单文件转换」与「分轨转换」，由 `expand_input` 自动识别输入类型，
+/// 同一批次可混合普通文件与 .cue / .iso，用户只需一次「开始转换」。
 fn run_batch(
     app: &AppHandle,
     tasks: Vec<ConvertTaskInput>,
@@ -235,40 +244,107 @@ fn run_batch(
     output_dir: PathBuf,
     cancel: Arc<AtomicBool>,
 ) {
-    let mut completed = 0usize;
+    // 展开阶段：每个输入 → 一组工作单元（分轨可展开为多轨）
+    let mut work: Vec<WorkUnit> = Vec::new();
     let mut failed = 0usize;
-    let mut cancelled = false;
-
-    for task in tasks {
-        if cancel.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
-        }
-        match convert_one(app, &task, &options, format, &output_dir, &cancel) {
-            Ok(()) => completed += 1,
-            Err(TaskError::Cancelled) => {
-                cancelled = true;
-                emit(
-                    app,
-                    ConvertEvent::Failed {
-                        task_id: task.id,
-                        message: "已取消".into(),
-                    },
-                );
-                break;
-            }
-            Err(TaskError::Failed(message)) => {
+    for task in &tasks {
+        match expand_input(task, &options, &output_dir) {
+            Ok(items) => work.extend(items),
+            Err(e) => {
                 failed += 1;
                 emit(
                     app,
                     ConvertEvent::Failed {
-                        task_id: task.id,
-                        message,
+                        task_id: task.id.clone(),
+                        message: e.to_string(),
                     },
                 );
             }
         }
     }
+
+    // ---- 执行阶段：受控并发（多个 ffmpeg 同时转码）----
+    //
+    // 性能：原为顺序执行，整批耗时 ≈ 各文件耗时之和；现按核数派生 worker 数
+    // （上限 4，兼顾整批吞吐与单任务速度）并行转码，整批耗时大幅下降。
+    //
+    // 正确性保障：
+    //  - 输出名在分配时串行预留（unique_output），并行下绝不重名、绝不覆盖既有文件；
+    //  - 进度 / 完成 / 失败事件仍按 task_id 独立上报，前端按任务维护状态，无需改动；
+    //  - 取消沿用原子标志：待执行任务直接跳过，进行中的 ffmpeg 子进程被 kill；
+    //  - 计数用原子变量，批次结束统一汇总。
+    reset_output_reservations();
+    let completed = AtomicUsize::new(0);
+    let failed_running = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let next_index = AtomicUsize::new(0);
+    let worker_count = convert_worker_count();
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                loop {
+                    // 取消：不再领取新任务
+                    if cancel.load(Ordering::SeqCst) {
+                        cancelled.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    let idx = next_index.fetch_add(1, Ordering::SeqCst);
+                    let Some(seg) = work.get(idx) else {
+                        break;
+                    };
+                    // SACD 解码失败的占位任务：明确错误，避免误导为「文件不存在」
+                    if seg.input.to_string_lossy().starts_with("__sacd_missing_") {
+                        failed_running.fetch_add(1, Ordering::SeqCst);
+                        emit(
+                            app,
+                            ConvertEvent::Failed {
+                                task_id: seg.task_id.clone(),
+                                message: format!(
+                                    "SACD 分轨失败（{}）：该轨解码失败，可能是 DST 压缩或多声道，暂不支持",
+                                    seg.stem
+                                ),
+                            },
+                        );
+                        continue;
+                    }
+                    match convert_segment(app, seg, &options, format, &output_dir, &cancel) {
+                        Ok(()) => {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            // 分轨导出的临时 DSF 转码完成后清理
+                            if seg.temp_input {
+                                let _ = std::fs::remove_file(&seg.input);
+                            }
+                        }
+                        Err(TaskError::Cancelled) => {
+                            cancelled.store(true, Ordering::SeqCst);
+                            emit(
+                                app,
+                                ConvertEvent::Failed {
+                                    task_id: seg.task_id.clone(),
+                                    message: "已取消".into(),
+                                },
+                            );
+                        }
+                        Err(TaskError::Failed(message)) => {
+                            failed_running.fetch_add(1, Ordering::SeqCst);
+                            emit(
+                                app,
+                                ConvertEvent::Failed {
+                                    task_id: seg.task_id.clone(),
+                                    message,
+                                },
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let completed = completed.load(Ordering::SeqCst);
+    let failed = failed + failed_running.load(Ordering::SeqCst);
+    let cancelled = cancelled.load(Ordering::SeqCst);
 
     emit(
         app,
@@ -291,137 +367,39 @@ enum TaskError {
     Failed(String),
 }
 
-fn convert_one(
-    app: &AppHandle,
+/// 把单个转换输入按类型展开为工作单元（统一流程的核心分流点）：
+/// - `.cue` → CUE 分轨（每条音轨一段）
+/// - `.iso` → SACD ISO 分轨（每轨一段，DSD 导出失败回退 sacd_extract）
+/// - 其它音频 → 整文件转码（单段）
+/// 无法识别 / 解析失败则整体返回错误，由 `run_batch` 登记为失败任务。
+fn expand_input(
     task: &ConvertTaskInput,
-    options: &ConvertOptions,
-    format: OutputFormat,
+    _options: &ConvertOptions,
     output_dir: &Path,
-    cancel: &AtomicBool,
-) -> Result<(), TaskError> {
-    // Linux：曲库中的路径可能是非 UTF-8 文件名的容错编码（NTFS 场景），
-    // 先还原为文件系统真实路径，否则 is_file 探测失败、转换无法进行。
-    // 合法路径零成本（一次 exists 探测）；Windows 行为不变。
-    #[cfg(target_os = "linux")]
-    let input = crate::library::scan_linux::resolve_path_str(&task.path);
-    #[cfg(not(target_os = "linux"))]
-    let input = PathBuf::from(&task.path);
-    if !input.is_file() {
-        return Err(TaskError::Failed(format!("文件不存在: {}", task.path)));
-    }
-
-    // 输出路径：同名换扩展名，冲突时追加 " (n)"
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output")
-        .to_string();
-    let output = unique_output(output_dir, &stem, format.extension());
-
-    let duration_ms = (probe_duration(&input).unwrap_or(0.0) * 1000.0) as u64;
-
-    emit(
-        app,
-        ConvertEvent::Started {
-            task_id: task.id.clone(),
-            output_path: output.display().to_string(),
-        },
-    );
-
-    let ffmpeg = resolve_ffmpeg().expect("start_batch 已校验 ffmpeg 存在");
-    let mut cmd = crate::util::hidden_command(ffmpeg);
-    cmd.arg("-y")
-        .arg("-v")
-        .arg("error")
-        .arg("-i")
-        .arg(&input)
-        .arg("-vn")
-        .arg("-map_metadata")
-        .arg("0")
-        .arg("-ar")
-        .arg(options.sample_rate.to_string())
-        .args(format.codec_args(options.bit_depth))
-        .arg("-progress")
-        .arg("pipe:1")
-        .arg("-nostats")
-        .arg(&output)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| TaskError::Failed(format!("启动 ffmpeg 失败: {e}")))?;
-
-    // 进度读取线程：解析 -progress 输出的 out_time 时间串换算为毫秒
-    let out_time_ms = Arc::new(AtomicU64::new(0));
-    let stderr_text = Arc::new(Mutex::new(String::new()));
-    let readers = spawn_readers(&mut child, out_time_ms.clone(), stderr_text.clone());
-
-    // 轮询：等待退出 / 推送进度 / 响应取消
-    let mut last_progress = 0u8;
-    let status = loop {
-        if cancel.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
-            join_readers(readers);
-            let _ = std::fs::remove_file(&output); // 回收半成品
-            return Err(TaskError::Cancelled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(e) => {
-                join_readers(readers);
-                return Err(TaskError::Failed(format!("等待 ffmpeg 失败: {e}")));
-            }
-        }
-        if duration_ms > 0 {
-            let played = out_time_ms.load(Ordering::Relaxed);
-            let progress = ((played.min(duration_ms) * 100) / duration_ms).min(99) as u8;
-            if progress > last_progress {
-                last_progress = progress;
-                emit(
-                    app,
-                    ConvertEvent::Progress {
-                        task_id: task.id.clone(),
-                        progress,
-                    },
-                );
-            }
-        }
-        thread::sleep(Duration::from_millis(200));
-    };
-
-    join_readers(readers);
-
-    if status.success() {
-        emit(
-            app,
-            ConvertEvent::Progress {
-                task_id: task.id.clone(),
-                progress: 100,
-            },
-        );
-        emit(
-            app,
-            ConvertEvent::Completed {
-                task_id: task.id.clone(),
-                output_path: output.display().to_string(),
-            },
-        );
-        Ok(())
+) -> AppResult<Vec<WorkUnit>> {
+    let ext = Path::new(&task.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if ext == "cue" {
+        build_cue_segments(&task.path, output_dir, &task.id)
+    } else if ext == "iso" {
+        build_sacd_segments(&task.path, output_dir, &task.id)
     } else {
-        let stderr = stderr_text.lock().unwrap().clone();
-        let detail = stderr.trim();
-        let message = if detail.is_empty() {
-            format!("ffmpeg 退出码: {}", status.code().unwrap_or(-1))
-        } else {
-            // 只保留最后一行错误（stderr 可能包含多行进度噪音）
-            detail.lines().last().unwrap_or("未知错误").to_string()
-        };
-        let _ = std::fs::remove_file(&output); // 回收半成品
-        Err(TaskError::Failed(message))
+        let stem = Path::new(&task.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_string();
+        Ok(vec![WorkUnit {
+            task_id: task.id.clone(),
+            input: PathBuf::from(&task.path),
+            start_ms: None,
+            end_ms: None,
+            stem,
+            temp_input: false,
+        }])
     }
 }
 
@@ -484,20 +462,325 @@ fn parse_out_time_ms(value: &str) -> Option<u64> {
 }
 
 /// 同名冲突时追加 " (n)" 编号，绝不覆盖既有文件
+/// 输出文件名预留集合（按批次重置）。
+///
+/// 并行转码时多个任务可能同名（同名文件、同一专辑多轨同名），
+/// 若仅靠「磁盘上是否存在」判断，会出现两个任务拿到同一输出路径。
+/// 分配时一并预留，保证同一批次内输出名唯一且绝不覆盖既有文件。
+static OUTPUT_RESERVED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn output_reserved() -> &'static Mutex<HashSet<PathBuf>> {
+    OUTPUT_RESERVED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 批次开始时重置预留集合（同一时间仅允许一批转换，见 running 标志）
+fn reset_output_reservations() {
+    if let Ok(mut set) = output_reserved().lock() {
+        set.clear();
+    }
+}
+
+/// 分配唯一输出路径：磁盘已存在或本批次已被预留时顺延 " (n)" 编号，绝不覆盖。
 fn unique_output(dir: &Path, stem: &str, ext: &str) -> PathBuf {
-    let base = dir.join(format!("{stem}.{ext}"));
-    if !base.exists() {
-        return base;
+    let mut reserved = output_reserved().lock().unwrap_or_else(|e| e.into_inner());
+    let mut candidate = dir.join(format!("{stem}.{ext}"));
+    let mut n = 1;
+    while candidate.exists() || reserved.contains(&candidate) {
+        candidate = dir.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
     }
-    for n in 1.. {
-        let candidate = dir.join(format!("{stem} ({n}).{ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!()
+    reserved.insert(candidate.clone());
+    candidate
+}
+
+/// 转换并发度：ffmpeg 自身已多线程，占满全部核心反而拖慢单任务；
+/// 取「核数的一半、上限 4」，在整批吞吐与单任务速度之间取平衡。
+fn convert_worker_count() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    (cpus / 2).clamp(1, 4)
 }
 
 fn emit(app: &AppHandle, event: ConvertEvent) {
     let _ = app.emit("converter://event", &event);
+}
+
+// ===================== 实验室·CUE/SACD 分轨转换 =====================
+//
+// 把 CUE 镜像（含分轨时间信息）或 SACD ISO（含多音轨）按曲目切割并转码为指定格式。
+// 与 start_batch 共享同一 running 锁：同一时间只允许一批（普通转码或分轨）。
+
+/// 单个转换工作单元（普通文件为整文件转码；分轨为按起止截取的一段）。
+/// 这是「统一转换流程」的基本执行单位：普通音频 / CUE / SACD ISO 经 `expand_input`
+/// 展开为一组 WorkUnit 后由同一循环顺序执行，名称一律由后端真实 output_path 回填，
+/// 确保任务名与实际文件始终一致。
+struct WorkUnit {
+    /// 任务 ID（前端事件关联）
+    task_id: String,
+    /// 输入文件：CUE → 镜像音频文件；SACD → 导出的临时 DSF
+    input: PathBuf,
+    /// 截取起点（毫秒），None 表示从头
+    start_ms: Option<u64>,
+    /// 截取终点（毫秒），None 表示到尾
+    end_ms: Option<u64>,
+    /// 输出文件名主干（不含扩展名）
+    stem: String,
+    /// 输入是否为导出产生的临时文件（任务完成后清理）
+    temp_input: bool,
+}
+
+// CUE/SACD 分轨已并入统一转换流程（start_batch → expand_input → run_batch），
+// 不再单独暴露 start_split 命令。
+
+/// 解析 CUE：每条音轨一个分轨任务（按 cue_offset/duration 截取）。
+///
+/// `parse_cue` 返回的 `Track` 均为可播放音轨（DATA 数据轨不会生成 Track），
+/// 其 `cue_offset` 为在镜像文件中的起始秒数，`duration` 为单轨时长。
+fn build_cue_segments(source: &str, _output_dir: &Path, prefix: &str) -> AppResult<Vec<WorkUnit>> {
+    let tracks = cue::parse_cue(Path::new(source));
+    let mut segments = Vec::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if !t.is_cue || t.file_path.is_empty() {
+            continue;
+        }
+        let input = PathBuf::from(&t.file_path);
+        if !input.is_file() {
+            continue;
+        }
+        let offset = t.cue_offset.unwrap_or(0.0);
+        let start_ms = if offset > 0.0 {
+            Some((offset * 1000.0) as u64)
+        } else {
+            None
+        };
+        let end_ms = if t.duration > 0.0 {
+            Some(((offset + t.duration) * 1000.0) as u64)
+        } else {
+            None
+        };
+        let title = t.title.clone();
+        let stem = sanitize_stem(&format!("{:02} - {}", i + 1, title));
+        segments.push(WorkUnit {
+            task_id: format!("{prefix}-c{i:02}"),
+            input,
+            start_ms,
+            end_ms,
+            stem,
+            temp_input: false,
+        });
+    }
+    Ok(segments)
+}
+
+/// 解析 SACD ISO：每轨导出为临时 DSF 再转码（内置裸 DSD 导出失败则回退 sacd_extract）。
+fn build_sacd_segments(source: &str, output_dir: &Path, prefix: &str) -> AppResult<Vec<WorkUnit>> {
+    let Some(disc) = SacdDisc::open(Path::new(source)) else {
+        return Err(AppError::Converter("无法打开 SACD ISO".into()));
+    };
+    let tracks = disc.to_tracks();
+    if tracks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut segments = Vec::new();
+    for (i, t) in tracks.iter().enumerate() {
+        let idx = t.sacd_track_index as usize;
+        let title = if t.title.trim().is_empty() {
+            format!("Track {:02}", i + 1)
+        } else {
+            t.title.clone()
+        };
+        let stem = sanitize_stem(&format!("{:02} - {}", i + 1, title));
+        let dsf = output_dir.join(format!(".split-{:02}.dsf", i + 1));
+        // 优先内置裸 DSD 导出；DST 压缩 / 多声道回退到 sacd_extract（1-based 曲目号）
+        let exported = disc
+            .export_track_to_dsf(idx, &dsf)
+            .map_err(|e| e.to_string())
+            .or_else(|_| disc.extract_track_via_external(idx as u32 + 1, false, &dsf).map_err(|e| e.to_string()));
+        match exported {
+            Ok(()) => segments.push(WorkUnit {
+                task_id: format!("{prefix}-s{i:02}"),
+                input: dsf,
+                start_ms: None,
+                end_ms: None,
+                stem,
+                temp_input: true,
+            }),
+            Err(_) => {
+                // 该轨解码失败：登记为失败任务（输入置为不存在，convert_segment 会报文件不存在）
+                segments.push(WorkUnit {
+                    task_id: format!("{prefix}-s{i:02}"),
+                    input: PathBuf::from(format!("__sacd_missing_{i}")),
+                    start_ms: None,
+                    end_ms: None,
+                    stem,
+                    temp_input: false,
+                });
+            }
+        }
+    }
+    Ok(segments)
+}
+
+// run_split 逻辑已并入 run_batch（统一展开 + 顺序执行），保留 convert_segment 作为
+// 单/分轨通用的执行单元。
+
+/// 单个分轨任务：按起点/终点截取并转码。
+fn convert_segment(
+    app: &AppHandle,
+    seg: &WorkUnit,
+    options: &ConvertOptions,
+    format: OutputFormat,
+    output_dir: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), TaskError> {
+    if !seg.input.is_file() {
+        return Err(TaskError::Failed(format!("文件不存在: {}", seg.input.display())));
+    }
+
+    let output = unique_output(output_dir, &seg.stem, format.extension());
+
+    // 截取时长（用于进度换算）：优先用起止差，否则用探测总时长扣除起点
+    let segment_duration_ms: u64 = match (seg.start_ms, seg.end_ms) {
+        (Some(s), Some(e)) if e > s => e - s,
+        _ => {
+            let total = (probe_duration(&seg.input).unwrap_or(0.0) * 1000.0) as u64;
+            match (seg.start_ms, seg.end_ms) {
+                (Some(s), None) => total.saturating_sub(s),
+                (None, Some(e)) => e,
+                _ => total,
+            }
+        }
+    };
+    // 写入 -t 的截取时长（None = 到尾）
+    let duration_ms: Option<u64> = match (seg.start_ms, seg.end_ms) {
+        (Some(s), Some(e)) if e > s => Some(e - s),
+        (None, Some(e)) => Some(e),
+        _ => None,
+    };
+
+    emit(
+        app,
+        ConvertEvent::Started {
+            task_id: seg.task_id.clone(),
+            output_path: output.display().to_string(),
+        },
+    );
+
+    let ffmpeg = resolve_ffmpeg().expect("start_split 已校验 ffmpeg 存在");
+    let mut cmd = crate::util::hidden_command(ffmpeg);
+    cmd.arg("-y")
+        .arg("-v")
+        .arg("error");
+    if let Some(s) = seg.start_ms {
+        cmd.arg("-ss").arg((s as f64 / 1000.0).to_string());
+    }
+    cmd.arg("-i")
+        .arg(&seg.input)
+        .arg("-vn")
+        .arg("-map_metadata")
+        .arg("0")
+        .arg("-ar")
+        .arg(options.sample_rate.to_string())
+        .args(format.codec_args(options.bit_depth));
+    if let Some(d) = duration_ms {
+        cmd.arg("-t").arg((d as f64 / 1000.0).to_string());
+    }
+    cmd.arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
+        .arg(&output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| TaskError::Failed(format!("启动 ffmpeg 失败: {e}")))?;
+
+    let out_time_ms = Arc::new(AtomicU64::new(0));
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let readers = spawn_readers(&mut child, out_time_ms.clone(), stderr_text.clone());
+
+    let mut last_progress = 0u8;
+    let status = loop {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            join_readers(readers);
+            let _ = std::fs::remove_file(&output);
+            return Err(TaskError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                join_readers(readers);
+                return Err(TaskError::Failed(format!("等待 ffmpeg 失败: {e}")));
+            }
+        }
+        if segment_duration_ms > 0 {
+            let played = out_time_ms.load(Ordering::Relaxed);
+            let progress = ((played.min(segment_duration_ms) * 100) / segment_duration_ms).min(99) as u8;
+            if progress > last_progress {
+                last_progress = progress;
+                emit(
+                    app,
+                    ConvertEvent::Progress {
+                        task_id: seg.task_id.clone(),
+                        progress,
+                    },
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+
+    join_readers(readers);
+
+    if status.success() {
+        emit(
+            app,
+            ConvertEvent::Progress {
+                task_id: seg.task_id.clone(),
+                progress: 100,
+            },
+        );
+        emit(
+            app,
+            ConvertEvent::Completed {
+                task_id: seg.task_id.clone(),
+                output_path: output.display().to_string(),
+            },
+        );
+        Ok(())
+    } else {
+        let stderr = stderr_text.lock().unwrap().clone();
+        let detail = stderr.trim();
+        let message = if detail.is_empty() {
+            format!("ffmpeg 退出码: {}", status.code().unwrap_or(-1))
+        } else {
+            detail.lines().last().unwrap_or("未知错误").to_string()
+        };
+        let _ = std::fs::remove_file(&output);
+        Err(TaskError::Failed(message))
+    }
+}
+
+/// 清洗文件名主干中的非法字符（Windows/Unix 通用）
+fn sanitize_stem(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            out.push('_');
+        } else {
+            out.push(c);
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "track".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

@@ -3,10 +3,10 @@
 //! 每个命令对应 src/services/player.ts 中的一个方法（IPlayer 实现）。
 //! 前端以 camelCase 传参，Tauri 自动映射到 snake_case 参数。
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
-use crate::player::engine::EngineCapabilities;
+use crate::player::engine::{EngineCapabilities, EqConfig};
 use crate::player::state::{PlayContext, PlayMode, PlaybackSnapshot, SleepTimerStatus};
 use crate::AppState;
 
@@ -18,16 +18,23 @@ use crate::AppState;
 /// 避免启动即触发整文件慢解码或错误定位，用户可手动选择播放。
 /// 自动续播失败（文件缺失等）不影响初始化，按队列顺序自动跳过尝试。
 #[tauri::command]
-pub fn player_init(state: State<'_, AppState>, app: AppHandle) -> AppResult<Option<PlayContext>> {
-    let tracks = state.library.lock().unwrap().tracks();
-    let mut player = state.player.lock().unwrap();
-    player.set_tracks(tracks);
-    let restored = player.apply_pending_restore();
-    // 断点存在且已定位：从断点位置自动续播；失败则从当前断点曲目起按队列尝试
-    if player.snapshot.track_id.is_some() && player.resume(&app).is_err() {
-        let _ = player.play_current_or_skip(&app);
-    }
-    Ok(restored)
+pub async fn player_init(app: AppHandle) -> AppResult<Option<PlayContext>> {
+    // 初始化会读全库并可能加载当前曲目（引擎打开/ffmpeg/SACD 提取会阻塞），
+    // 放到阻塞线程池，避免卡住主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        let tracks = state.library.lock().unwrap().tracks();
+        let mut player = state.player.lock().unwrap();
+        player.set_tracks(tracks);
+        let restored = player.apply_pending_restore();
+        // 断点存在且已定位：从断点位置自动续播；失败则从当前断点曲目起按队列尝试
+        if player.snapshot.track_id.is_some() && player.resume(&app).is_err() {
+            let _ = player.play_current_or_skip(&app);
+        }
+        Ok(restored)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("播放器初始化任务失败: {e}")))?
 }
 
 /// 查询当前引擎能力
@@ -44,86 +51,119 @@ pub fn player_snapshot(state: State<'_, AppState>) -> AppResult<PlaybackSnapshot
 
 /// 播放指定曲目
 #[tauri::command]
-pub fn player_play(
-    state: State<'_, AppState>,
-    app: AppHandle,
-    track_id: String,
-    context: Option<PlayContext>,
-) -> AppResult<()> {
-    let track = state
-        .library
-        .lock()
-        .unwrap()
-        .get_track(&track_id)
-        .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", track_id)))?;
+pub async fn player_play(app: AppHandle, track_id: String, context: Option<PlayContext>) -> AppResult<()> {
+    // player.play 内部会同步等引擎打开音频（ffmpeg 探测 / SACD 提取可能很慢），
+    // 放到阻塞线程池，绝不能阻塞主线程导致「未响应」。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        let track = state
+            .library
+            .lock()
+            .unwrap()
+            .get_track(&track_id)
+            .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", track_id)))?;
 
-    let mut player = state.player.lock().unwrap();
-    player.play(&track, context, &app)
+        let mut player = state.player.lock().unwrap();
+        player.play(&track, context, &app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("播放任务执行失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn player_pause(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    state.player.lock().unwrap().pause(&app)
+pub async fn player_pause(app: AppHandle) -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        state.player.lock().unwrap().pause(&app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("暂停任务执行失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn player_resume(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    state.player.lock().unwrap().resume(&app)
+pub async fn player_stop(app: AppHandle) -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        state.player.lock().unwrap().stop(&app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("停止任务执行失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn player_stop(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    state.player.lock().unwrap().stop(&app)
+pub async fn player_resume(app: AppHandle) -> AppResult<()> {
+    // resume 可能触发引擎加载当前曲目（阻塞），移出主线程
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        state.player.lock().unwrap().resume(&app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("继续播放任务执行失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn player_next(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+pub async fn player_next(app: AppHandle) -> AppResult<()> {
     // 先预览下一首 id（锁外预取曲目），再在同一 player 锁内完成推进 + 起播，
-    // 避免时钟线程在窗口期内二次推进造成跳两首/双链路
-    let next_id = state
-        .player
-        .lock()
-        .unwrap()
-        .peek_next_id()
-        .ok_or_else(|| AppError::Player("队列已到末尾或队列为空".into()))?;
-    let track = state
-        .library
-        .lock()
-        .unwrap()
-        .get_track(&next_id)
-        .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", next_id)))?;
-    state
-        .player
-        .lock()
-        .unwrap()
-        .advance_and_play(false, &track, &app)
+    // 避免时钟线程在窗口期内二次推进造成跳两首/双链路。起播会等引擎 ack，移出主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        let next_id = state
+            .player
+            .lock()
+            .unwrap()
+            .peek_next_id()
+            .ok_or_else(|| AppError::Player("队列已到末尾或队列为空".into()))?;
+        let track = state
+            .library
+            .lock()
+            .unwrap()
+            .get_track(&next_id)
+            .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", next_id)))?;
+        state
+            .player
+            .lock()
+            .unwrap()
+            .advance_and_play(false, &track, &app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("下一曲任务执行失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn player_previous(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
-    let prev_id = state
-        .player
-        .lock()
-        .unwrap()
-        .peek_previous_id()
-        .ok_or_else(|| AppError::Player("队列为空".into()))?;
-    let track = state
-        .library
-        .lock()
-        .unwrap()
-        .get_track(&prev_id)
-        .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", prev_id)))?;
-    state
-        .player
-        .lock()
-        .unwrap()
-        .advance_and_play(true, &track, &app)
+pub async fn player_previous(app: AppHandle) -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        let prev_id = state
+            .player
+            .lock()
+            .unwrap()
+            .peek_previous_id()
+            .ok_or_else(|| AppError::Player("队列为空".into()))?;
+        let track = state
+            .library
+            .lock()
+            .unwrap()
+            .get_track(&prev_id)
+            .ok_or_else(|| AppError::Player(format!("曲目不存在: {}", prev_id)))?;
+        state
+            .player
+            .lock()
+            .unwrap()
+            .advance_and_play(true, &track, &app)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("上一曲任务执行失败: {e}")))?
 }
 
 /// 跳转到指定毫秒位置
 #[tauri::command]
-pub fn player_seek(state: State<'_, AppState>, position_ms: u64) -> AppResult<()> {
-    state.player.lock().unwrap().seek(position_ms)
+pub async fn player_seek(app: AppHandle, position_ms: u64) -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        state.player.lock().unwrap().seek(position_ms)
+    })
+    .await
+    .map_err(|e| AppError::Player(format!("跳转任务执行失败: {e}")))?
 }
 
 /// 设置音量（0.0 - 1.0）
@@ -202,6 +242,30 @@ pub fn player_set_rate(
     rate: f32,
 ) -> AppResult<()> {
     state.player.lock().unwrap().set_rate(rate, &app)
+}
+
+/// 设置实验室均衡器配置（频段增益 + 总开关）；写入 config.json 持久化，
+/// 并立即下发引擎线程生效（下一首起沿用新配置）。
+#[tauri::command]
+pub fn player_set_eq(
+    state: State<'_, AppState>,
+    enabled: bool,
+    bands: Vec<crate::player::engine::EqBand>,
+) -> AppResult<()> {
+    {
+        let mut config = state.config.lock().unwrap();
+        config.eq.enabled = enabled;
+        config.eq.bands = bands.clone();
+        config.save(&state.config_path)?;
+    }
+    state.player.lock().unwrap().set_eq(EqConfig { enabled, bands });
+    Ok(())
+}
+
+/// 读取当前实验室均衡器配置（供「实验室」面板回显已保存的频段增益）。
+#[tauri::command]
+pub fn player_get_eq(state: State<'_, AppState>) -> AppResult<EqConfig> {
+    Ok(state.config.lock().unwrap().eq.clone())
 }
 
 /// 设置睡眠定时器（delay_ms 毫秒后到期；wait_track_end=true 时到期后播完当前曲目才停止）

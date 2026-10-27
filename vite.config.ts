@@ -18,8 +18,13 @@ export default defineConfig({
     sourcemap: false,
   },
   server: {
-    port: 3100,
+    port: 3101,
     strictPort: true,
+    // Rust 编译产物目录文件极多，Vite 默认会递归监听导致耗尽 inotify
+    // 观察上限（ENOSPC）。这里显式忽略，前端热更新只监听 src/。
+    watch: {
+      ignored: ['**/src-tauri/target/**', '**/target/**'],
+    },
   },
   // Tauri 侧包在浏览器预览中虽不会真正执行，但动态 import 首次被发现时
   // Vite 会重新预构建并整页 reload；启动时统一预打包，避免会话中刷新打断状态。

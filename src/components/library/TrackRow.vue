@@ -6,10 +6,12 @@
  * 状态：default / hover / selected / playing（左缘 3px 指示条 + 均衡器）；
  * 交互：双击播放、勾选多选（Shift 连选由 TrackList 处理）、右键菜单、更多按钮。
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 
 import type { Track } from '../../types'
 import Icon from '../common/Icon.vue'
+import { useLyricsMetadata } from '../../lab/features/lyrics-metadata'
+import { useMetaRetryStore } from '../../stores/metaRetry'
 
 interface Props {
   track: Track
@@ -35,6 +37,33 @@ const emit = defineEmits<{
   (e: 'row-click', track: Track, event: MouseEvent): void
   (e: 'context-menu', track: Track, event: MouseEvent): void
 }>()
+
+// 实验室：歌词边车元数据补全（开启后，曲目渲染时按需回填未知艺术家/专辑）
+useLyricsMetadata(() => props.track?.id)
+
+// 实验室·元数据增强：单曲识别记录（列表内展示「已识别」标记）
+const metaRetry = useMetaRetryStore()
+const retryRecord = computed(() => metaRetry.recordOf(props.track.id))
+const retryStatusText = computed(() => {
+  const rec = retryRecord.value
+  if (!rec) return ''
+  return rec.status === 'ok' ? '已识别' : rec.status === 'failed' ? '识别失败' : '无需变更'
+})
+/** 标记文案：状态 + 识别时间（HH:MM），完整时间与详情见悬停提示 */
+const retryBadgeText = computed(() => {
+  const rec = retryRecord.value
+  if (!rec) return ''
+  const time = rec.at.length >= 16 ? rec.at.slice(11, 16) : rec.at
+  return `${retryStatusText.value} ${time}`
+})
+const retryBadgeTitle = computed(() => {
+  const rec = retryRecord.value
+  if (!rec) return ''
+  return `识别于 ${rec.at}\n状态：${retryStatusText.value}\n${rec.detail}`
+})
+onMounted(() => {
+  void metaRetry.ensureLoaded()
+})
 
 const durationText = computed(() => {
   const totalSeconds = Math.round(props.track.duration)
@@ -91,6 +120,13 @@ function onCheckboxClick(event: MouseEvent): void {
       <span class="track-row__title-text" :class="{ 'track-row__title-text--current': isCurrent }">
         {{ track.title }}
       </span>
+      <span
+        v-if="retryRecord"
+        class="track-row__retry-badge"
+        :class="`track-row__retry-badge--${retryRecord.status}`"
+        :title="retryBadgeTitle"
+        >{{ retryBadgeText }}</span
+      >
     </div>
 
     <div v-if="showArtist" class="track-row__artist">
@@ -277,6 +313,13 @@ function onCheckboxClick(event: MouseEvent): void {
 }
 
 /* 文本列 */
+.track-row__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 .track-row__title-text,
 .track-row__artist span,
 .track-row__album span {
@@ -287,9 +330,34 @@ function onCheckboxClick(event: MouseEvent): void {
 }
 
 .track-row__title-text {
+  flex: 1 1 auto;
+  min-width: 0;
   padding-right: var(--space-2);
   font-size: var(--font-size-sm);
   color: var(--color-text-primary);
+}
+
+/* 单曲识别标记（悬停查看识别时间 / 状态 / 变更详情） */
+.track-row__retry-badge {
+  flex: none;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xs);
+  cursor: help;
+}
+
+.track-row__retry-badge--ok {
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.track-row__retry-badge--failed {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
 .track-row__artist,

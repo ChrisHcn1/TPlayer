@@ -3,9 +3,10 @@
 //! 安全约定：凡接收路径参数的命令，都必须经 `security::ensure_allowed` 校验
 //! （白名单 = config.library_dirs）。library_add_dir 的路径来自 dialog 选择器，可信。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -15,20 +16,34 @@ use crate::error::{AppError, AppResult};
 use crate::library::models::{
     disc_key, Album, Artist, LibraryStats, Playlist, RecentEntry, ScanProgress, ScanStage, Track,
 };
-use crate::library::scan::{collect_import_tracks, discover_cue_files, parse_track, scan_directory_fast};
-use crate::library::sacd::SacdDisc;
-use crate::library::cue::parse_cue;
+use crate::library::scan::{self, collect_import_tracks, list_cue_files, parse_track, scan_directory};
+use crate::library::verify;
+use crate::library::sacd::{pre_export_sacd_dsf, SacdDisc};
+use crate::library::cue::{parse_cue, parse_cue_light};
 use crate::AppState;
 
 /// 启动一次曲库扫描（增量）
+///
+/// `force = true` 时忽略「未变更则跳过」优化，强制重新遍历 + 解析（用于用户
+/// 改了标签却未触碰目录 mtime 等需要强制刷新的场景）；默认 `false` 走智能跳过。
 #[tauri::command]
-pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+pub async fn library_scan(app: AppHandle, force: bool) -> AppResult<()> {
+    // 扫描是重活（遍历整个曲库树 + 全库去重 SQL + 写库），必须放到阻塞线程池，
+    // 绝不能跑在主线程上——否则大曲库 / 网络盘扫描会把整个界面拖成「未响应」。
+    tauri::async_runtime::spawn_blocking(move || scan_library_sync(&app, force))
+        .await
+        .map_err(|e| AppError::Library(format!("扫描任务执行失败: {e}")))?
+}
+
+/// `library_scan` 的实际同步实现（在阻塞线程池上运行）。
+fn scan_library_sync(app: &AppHandle, force: bool) -> AppResult<()> {
+    let state = app.state::<AppState>();
     let roots: Vec<PathBuf> = {
         let config = state.config.lock().unwrap();
         config
             .library_dirs
             .iter()
-            .map(|s| PathBuf::from(s))
+            .map(PathBuf::from)
             .collect()
     };
 
@@ -76,13 +91,72 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
         return Err(AppError::Library(message));
     }
 
-    // 增量扫描基线（id/path/mtime）。v6 起使用两阶段懒加载快速扫描：
-    // 扫描阶段只做「前期加载」——目录遍历 + 文件名/路径/大小轻量信息占位入库，
-    // 不做逐文件元数据解析（lofty/ffprobe）、不读封面、不解析 CUE/SACD，
-    // 因此网络共享大目录（如 \\172.18.0.21\sound，54GB/1864 文件）加载不再卡死 UI。
+    // 计算各根目录自身 mtime（用于「未变更则跳过扫描」判断，开销仅为对根目录的 stat）
+    let cur_roots: Vec<(String, i64)> = roots
+        .iter()
+        .map(|r| {
+            let m = std::fs::metadata(r)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            (r.to_string_lossy().to_string(), m)
+        })
+        .collect();
+
+    // —— 未变更则跳过扫描（直接复用曲库 DB 已缓存的解析 / 解码结果）——
+    // 仅当所有根目录的「自身 mtime」都与上次扫描记录一致时才跳过：目录 mtime 在
+    // 其下条目被增删 / 改名时会随之变化，故一致即代表自上次扫描以来曲目集合未变，
+    // 无需重新遍历整棵目录树，也无需重新解析 / 解码任何文件，启动与重复扫描瞬时完成。
+    // （`force` 或根目录配置发生变化、或无历史记录时走完整增量扫描。）
+    if !force {
+        let prev = {
+            let g = state.library.lock().unwrap();
+            g.load_scan_roots()
+        };
+        let all_stable = match &prev {
+            Some(p) => {
+                p.len() == cur_roots.len()
+                    && p.iter().all(|(path, mtime)| {
+                        cur_roots
+                            .iter()
+                            .any(|(cp, cm)| cp == path && cm == mtime && *cm != 0)
+                    })
+            }
+            None => false,
+        };
+        if all_stable {
+            // 直接复用：从 DB 装载曲目到播放器（与上次一致），不发任何扫描进度，
+            // 前端因此不进入「扫描中」态——用户无感知地即时可用，免去等候。
+            let tracks = {
+                let g = state.library.lock().unwrap();
+                g.tracks()
+            };
+            state.player.lock().unwrap().set_tracks(tracks);
+            // 仅当确有未完成的 SACD 占位（如首次扫描中途被中断、ISO 尚未拆轨）
+            // 才补跑一次解析；曲库未变且已解析完时完全跳过，**避免每次启动都无谓地
+            // 触发 SACD 解析线程 —— 这是「曲库没变就不浪费系统资源」的关键一环。
+            let has_pending_sacd = {
+                let g = state.library.lock().unwrap();
+                g.pending_tracks().iter().any(|t| t.iso_placeholder)
+            };
+            if has_pending_sacd {
+                spawn_sacd_resolve(app);
+            }
+            return Ok(());
+        }
+    }
+
+    // 一次性全量解析：目录遍历 + 逐文件元数据/时长(lofty/ffprobe) + CUE 精确拆分，
+    // 一次完成、时长全部正确。整段在 `library_scan` 的 spawn_blocking 里跑（不阻塞
+    // 主线程 / UI），进度经 `library://scan-progress` 上报；封面与 SACD 拆轨留按需。
     state.scan_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    // force = 真正的全量重解析（传标志，基线仍保留）：逐文件 mtime 跳过全部失效，
+    // 否则 lab 开关切换后的强扫不会重新解析未变更文件，增强解析与入队都不生效。
+    // 基线保留 → 删除检测照常；ISO 的 unchanged 仍按 mtime 判定 → 不触发重复拆轨。
     let snapshot = state.library.lock().unwrap().scan_snapshot();
-    let result = scan_directory_fast(&roots, &snapshot, &app);
+    let result = scan_directory(&roots, &snapshot, app, force);
     let changed = result.changed_count;
 
     let mut library = state.library.lock().unwrap();
@@ -90,6 +164,8 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
 
     // 本次扫描成功提交 → 记为「好状态」快照（崩溃回退的还原点，内部 5 分钟节流）
     library.commit_good_snapshot();
+    // 记录根目录指纹，供下次扫描判断「是否未变更可跳过」
+    let _ = library.save_scan_roots(&cur_roots);
 
     // 刷新播放器曲目缓存（占位轨道同样进入缓存，列表立即可渲染）
     let tracks = library.tracks();
@@ -101,14 +177,117 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
         cover_cache().lock().unwrap().clear();
     }
 
-    // 后台补解析：对全部占位轨道异步解析，**本地 / 网络分流**——
-    //  本地深度解析（元数据 + CUE 分轨 + SACD 虚拟分轨），网络仅读文件头；
-    //  解析结果按批写库并经 `library://tracks-resolved` 增量推给前端，
-    //  进度经 `library://scan-progress`（stage=backfilling）上报。
-    // 全程异步、不阻塞 UI，可被 cancelScan 中止。
-    spawn_lazy_backfill(&app, state.scan_cancel.clone());
+    // 实验室·元数据增强：扫描期入队的本地拆分候选 → 后台批量在线校验并回写
+    verify::drain_and_spawn(app);
 
+    // 不再常驻后台补解析普通曲目（那会把界面卡成「未响应」）。但 SACD ISO 拆轨
+    // 很慢（sacd_extract 逐轨），放扫描里会拖住加载，故扫描后用一个**只处理 SACD**
+    // 的后台线程按需拆：ISO 通常很少，逐个解析、让出 CPU、只短暂持库锁，
+    // 不阻塞主加载与界面；结果经 library://tracks-resolved 增量更新前端。
+    spawn_sacd_resolve(app);
     Ok(())
+}
+
+/// 扫描后按需拆解 SACD ISO 占位（虚拟分轨）并**预导出每轨 DSF 到缓存**。
+///
+/// 仅处理 `iso_placeholder` 条目（数量少），解析慢但逐个来、每轮让出 CPU，写库只短暂持锁，
+/// 不阻塞主加载与界面；结果经 `library://tracks-resolved` 增量更新前端。拆轨后的 ISO 不再是
+/// 占位，下次扫描自动跳过，幂等。
+///
+/// 健壮性：单碟坏数据（坏 ISO / 解析 panic）用 `catch_unwind` 隔离，不会把整条后台线程带崩
+/// （否则排在后面的 ISO 全部漏解析）；单轨导出失败只记日志，不影响其余轨与整体拆轨。
+/// 进度经 `library://scan-progress`（stage = `backfilling`）上报，前端据此显示「后台解析 x/y」。
+pub(crate) fn spawn_sacd_resolve(app: &AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        let isos: Vec<Track> = {
+            let library = state.library.lock().unwrap();
+            library
+                .pending_tracks()
+                .into_iter()
+                .filter(|t| t.iso_placeholder)
+                .collect()
+        };
+        let total = isos.len() as u32;
+        let mut done = 0u32;
+        for iso in &isos {
+            // 单碟坏数据不能带崩整条后台线程：panic 隔离 + 记日志，后续 ISO 仍照常拆轨
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                resolve_sacd_iso(iso)
+            }));
+            match outcome {
+                Ok(Some(o)) => {
+                    if !o.upserts.is_empty() || !o.removed.is_empty() {
+                        flush_resolved(
+                            state.inner(),
+                            &handle,
+                            o.upserts.clone(),
+                            o.upserts,
+                            o.removed,
+                            o.remap,
+                        );
+                    }
+                }
+                Ok(None) => {
+                    eprintln!(
+                        "[library] SACD 拆轨无结果（可能非 SACD 镜像）：{}",
+                        iso.file_path
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[library] SACD 拆轨线程 panic（{}）：{:?}",
+                        iso.file_path, e
+                    );
+                }
+            }
+            done += 1;
+            // 上报进度：复用 backfilling 阶段，前端据此显示「后台解析 x/y」（含 SACD 拆轨）
+            emit_backfill_progress(&handle, done, total, Some(iso.file_path.clone()));
+            // 让出：ISO 拆轨慢，避免长时间占用 CPU / IO
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        // 收尾：SACD 拆轨完成回到 Done（仅在有 SACD 时才发，避免无谓事件）
+        if total > 0 {
+            emit_scan_stage(&handle, ScanStage::Done, done, total, None);
+        }
+    });
+}
+
+/// 拆一个 SACD ISO 占位为虚拟分轨，并在扫描期**预导出每轨 DSF 到缓存**，
+/// 使后续播放无需再花长时间拆轨 / 解码。返回待写库的解析产物；解析失败返回 `None`。
+///
+/// 与 `resolve_placeholder` 的 SACD 分支等价（建虚拟轨 + 占位→分轨重映射），额外在写库前
+/// 预导出每轨 DSF：播放链路 `spawn_sacd_decoder` 看到缓存命中即跳过导出，起播更快。
+fn resolve_sacd_iso(iso: &Track) -> Option<ResolveOutcome> {
+    let path = Path::new(&iso.file_path);
+    let mut disc = SacdDisc::open(path)?;
+    disc.probe_durations();
+    let tracks = disc.to_tracks();
+    if tracks.is_empty() {
+        return None;
+    }
+    // 预导出每轨 DSF（即使个别轨失败也不影响其余轨与整体拆轨）
+    for t in &tracks {
+        let idx = t.sacd_track_index as usize;
+        if let Err(e) = pre_export_sacd_dsf(path, &disc, idx) {
+            eprintln!(
+                "[library] SACD 预导出失败（{} 轨 {}）：{}",
+                iso.file_path, idx, e
+            );
+        }
+    }
+    let mut remap = HashMap::new();
+    remap.insert(iso.id.clone(), tracks.iter().map(|t| t.id.clone()).collect());
+    Some(ResolveOutcome {
+        upserts: tracks,
+        removed: vec![iso.id.clone()],
+        existing: Vec::new(),
+        remap,
+    })
 }
 
 /// 两阶段懒加载 - 阶段二「后台补解析」（异步线程，不阻塞 UI）。
@@ -128,6 +307,7 @@ pub fn library_scan(state: State<'_, AppState>, app: AppHandle) -> AppResult<()>
 /// 单趟处理全部待解析条目（本地在前、网络在后）；解析失败的文件保留占位，
 /// 下次扫描 / 播放时再试。`cancel` 由 `library_cancel_scan` 置位，用户主动
 /// 取消时立即中止，已写入的批次保留，剩余条目留待下次扫描 / 启动继续。
+#[allow(dead_code)]
 pub(crate) fn spawn_lazy_backfill(
     app: &AppHandle,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -152,24 +332,18 @@ pub(crate) fn spawn_lazy_backfill(
 
         let total = (local.len() + remote.len()) as u32;
         let mut processed = 0u32;
-        let (known_cue_tracks, local_roots) = {
+        // 库内已入库的 CUE 分轨（增量局部发现时用于清理失效分轨）
+        let known_cue_tracks = {
             let library = app_state.library.lock().unwrap();
-            let known = library.cue_tracks();
-            let config = app_state.config.lock().unwrap();
-            let roots: Vec<PathBuf> = config
-                .library_dirs
-                .iter()
-                .map(PathBuf::from)
-                .filter(|r| !is_network_path(r.to_string_lossy().as_ref()))
-                .collect();
-            (known, roots)
+            library.cue_tracks()
         };
-        let mut ctx = ResolveContext::new(known_cue_tracks, &local_roots);
+        let mut ctx = ResolveContext::new(known_cue_tracks, true);
 
         for (batch, depth) in [(local, ResolveDepth::Deep), (remote, ResolveDepth::Shallow)] {
             let mut upserts: Vec<Track> = Vec::new();
             let mut resolved: Vec<Track> = Vec::new();
             let mut removed: Vec<String> = Vec::new();
+            let mut remaps: HashMap<String, Vec<String>> = HashMap::new();
             for placeholder in batch {
                 if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
@@ -194,6 +368,9 @@ pub(crate) fn spawn_lazy_backfill(
                     resolved.extend(outcome.upserts.iter().cloned());
                 }
                 removed.extend(outcome.removed.iter().cloned());
+                for (k, v) in outcome.remap {
+                    remaps.insert(k, v);
+                }
                 processed += 1;
 
                 // 进度：每 8 条上报一次（避免事件洪泛）
@@ -213,10 +390,23 @@ pub(crate) fn spawn_lazy_backfill(
                         std::mem::take(&mut upserts),
                         std::mem::take(&mut resolved),
                         std::mem::take(&mut removed),
+                        std::mem::take(&mut remaps),
                     );
+                    // 让出 CPU / IO：后台解析是低优先级任务，主动歇一下，
+                    // 避免把机器跑满、影响正在进行的音频解码与 UI 交互。
+                    std::thread::sleep(std::time::Duration::from_millis(12));
                 }
+                // 每条之间也让出时间片，进一步降低与播放线程的争抢
+                std::thread::yield_now();
             }
-            flush_resolved(app_state.inner(), &handle, upserts, resolved, removed);
+            flush_resolved(
+                app_state.inner(),
+                &handle,
+                upserts,
+                resolved,
+                removed,
+                remaps,
+            );
         }
 
         // 收尾：进度回到 done（前端把「后台解析」指示器收起）
@@ -241,6 +431,9 @@ struct ResolveOutcome {
     removed: Vec<String>,
     /// 分轨此前已入库（无需重复写入）；播放路径直接复用这一份
     existing: Vec<Track>,
+    /// 重映射：被替换的占位 id → 新分轨 id（CUE / SACD 场景）。
+    /// 用于同步播放队列，使后台解析不打断正在进行的播放。
+    remap: HashMap<String, Vec<String>>,
 }
 
 impl ResolveOutcome {
@@ -249,29 +442,39 @@ impl ResolveOutcome {
             upserts: Vec::new(),
             removed: Vec::new(),
             existing: Vec::new(),
+            remap: HashMap::new(),
         }
     }
 }
 
-/// 解析上下文：跨条目复用的**全局** CUE 索引 + 库内已入库分轨索引。
+/// 解析上下文：持有「整碟键 → CUE 分轨」索引与「库内已入库分轨」索引，
+/// 供 `resolve_placeholder` 判定一个占位轨道应被拆成哪些 CUE 分轨。
+///
+/// 索引采用**增量局部发现**：`ensure_cue_for(audio_path)` 只扫该音频文件所在目录
+/// 及有限层父目录（已扫目录缓存，整库每个目录至多扫一次），**绝不递归整棵曲库树**。
+/// 因此：
+/// - 点播时按需解析只扫相关几个目录，瞬时返回，不再阻塞 UI / 播放控制线程；
+/// - 后台补解析线程复用同一逻辑，覆盖度与旧版一致（镜像与 CUE 不必同级，
+///   只要 CUE 位于音频文件的祖先目录内即可），同时把 CUE 发现的 IO 成本摊到
+///   各占位解析上，而非启动时一次性全树扫描。
 struct ResolveContext {
-    /// 整碟键 → 本次扫描一次性解析出的 CUE 分轨（来自库内全部 .cue 文件）。
-    ///
-    /// 关键：复刻旧版 `scan_directory` 的覆盖度——CUE 与镜像**不必同级**，
-    /// 只要 CUE 引用的音频文件就是库内某个镜像即可（按整碟键匹配）。
+    /// 整碟键 → CUE 分轨（按需增量填充）
     cue_by_disc: HashMap<(String, String), Vec<Track>>,
     /// 库内已入库的 CUE 分轨（按整碟键索引），用于清理「CUE 已删 / 改名」后
     /// 残留的失效分轨（避免列表里留下重复条目）。
     known_discs: HashMap<(String, String), Vec<Track>>,
+    /// 已扫描过 CUE 的目录（非递归列举 + 解析），避免重复扫描
+    scanned_dirs: HashSet<PathBuf>,
+    /// 廉价模式：后台线程只做「CUE 文本分轨检测」，**不探测音频 / 不读封面 /
+    /// 不解析 SACD**——这些昂贵工作全部改为按需（滚动 / 播放时才做）。
+    /// 点播路径 `resolve_one` 用全量模式（probe 精确时长）。
+    cheap: bool,
 }
 
 impl ResolveContext {
-    /// 以「库内已入库的 CUE 分轨」+「本地曲库根目录」构建上下文。
-    ///
-    /// 一次性递归发现并解析本地曲库内**全部** .cue 文件（网络共享不解析 CUE
-    /// 分轨），建立整碟键 → 分轨索引。这与旧版 `scan_directory` 行为一致，
-    /// 因此镜像与 CUE 不同级、或整碟镜像文件名与 CUE 引用不一致时也能正确拆轨。
-    fn new(known_cue_tracks: Vec<Track>, local_roots: &[PathBuf]) -> Self {
+    /// 以「库内已入库的 CUE 分轨」构建上下文（不扫描文件系统）。
+    /// `cheap=true` 为后台廉价检测模式（只见 CUE 文本，不碰音频）。
+    fn new(known_cue_tracks: Vec<Track>, cheap: bool) -> Self {
         // 库内已入库分轨：按整碟键索引（清理失效分轨用）
         let mut known_discs: HashMap<(String, String), Vec<Track>> = HashMap::new();
         for t in known_cue_tracks {
@@ -279,22 +482,44 @@ impl ResolveContext {
                 known_discs.entry(key).or_default().push(t);
             }
         }
+        Self {
+            cue_by_disc: HashMap::new(),
+            known_discs,
+            scanned_dirs: HashSet::new(),
+            cheap,
+        }
+    }
 
-        // 全局一次性发现并解析所有 CUE（镜像与 CUE 不必同级）
-        let mut cue_by_disc: HashMap<(String, String), Vec<Track>> = HashMap::new();
-        for root in local_roots {
-            for cue in discover_cue_files(root) {
-                for track in parse_cue(&cue) {
-                    if let Some(key) = disc_key(&track.file_path) {
-                        cue_by_disc.entry(key).or_default().push(track);
+    /// 确保 `audio_path` 所在目录及**全部祖先目录**内的 `.cue` 已解析并入索引。
+    ///
+    /// 只在尚未扫描过的目录上做「非递归列举 .cue + 解析」，整库每个目录至多扫一次。
+    /// 沿音频文件的祖先链向上扫到根（不递归整棵子树），因此：
+    /// - 覆盖度与旧版全树扫描一致——CUE 位于镜像任意上级目录都能命中
+    ///   （如 `Album.cue` 在根、`FILE "sub/CDImage.flac"`）；
+    /// - 开销极小：每个相关目录只扫一次；廉价模式只读 .cue 文本、不探测音频。
+    fn ensure_cue_for(&mut self, audio_path: &str) {
+        let mut dir = Path::new(audio_path).parent().map(|p| p.to_path_buf());
+        while let Some(d) = dir {
+            if !self.scanned_dirs.contains(&d) {
+                self.scanned_dirs.insert(d.clone());
+                for cue in list_cue_files(&d) {
+                    let parsed = if self.cheap {
+                        parse_cue_light(&cue)
+                    } else {
+                        parse_cue(&cue)
+                    };
+                    for track in parsed {
+                        if let Some(key) = disc_key(&track.file_path) {
+                            self.cue_by_disc.entry(key).or_default().push(track);
+                        }
                     }
                 }
             }
-        }
-
-        Self {
-            cue_by_disc,
-            known_discs,
+            // 向上一层；根目录的 parent 指向自身，需判等防死循环
+            match d.parent() {
+                Some(p) if p != d => dir = Some(p.to_path_buf()),
+                _ => break,
+            }
         }
     }
 }
@@ -315,8 +540,9 @@ fn resolve_placeholder(
 
     // SACD ISO 占位：拆虚拟分轨要读整张镜像——本地深度解析，
     // 网络共享留待播放时按需解析（否则一次就把共享带宽打满）。
+    // 廉价（后台检测）模式：跳过，留待播放时按需解析。
     if placeholder.iso_placeholder {
-        if depth == ResolveDepth::Shallow {
+        if depth == ResolveDepth::Shallow || ctx.cheap {
             return ResolveOutcome::empty();
         }
         let Some(mut disc) = SacdDisc::open(path) else {
@@ -327,10 +553,16 @@ fn resolve_placeholder(
         if tracks.is_empty() {
             return ResolveOutcome::empty();
         }
+        let mut remap = HashMap::new();
+        remap.insert(
+            placeholder.id.clone(),
+            tracks.iter().map(|t| t.id.clone()).collect(),
+        );
         return ResolveOutcome {
             upserts: tracks,
             removed: vec![placeholder.id.clone()],
             existing: Vec::new(),
+            remap,
         };
     }
 
@@ -341,6 +573,11 @@ fn resolve_placeholder(
     // 匹配基于「整碟键」（目录 + 基名），与镜像 / CUE 是否同级无关——只要 CUE
     // 引用的音频文件就是库内这个镜像即可（复刻旧版 scan_directory 的覆盖度）。
     if depth == ResolveDepth::Deep {
+        // 增量局部发现：只扫本曲目所在目录及有限层父目录的 .cue（已扫目录缓存），
+        // 不递归整棵曲库树——点播路径只扫相关几个目录、瞬时返回，不阻塞 UI；
+        // 后台补解析线程复用同一逻辑，把 CUE 发现的 IO 成本摊到各占位解析上。
+        // 网络共享走 Shallow 分支，不在此触发任何 CUE 发现（避免打满带宽）。
+        ctx.ensure_cue_for(&placeholder.file_path);
         if let Some(key) = disc_key(&placeholder.file_path) {
             // 情况一：某个 CUE 引用了该镜像 → 用分轨取代整碟占位
             if let Some(matching) = ctx.cue_by_disc.get(&key) {
@@ -359,10 +596,16 @@ fn resolve_placeholder(
                     .filter(|id| !matching_ids.contains(id))
                     .collect();
                 removed.push(placeholder.id.clone());
+                let mut remap = HashMap::new();
+                remap.insert(
+                    placeholder.id.clone(),
+                    matching.iter().map(|t| t.id.clone()).collect(),
+                );
                 return ResolveOutcome {
                     upserts: matching,
                     removed,
                     existing: Vec::new(),
+                    remap,
                 };
             }
             // 情况二：该整碟已不被任何 CUE 引用（cue 被删 / 改名）→ 退回普通单曲，
@@ -377,6 +620,7 @@ fn resolve_placeholder(
                         upserts: Vec::new(),
                         removed,
                         existing: Vec::new(),
+                        remap: HashMap::new(),
                     };
                 };
                 full.id = placeholder.id.clone();
@@ -385,6 +629,7 @@ fn resolve_placeholder(
                     upserts: vec![full],
                     removed,
                     existing: Vec::new(),
+                    remap: HashMap::new(),
                 };
             }
         }
@@ -393,6 +638,12 @@ fn resolve_placeholder(
     // 普通单曲：同 id 覆盖占位。
     // 注意**不能**同时把该 id 放进 removed——`apply_scan` 先 upsert 后 remove，
     // 同 id 会把自己删掉（历史 bug：解析完成的曲目在库里凭空消失）。
+    //
+    // 廉价（后台检测）模式：跳过音频标签解析——普通曲目元数据改为按需
+    // （滚动可见 / 播放时才解析），避免后台把整库音频读一遍拖垮性能。
+    if ctx.cheap {
+        return ResolveOutcome::empty();
+    }
     let Some(mut full) = parse_track(path) else {
         // 解析失败：保留占位，交由播放时按需解析
         return ResolveOutcome::empty();
@@ -402,16 +653,19 @@ fn resolve_placeholder(
         upserts: vec![full],
         removed: Vec::new(),
         existing: Vec::new(),
+        remap: HashMap::new(),
     }
 }
 
 /// 提交一批解析结果到曲库，并推送前端增量事件。
+#[allow(dead_code)]
 fn flush_resolved(
     app_state: &AppState,
     handle: &AppHandle,
     upserts: Vec<Track>,
     resolved: Vec<Track>,
     removed: Vec<String>,
+    remaps: HashMap<String, Vec<String>>,
 ) {
     if upserts.is_empty() && removed.is_empty() {
         return;
@@ -431,10 +685,14 @@ fn flush_resolved(
         if let Err(e) = library.apply_scan(&upserts, &removed) {
             eprintln!("[library] 后台补解析写库失败: {e}");
         }
-        let all = library.tracks();
+        // 注意：不在此调用 library.tracks()。全库去重 SQL 在大曲库下开销可观，
+        // 每批（约 32 条）都跑一遍会在持锁期间长时间拖住主线程，造成「未响应」。
+        // 改为增量维护播放器缓存（只增删本批变更），library 锁在此尽快释放。
         drop(library);
-        // 播放列表缓存同步（整碟占位被分轨取代后必须刷新，否则播放列表仍是占位）
-        app_state.player.lock().unwrap().set_tracks(all);
+        // 播放列表缓存增量同步；并平滑迁移被替换占位的队列引用，不打断播放
+        let mut player = app_state.player.lock().unwrap();
+        player.apply_track_changes(&upserts, &removed);
+        player.remap_context(&remaps);
     }
     if !resolved.is_empty() || !removed.is_empty() {
         let _ = handle.emit(
@@ -445,6 +703,7 @@ fn flush_resolved(
 }
 
 /// 后台补解析进度上报（stage = backfilling）。
+#[allow(dead_code)]
 fn emit_backfill_progress(
     app: &AppHandle,
     processed: u32,
@@ -461,6 +720,7 @@ fn emit_backfill_progress(
 }
 
 /// 扫描 / 补解析进度事件上报。
+#[allow(dead_code)]
 fn emit_scan_stage(
     app: &AppHandle,
     stage: ScanStage,
@@ -487,6 +747,7 @@ fn emit_scan_stage(
 ///   返回 `DRIVE_REMOTE` 判定，否则「把共享映射成盘符」的用户会被当成本地盘，
 ///   后台补解析会逐文件走网络 IO，重新引入卡顿；
 /// - Linux：`/mnt/`、`/run/media/` 等非常驻挂载前缀。
+#[allow(dead_code)]
 fn is_network_path(path: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -502,6 +763,7 @@ fn is_network_path(path: &str) -> bool {
 }
 
 /// Windows：路径带盘符且该盘是「网络驱动器」时为 true。
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn is_windows_remote_drive(path: &str) -> bool {
     use windows::core::PCWSTR;
@@ -524,6 +786,7 @@ fn is_windows_remote_drive(path: &str) -> bool {
 /// 播放某曲目（或显式点击 SACD/CUE 条目）前调用：把占位轨道解析为完整轨道
 /// （含元数据 / 封面 / CUE 分轨 / SACD 分轨），解析结果写入曲库并通过
 /// `library://tracks-resolved` 事件推送前端增量更新。
+/// 已解析曲目若文本元数据仍为未知占位，也会在此按同一套规则重读文件头补全。
 ///
 /// 与后台补解析（`spawn_lazy_backfill`）共用同一套解析逻辑
 /// （`resolve_placeholder`），区别只有两点：
@@ -544,8 +807,9 @@ pub async fn library_resolve_track(
         .get_track(&track_id)
         .ok_or_else(|| AppError::Library(format!("曲目不存在: {}", track_id)))?;
 
-    // 已完成解析：直接返回（含占位解析失败等场景的幂等路径）
-    if !initial.metadata_pending {
+    // 已完成解析：直接返回（含占位解析失败等场景的幂等路径）。
+    // 例外：文本元数据仍未知时，后台重读文件头补全（媒体播放 / 预加载入口）。
+    if !initial.metadata_pending && !scan::needs_metadata_refresh(&initial) {
         return Ok(vec![initial]);
     }
 
@@ -575,26 +839,87 @@ pub async fn library_resolve_track(
     Ok(resolved)
 }
 
-/// 解析单个占位轨道并写库（播放时按需解析路径）。
+/// 按需批量解析（滚动可见项 / 预播放加载调用）：补**普通占位**的音频标签 / 时长；
+/// 已解析但文本元数据仍未知的曲目也会重读文件头（标签 → 附属文件 → 文件名拆分）。
+/// **不拆 CUE、不碰 SACD / ISO**——那些由后台廉价检测或播放时按需处理，
+/// 避免滚动时触发重活。网络文件同样只读所需标签。结果写库 + 增量推前端。
+#[tauri::command]
+pub async fn library_resolve_tracks(app: AppHandle, ids: Vec<String>) -> AppResult<Vec<Track>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut upserts: Vec<Track> = Vec::new();
+        for id in &ids {
+            let Some(track) = state.library.lock().unwrap().get_track(id) else {
+                continue;
+            };
+            // 已解析曲目：仅当文本元数据仍为未知占位时重读文件头（预加载 / 滚动可见）；
+            // CUE 分轨（已有标题）/ ISO·SACD 占位另按需处理
+            if !track.metadata_pending {
+                if let Some(refreshed) = scan::refresh_metadata_from_header(&track) {
+                    upserts.push(refreshed);
+                }
+                continue;
+            }
+            if track.is_cue || track.iso_placeholder {
+                continue;
+            }
+            if let Some(mut full) = parse_track(Path::new(&track.file_path)) {
+                full.id = track.id.clone();
+                upserts.push(full);
+            }
+        }
+        if upserts.is_empty() {
+            return Ok(Vec::new());
+        }
+        {
+            let Ok(mut library) = state.library.lock() else {
+                return Ok(upserts);
+            };
+            let _ = library.apply_scan(&upserts, &[]);
+            drop(library);
+            state.player.lock().unwrap().apply_track_changes(&upserts, &[]);
+        }
+        // 不在此发事件：结果由调用方（前端 store.resolveTracks）直接增量合并，
+        // 避免与合帧监听重复应用。播放路径的 resolve_one 仍走事件（前端未直接合并）。
+        // 实验室·元数据增强：懒解析期入队的拆分候选 → 后台在线校验
+        verify::drain_and_spawn(&app);
+        Ok(upserts)
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("批量解析任务执行失败: {e}")))?
+}
 ///
 /// 返回可播放的曲目列表：解析失败时返回原占位（前端提示暂不可解析）。
 fn resolve_one(app_state: &AppState, id: &str) -> Vec<Track> {
-    let (placeholder, known_cue_tracks, local_roots) = {
+    let (placeholder, known_cue_tracks) = {
         let library = app_state.library.lock().unwrap();
-        let known = library.cue_tracks();
-        let config = app_state.config.lock().unwrap();
-        let roots: Vec<PathBuf> = config
-            .library_dirs
-            .iter()
-            .map(PathBuf::from)
-            .filter(|r| !is_network_path(r.to_string_lossy().as_ref()))
-            .collect();
-        (library.get_track(id), known, roots)
+        (library.get_track(id), library.cue_tracks())
     };
     let Some(placeholder) = placeholder else {
         return Vec::new();
     };
-    let mut ctx = ResolveContext::new(known_cue_tracks, &local_roots);
+    // 媒体播放 / 预播放加载：已解析曲目若文本元数据仍为未知占位，按与扫描相同的
+    // 规则重读一次文件头（标签 → 附属文件 → 文件名拆分），有变化才写库并推事件。
+    if !placeholder.metadata_pending {
+        let Some(refreshed) = scan::refresh_metadata_from_header(&placeholder) else {
+            return vec![placeholder];
+        };
+        {
+            let Ok(mut library) = app_state.library.lock() else {
+                return vec![refreshed];
+            };
+            let _ = library.apply_scan(std::slice::from_ref(&refreshed), &[]);
+            drop(library);
+            app_state
+                .player
+                .lock()
+                .unwrap()
+                .apply_track_changes(std::slice::from_ref(&refreshed), &[]);
+        }
+        return vec![refreshed];
+    }
+    // 增量局部发现：只扫本曲目附近目录的 CUE，点播路径不阻塞、瞬时返回
+    let mut ctx = ResolveContext::new(known_cue_tracks, false);
     let outcome = resolve_placeholder(&placeholder, ResolveDepth::Deep, &mut ctx);
     if outcome.upserts.is_empty() && outcome.existing.is_empty() {
         // 解析失败：保留占位，交由前端提示
@@ -611,9 +936,12 @@ fn resolve_one(app_state: &AppState, id: &str) -> Vec<Track> {
             return tracks;
         };
         let _ = library.apply_scan(&outcome.upserts, &outcome.removed);
-        let all = library.tracks();
         drop(library);
-        app_state.player.lock().unwrap().set_tracks(all);
+        // 增量更新播放器曲目缓存（避免每次点播都全库去重 + 整表克隆，大库下会拖慢点播）；
+        // 若占位被 CUE/SACD 分轨取代，平滑迁移播放队列引用，不打断播放。
+        let mut player = app_state.player.lock().unwrap();
+        player.apply_track_changes(&outcome.upserts, &outcome.removed);
+        player.remap_context(&outcome.remap);
     }
     tracks
 }
@@ -629,8 +957,14 @@ pub fn library_cancel_scan(state: State<'_, AppState>) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn library_tracks(state: State<'_, AppState>) -> AppResult<Vec<Track>> {
-    Ok(state.library.lock().unwrap().tracks())
+pub async fn library_tracks(app: AppHandle) -> AppResult<Vec<Track>> {
+    // 重查询放到阻塞线程池，避免加载期间阻塞主线程 / 事件循环导致界面卡住
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().tracks())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询曲目失败: {e}")))?
 }
 
 // ---- 封面（内嵌 → 同名边车 → 在线 → 前端默认图） ------------------------
@@ -883,30 +1217,55 @@ pub async fn library_artist_cover(
 }
 
 #[tauri::command]
-pub fn library_albums(state: State<'_, AppState>) -> AppResult<Vec<Album>> {
-    Ok(state.library.lock().unwrap().albums())
+pub async fn library_albums(app: AppHandle) -> AppResult<Vec<Album>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().albums())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询专辑失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn library_artists(state: State<'_, AppState>) -> AppResult<Vec<Artist>> {
-    Ok(state.library.lock().unwrap().artists())
+pub async fn library_artists(app: AppHandle) -> AppResult<Vec<Artist>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().artists())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询艺术家失败: {e}")))?
 }
 
 #[tauri::command]
-pub fn library_stats(state: State<'_, AppState>) -> AppResult<LibraryStats> {
-    Ok(state.library.lock().unwrap().stats())
+pub async fn library_stats(app: AppHandle) -> AppResult<LibraryStats> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().stats())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询统计失败: {e}")))?
 }
 
 /// CUE 分轨专辑（M2 返回空）
 #[tauri::command]
-pub fn library_cue_albums(state: State<'_, AppState>) -> AppResult<Vec<Album>> {
-    Ok(state.library.lock().unwrap().cue_albums())
+pub async fn library_cue_albums(app: AppHandle) -> AppResult<Vec<Album>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().cue_albums())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询 CUE 专辑失败: {e}")))?
 }
 
 /// SACD ISO 分轨专辑（整张 ISO 拆出的虚拟多轨专辑）
 #[tauri::command]
-pub fn library_sacd_albums(state: State<'_, AppState>) -> AppResult<Vec<Album>> {
-    Ok(state.library.lock().unwrap().sacd_albums())
+pub async fn library_sacd_albums(app: AppHandle) -> AppResult<Vec<Album>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>().inner();
+        Ok(state.library.lock().unwrap().sacd_albums())
+    })
+    .await
+    .map_err(|e| AppError::Library(format!("查询 SACD 专辑失败: {e}")))?
 }
 
 #[tauri::command]
@@ -1047,6 +1406,7 @@ pub fn library_remove_track_from_playlist(
 /// 返回成功入库的曲目 ID 列表；无可识别音频时返回空列表。
 #[tauri::command]
 pub fn library_import_files(
+    app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
 ) -> AppResult<Vec<String>> {
@@ -1066,7 +1426,34 @@ pub fn library_import_files(
     // 新导入曲目可能带来新封面，失效内存封面缓存（磁盘缓存保留）
     cover_cache().lock().unwrap().clear();
 
+    // 实验室·元数据增强：导入期入队的拆分候选 → 后台在线校验
+    verify::drain_and_spawn(&app);
+
     Ok(upserts.into_iter().map(|t| t.id).collect())
+}
+
+/// 元数据增强·批量在线校验状态（实验室页展示后台任务是否在跑）
+#[tauri::command]
+pub fn library_meta_verify_status() -> AppResult<serde_json::Value> {
+    Ok(serde_json::json!({ "running": verify::is_running() }))
+}
+
+/// 元数据增强·单曲重试：只重新识别 `track_id` 指定的这一首曲目
+/// （重新解析文件名 + 联网查找），不影响其他曲目；结果追加进重试日志。
+#[tauri::command]
+pub async fn library_meta_verify_retry_track(
+    app: AppHandle,
+    track_id: String,
+) -> AppResult<verify::RetryRecord> {
+    verify::retry_track(&app, &track_id)
+        .await
+        .map_err(AppError::Library)
+}
+
+/// 元数据增强·重试操作日志（完整历史，前端据此展示「已重试」标记与排查）
+#[tauri::command]
+pub fn library_meta_verify_log(app: AppHandle) -> AppResult<Vec<verify::RetryRecord>> {
+    Ok(verify::retry_log(&app))
 }
 
 // ---------------- 曲目详情（track_info） ----------------
@@ -1146,9 +1533,14 @@ fn read_embedded_lyrics(path: &std::path::Path) -> Option<String> {
     None
 }
 
-/// 读取曲目元数据：先读曲库缓存（快），再用 lofty + ffprobe 补齐 bit_depth/channels 等技术字段
-fn enrich_track(track: &Track) -> TrackInfo {
+/// 读取曲目元数据：先读曲库缓存（快），再用 lofty + ffprobe 补齐 bit_depth/channels 等技术字段。
+/// 若文本元数据仍为未知占位，会重读文件头补全，并把补全后的曲目一并返回（供调用方写库）。
+fn enrich_track(track: &Track) -> (TrackInfo, Option<Track>) {
     use lofty::file::AudioFile;
+    // 媒体信息提取：库内文本仍为未知占位时，按与扫描相同的规则重读文件头
+    // （标签 → 附属文件 → 文件名拆分），保证信息面板与播放侧展示一致。
+    let refreshed = scan::refresh_metadata_from_header(track);
+    let text = refreshed.as_ref().unwrap_or(track);
     // Linux：还原非 UTF-8 文件名的容错编码路径（NTFS 场景；合法路径零成本直连）
     #[cfg(target_os = "linux")]
     let pb = crate::library::scan_linux::resolve_path_str(&track.file_path);
@@ -1158,7 +1550,7 @@ fn enrich_track(track: &Track) -> TrackInfo {
     let path = std::path::Path::new(&track.file_path);
     let mut bit_depth = None;
     let mut channels = None;
-    let mut duration = track.duration;
+    let mut duration = text.duration;
 
     // 尝试 lofty 解析完整属性（bit_depth/channels 在 Track 模型中未持久化，每次实时解析）
     if let Ok(file) = lofty::read_from_path(path) {
@@ -1175,16 +1567,16 @@ fn enrich_track(track: &Track) -> TrackInfo {
     // 内嵌歌词
     let embedded_lyrics = read_embedded_lyrics(path);
 
-    TrackInfo {
-        title: track.title.clone(),
-        artists: track.artists.clone(),
-        album: track.album.clone(),
-        track_number: track.track_number,
-        year: track.year,
+    let info = TrackInfo {
+        title: text.title.clone(),
+        artists: text.artists.clone(),
+        album: text.album.clone(),
+        track_number: text.track_number,
+        year: text.year,
         duration,
-        format: track.format.clone(),
-        bitrate: track.bitrate,
-        sample_rate: track.sample_rate,
+        format: text.format.clone(),
+        bitrate: text.bitrate,
+        sample_rate: text.sample_rate,
         bit_depth,
         channels,
         file_path: track.file_path.clone(),
@@ -1193,9 +1585,10 @@ fn enrich_track(track: &Track) -> TrackInfo {
         added_at: track.added_at,
         cover: None, // 单独通过 library_cover 异步解析（含内存/磁盘两级缓存 + 在线回退）
         embedded_lyrics,
-        replaygain_db: track.replaygain_db,
-        replaygain_peak: track.replaygain_peak,
-    }
+        replaygain_db: text.replaygain_db,
+        replaygain_peak: text.replaygain_peak,
+    };
+    (info, refreshed)
 }
 
 /// 返回指定曲目的完整元数据（含技术参数、内嵌歌词、封面 data URL）。
@@ -1211,8 +1604,27 @@ pub async fn library_track_info(
         None => return Ok(None),
     };
 
-    // 2. 技术参数 + 内嵌歌词（同步解析，lofty 读取极快）
-    let mut info = enrich_track(&track);
+    // 2. 技术参数 + 内嵌歌词（同步解析，lofty 读取极快）；
+    //    文本元数据未知时会顺带重读文件头，结果写回曲库并通知前端增量更新。
+    let (mut info, refreshed) = enrich_track(&track);
+    if let Some(refreshed) = refreshed {
+        {
+            let Ok(mut library) = state.library.lock() else {
+                return Ok(Some(info));
+            };
+            let _ = library.apply_scan(std::slice::from_ref(&refreshed), &[]);
+            drop(library);
+            state
+                .player
+                .lock()
+                .unwrap()
+                .apply_track_changes(std::slice::from_ref(&refreshed), &[]);
+        }
+        let _ = state.app.emit(
+            "library://tracks-resolved",
+            serde_json::json!({ "tracks": [refreshed], "removedIds": Vec::<String>::new() }),
+        );
+    }
 
     // 3. 封面：复用 library_cover 的完整解析链（含缓存 + 在线匹配）
     if let Ok(Some(url)) = library_cover(state.clone(), track_id.clone()).await {

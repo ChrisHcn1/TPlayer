@@ -9,6 +9,7 @@
 
 pub mod compat_fs;
 pub mod converter;
+pub mod lab;
 pub mod library;
 pub mod lyrics;
 pub mod player;

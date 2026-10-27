@@ -188,6 +188,11 @@ fn flush_batch(handle: &AppHandle, state: &Arc<WatchState>, batch: &[PathBuf]) {
     let mut removed_ids: Vec<String> = Vec::new();
 
     for path in batch {
+        // 本应用刚写入过标签的音频：跳过自己的变更事件，避免「写入 → 重扫 → 再解析」
+        // 的无谓循环（标签值已是识别结果，下次常规扫描会正常读取）。
+        if crate::library::persist::is_self_write(path) {
+            continue;
+        }
         if path.is_dir() {
             // 新建目录：递归发现其中音频入库（新目录内已有文件不单独触发文件事件）
             for f in discover_audio_files(path) {
@@ -239,6 +244,8 @@ fn flush_batch(handle: &AppHandle, state: &Arc<WatchState>, batch: &[PathBuf]) {
         };
         set_status(state, &desc);
         let _ = handle.emit("watcher://event", serde_json::json!({ "desc": desc, "at": now_str() }));
+        // 实验室·元数据增强：新入库曲目的拆分候选 → 后台在线校验
+        crate::library::verify::drain_and_spawn(&handle);
     }
 }
 

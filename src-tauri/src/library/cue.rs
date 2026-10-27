@@ -35,7 +35,20 @@ const CUE_FRAME_RATE: f64 = 75.0;
 /// 解析单个 .cue 文件，返回该整盘对应的全部虚拟曲目。
 ///
 /// `cue_path` 为 .cue 文件绝对路径。返回空表示解析失败或无有效音轨。
+///
+/// 会探测镜像音频以计算**末轨**时长（其余轨时长由相邻 INDEX 之差得出，免费）。
 pub fn parse_cue(cue_path: &Path) -> Vec<Track> {
+    parse_cue_inner(cue_path, true)
+}
+
+/// 轻量版：**只读 .cue 文本**，不探测音频。用于加载期"顺路廉价检测"——
+/// 产出带标题 / 艺人 / 偏移的分轨（末轨时长为 0，留待滚动 / 播放按需补精确时长），
+/// 让 CUE 浏览在加载后立即可用，而不必在后台把整库音频探测一遍。
+pub fn parse_cue_light(cue_path: &Path) -> Vec<Track> {
+    parse_cue_inner(cue_path, false)
+}
+
+fn parse_cue_inner(cue_path: &Path, probe_audio: bool) -> Vec<Track> {
     let bytes = match std::fs::read(cue_path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
@@ -115,7 +128,10 @@ pub fn parse_cue(cue_path: &Path) -> Vec<Track> {
             let (path, _fmt) = parse_file_line(&line[5..]);
             let abs = resolve_audio_path(&path, &cue_dir);
             current_file = Some(abs.clone());
-            file_meta.entry(abs).or_insert_with(|| FileMeta::probe(cue_dir.join(&path)));
+            // 仅在全量解析时探测镜像音频（算末轨时长）；轻量模式跳过，末轨时长留 0 按需补
+            if probe_audio {
+                file_meta.entry(abs).or_insert_with(|| FileMeta::probe(cue_dir.join(&path)));
+            }
             continue;
         }
         if upper.starts_with("TRACK ") {
@@ -181,9 +197,16 @@ pub fn parse_cue(cue_path: &Path) -> Vec<Track> {
             0.0
         };
 
-        let artists = match &t.performer {
-            Some(p) if !p.trim().is_empty() => split_artists(p),
-            _ => split_artists(&album_artist),
+        let artist_src = t
+            .performer
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| album_artist.clone());
+        let artists = if crate::library::scan::ENHANCED_METADATA.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            crate::library::scan::parse_artists_enhanced(&artist_src)
+        } else {
+            split_artists(&artist_src)
         };
         // 分轨专辑仅按「专辑名」聚合（album_id 不带演唱者），避免合辑（如 6CD 群星）
         // 每轨不同歌手被拆成"每轨一专辑"；曲目自身仍保留各自演唱者供"艺术家"分类使用。

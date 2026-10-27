@@ -10,6 +10,9 @@ import App from './App.vue'
 import { router } from './router'
 import './assets/styles/theme.css'
 import './assets/styles/main.css'
+// 实验室·窗口底纹：必须在 main.css 之后导入，才能以同源后置规则覆盖 body / 表层的
+// 不透明背景（仅当 <html data-backdrop> 存在时生效，关闭时零影响）。
+import './assets/styles/lab-backdrop.css'
 // 曲目虚拟列表（RecycleScroller）基础样式
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 

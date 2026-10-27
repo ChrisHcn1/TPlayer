@@ -53,6 +53,78 @@ async fn search_song(
     Some(out)
 }
 
+/// 在线搜索命中条目（元数据增强·在线校验用：取回歌名/艺术家/专辑用于比对裁决）
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    /// 网易云歌曲 ID
+    pub id: u64,
+    /// 歌曲名
+    pub name: String,
+    /// 艺术家列表
+    pub artists: Vec<String>,
+    /// 专辑名（缺失为 None）
+    pub album: Option<String>,
+    /// 时长毫秒
+    pub duration_ms: i64,
+}
+
+/// 搜索歌曲元数据：返回命中列表（网络失败 / 接口异常返回空，由调用方降级为本地结果）
+pub async fn search_hits(title: &str, artist: &str) -> Vec<SearchHit> {
+    let keyword = if artist.trim().is_empty() || artist.trim() == "未知艺术家" {
+        title.to_string()
+    } else {
+        format!("{} {}", title.trim(), artist.trim())
+    };
+    let Some(client) = http_client() else {
+        return Vec::new();
+    };
+    let Ok(resp) = client
+        .get(SEARCH_URL)
+        .query(&[("s", keyword.as_str()), ("type", "1"), ("limit", "10")])
+        .header("Referer", "https://music.163.com")
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(json) = resp.json::<Value>().await else {
+        return Vec::new();
+    };
+    let Some(songs) = json.get("result").and_then(|r| r.get("songs")).and_then(|s| s.as_array())
+    else {
+        return Vec::new();
+    };
+    songs
+        .iter()
+        .filter_map(|song| {
+            let id = song.get("id")?.as_u64()?;
+            let name = song.get("name")?.as_str()?.to_string();
+            let artists = song
+                .get("artists")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let album = song
+                .get("album")
+                .and_then(|a| a.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from);
+            let duration_ms = song.get("duration").and_then(|d| d.as_i64()).unwrap_or(0);
+            Some(SearchHit {
+                id,
+                name,
+                artists,
+                album,
+                duration_ms,
+            })
+        })
+        .collect()
+}
+
 /// 取歌词：返回 (原文 LRC, 翻译 LRC)
 async fn fetch_lyric_text(client: &reqwest::Client, song_id: u64) -> Option<(String, String)> {
     let resp = client

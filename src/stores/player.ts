@@ -9,12 +9,13 @@
  *
  * 依赖方向：components -> stores/player -> services/player -> Rust commands。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 import { createIdleSnapshot, playerService } from '../services/player'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
+import { libraryService } from '../services/library'
 import { useLibraryStore } from './library'
 import type {
   PlayContext,
@@ -22,6 +23,7 @@ import type {
   PlaybackEvent,
   PlaybackSnapshot,
   SleepTimerState,
+  Track,
 } from '../types'
 
 /**
@@ -34,6 +36,20 @@ export type PlayRequestContext = PlayContext & { startIndex?: number }
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(1, Math.max(0, value))
+}
+
+/** 文本元数据是否仍为未知占位（play 据此在后台触发文件头重读） */
+function hasUnknownMetadata(track: Track): boolean {
+  const artistUnknown =
+    track.artists.length === 0 ||
+    track.artists.every((a) => !a.trim() || a.trim() === '未知艺术家')
+  return (
+    !track.title.trim() ||
+    track.title.trim() === '未知标题' ||
+    artistUnknown ||
+    !track.album.trim() ||
+    track.album.trim() === '未知专辑'
+  )
 }
 
 export const usePlayerStore = defineStore('player', () => {
@@ -196,17 +212,33 @@ export const usePlayerStore = defineStore('player', () => {
   /** 播放单曲；context 缺省时后端按"曲库全量"作为上下文 */
   async function play(trackId: string, context?: PlayContext): Promise<void> {
     await execute(async () => {
-      // 两阶段懒加载 - 阶段二：播放占位轨道前先按需解析元数据 / 封面 / CUE / SACD。
-      // 前端先以文件名渲染列表（占位 title 即文件名），点击播放时才触发补解析，
-      // 解析期间列表已可交互，不阻塞 UI。
+      // 两阶段懒加载 - 阶段二：占位轨道的处理。
+      // 旧做法「先解析再播放」会把点播卡在解析后面（CUE probe / SACD 提取 /
+      // 网络文件可能好几秒），用户明显觉得卡、甚至整个界面像卡死。
+      // 新做法：**先立即出声**——原生可播的占位（普通音频、CUE 整碟镜像）直接按
+      // 文件路径起播（占位已在播放器曲目缓存内，按路径解码，瞬时出声）；元数据 /
+      // CUE 分轨 / SACD 分轨解析放到**后台异步**进行，结果经 `tracks-resolved`
+      // 增量更新列表；若拆轨改变了当前曲目 id，由 `remapTrackIds` 平滑迁移到对应
+      // 分轨（同一物理文件），音频流不中断、用户无感。
+      // 唯一例外：SACD ISO 占位（.iso）引擎无法直接解码，仍需先解析出分轨再播。
       const libraryStore = useLibraryStore()
       const track = libraryStore.getTrack(trackId)
-      if (track?.metadataPending) {
+      const isIsoPlaceholder = !!track && /\.iso$/i.test(track.filePath)
+      if (track?.metadataPending && !isIsoPlaceholder) {
+        // 后台补解析（不经 store 的 applyResolvedTracks）：后端完成后统一走
+        // `tracks-resolved` 事件，由 App.vue 合帧「移除占位 + remap」原子完成，
+        // 避免"正在播放"在解析完成的瞬间短暂悬空。
+        void libraryService.resolveTrack(trackId).catch(() => {})
+      } else if (track?.metadataPending) {
+        // ISO 占位：必须先解析（整碟镜像，引擎不能直接播）
         const resolved = await libraryStore.resolveTrack(trackId)
         if (resolved.length > 0) {
-          // CUE / SACD 场景占位已替换为分轨：播放返回列表第一首（与整碟镜像同一物理文件）
           trackId = resolved[0].id
         }
+      } else if (track && hasUnknownMetadata(track)) {
+        // 媒体播放：文本字段仍为未知占位时，后台重读文件头（标签 → 附属文件 →
+        // 文件名拆分），结果经 `tracks-resolved` 增量更新，不阻塞起播。
+        void libraryService.resolveTrack(trackId).catch(() => {})
       }
       if (context) currentContext.value = context
       // 切歌时同步重置进度，避免旧曲目进度残留到新曲目 Loading 窗口期
@@ -366,6 +398,60 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  /**
+   * 后台补解析把占位曲目替换成 CUE / SACD 分轨（id 变了）时，把当前曲目与队列里的
+   * 旧 id 平滑迁移到新分轨，避免「正在播放」悬空、队列出现失效条目。
+   *
+   * 仅更新引用（显示 / 队列），**不打断正在进行的音频**——引擎按文件路径播放，
+   * 与前端 trackId 无关；音频流不会因后台解析而停顿或重启。
+   *
+   * @param remap 旧占位 id → 新分轨 id 列表（按碟内曲目顺序）
+   */
+  function remapTrackIds(remap: Record<string, string[]>): void {
+    const entries = Object.entries(remap)
+    if (entries.length === 0) return
+    const oldToNew = new Map(entries)
+
+    // 当前曲目：迁移到对应分轨的第一首（与占位同一物理文件，音频无缝延续）
+    if (snapshot.value.trackId && oldToNew.has(snapshot.value.trackId)) {
+      const repl = oldToNew.get(snapshot.value.trackId)!
+      snapshot.value = { ...snapshot.value, trackId: repl[0] }
+    }
+
+    // 队列：把旧占位 id 就地替换为整组新分轨，保持专辑连续可播
+    if (currentContext.value) {
+      let changed = false
+      const newIds: string[] = []
+      for (const id of currentContext.value.trackIds) {
+        const repl = oldToNew.get(id)
+        if (repl) {
+          changed = true
+          newIds.push(...repl)
+        } else {
+          newIds.push(id)
+        }
+      }
+      if (changed) {
+        currentContext.value = { ...currentContext.value, trackIds: newIds }
+      }
+    }
+  }
+
+  // 起播后预取下一首元数据：自动连播 / 手动切歌时即时出声，无需现场解析占位
+  // （只补普通占位标签，CUE 分轨播放时按需给精确时长）。预取接下来 3 首。
+  watch(
+    () => snapshot.value.trackId,
+    (id) => {
+      if (!id) return
+      const ctx = currentContext.value
+      if (!ctx) return
+      const idx = ctx.trackIds.indexOf(id)
+      if (idx < 0) return
+      const next = ctx.trackIds.slice(idx + 1, idx + 4)
+      if (next.length > 0) void useLibraryStore().resolveTracks(next)
+    },
+  )
+
   return {
     snapshot,
     initialized,
@@ -393,6 +479,7 @@ export const usePlayerStore = defineStore('player', () => {
     setSleepTimer,
     cancelSleepTimer,
     removeFromQueue,
+    remapTrackIds,
     dispose,
   }
 })

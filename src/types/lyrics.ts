@@ -28,3 +28,15 @@ export interface Lyrics {
 
 /** 歌词加载状态 */
 export type LyricsStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
+
+/**
+ * 边车歌词元数据（LRC 头部 [ar:]/[al:]/[ti:]/[au:]/[by:] 标签解析结果）
+ * 用于「歌词元数据补全」实验室功能回填未知艺术家/专辑。
+ */
+export interface SidecarMeta {
+  artist?: string | null
+  album?: string | null
+  title?: string | null
+  author?: string | null
+  by?: string | null
+}

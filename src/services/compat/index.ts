@@ -16,6 +16,7 @@
  * 不修改任何现有播放核心代码（tauriPlayer / webPlayer / WebPlayer / Rust 引擎）。
  */
 import type {
+  EqBand,
   IPlayer,
   PlayContext,
   PlayMode,
@@ -591,6 +592,10 @@ export class CompatPlayer implements IPlayer {
 
   async setReplaygain(enabled: boolean): Promise<void> {
     await this.base.setReplaygain(enabled)
+  }
+
+  async setEq(enabled: boolean, bands: EqBand[]): Promise<void> {
+    await this.base.setEq(enabled, bands)
   }
 
   async setSleepTimer(delayMs: number, waitTrackEnd: boolean): Promise<void> {

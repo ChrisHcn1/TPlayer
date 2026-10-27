@@ -13,7 +13,7 @@ use tauri::State;
 
 use crate::error::AppResult;
 use crate::lyrics::online;
-use crate::lyrics::parser::{self, Lyrics, LyricsSource};
+use crate::lyrics::parser::{self, Lyrics, LyricsSource, SidecarMeta};
 use crate::AppState;
 
 /// 读取音频内嵌歌词文本（Lyrics 标签，如 ID3v2 USLT 帧）
@@ -119,4 +119,45 @@ pub fn lyrics_save_offset(
 pub fn lyrics_clear_cache(state: State<'_, AppState>) -> AppResult<()> {
     parser::clear_offsets(&state.lyrics_offsets_path);
     Ok(())
+}
+
+/// 读取同名 .lrc 边车并解析其中的元数据标签（[ar:]/[al:]/[ti:]/[au:]/[by:]），
+/// 用于「歌词元数据补全」实验室功能回填未知艺术家/专辑。无边车、无标签或读取出错时返回 None。
+#[tauri::command]
+pub async fn lyrics_sidecar_metadata(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> AppResult<Option<SidecarMeta>> {
+    let track = {
+        let library = state.library.lock().unwrap();
+        library.get_track(&track_id)
+    };
+    let Some(track) = track else {
+        return Ok(None);
+    };
+    // 还原真实文件系统路径（同 lyrics_load），保证 .lrc 边车正确命中
+    #[cfg(target_os = "linux")]
+    let audio_path = crate::library::scan_linux::resolve_path_str(&track.file_path);
+    #[cfg(not(target_os = "linux"))]
+    let audio_path = PathBuf::from(&track.file_path);
+
+    let sidecar = sidecar_path(&audio_path);
+    let Ok(bytes) = std::fs::read(&sidecar) else {
+        return Ok(None);
+    };
+    // .lrc 边车常为 GBK/GB18030（中文），自动识别编码，避免乱码
+    let content = crate::library::cue::decode_text(&bytes);
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+    let meta = parser::parse_sidecar_metadata(&content);
+    if meta.artist.is_none()
+        && meta.album.is_none()
+        && meta.title.is_none()
+        && meta.author.is_none()
+        && meta.by.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(meta))
 }

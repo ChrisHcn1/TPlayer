@@ -24,16 +24,64 @@ function createIdleScanProgress(): ScanProgress {
 }
 
 /**
+ * 搜索用小写关键词串的缓存（WeakMap：曲目对象被替换 / 回收后自动失效）。
+ *
+ * 记录生成时的字段快照：标题 / 专辑按值比较，艺术家按数组引用 + 长度比较，
+ * 字段变化（如元数据回填）时自动重建。这样每次按键只需对全库曲目做
+ * 一次 `includes`，不再为每首曲目重复拼接 + toLowerCase 分配新字符串。
+ */
+interface SearchHaystack {
+  title: string
+  album: string
+  artists: string[]
+  artistCount: number
+  hay: string
+}
+
+const haystackCache = new WeakMap<Track, SearchHaystack>()
+
+function trackHaystack(track: Track): string {
+  const cached = haystackCache.get(track)
+  if (
+    cached &&
+    cached.title === track.title &&
+    cached.album === track.album &&
+    cached.artists === track.artists &&
+    cached.artistCount === track.artists.length
+  ) {
+    return cached.hay
+  }
+  const hay = `${track.title} ${track.artists.join(' ')} ${track.album}`.toLowerCase()
+  haystackCache.set(track, {
+    title: track.title,
+    album: track.album,
+    artists: track.artists,
+    artistCount: track.artists.length,
+    hay,
+  })
+  return hay
+}
+
+/**
  * 曲目关键词匹配（调用方保证 key 已 trim + lowercase）。
  * 主匹配域：标题 / 艺术家 / 专辑；
  * 附加匹配域：文件后缀名（如 "flac"、".flac"、"dsf"），供内部按格式筛选用，UI 不提示。
  */
 export function matchTrackKeyword(track: Track, key: string): boolean {
-  if (`${track.title} ${track.artists.join(' ')} ${track.album}`.toLowerCase().includes(key)) {
+  if (trackHaystack(track).includes(key)) {
     return true
   }
-  const ext = track.filePath.split('.').pop()?.toLowerCase() ?? ''
-  return ext.length > 0 && ext === key.replace(/^\.+/, '')
+  // 后缀名匹配：取最后一个点之后的片段（无点时沿用整个文件名，与旧实现一致）
+  const filePath = track.filePath
+  const dot = filePath.lastIndexOf('.')
+  const ext = (dot >= 0 ? filePath.slice(dot + 1) : filePath).toLowerCase()
+  if (ext.length === 0) return false
+  // 去掉 key 的前导点（等价于旧的 `key.replace(/^\.+/, '')`）
+  let bare = key
+  let i = 0
+  while (i < bare.length && bare.charCodeAt(i) === 46) i++
+  if (i > 0) bare = bare.slice(i)
+  return ext === bare
 }
 
 /**
@@ -204,41 +252,44 @@ export const useLibraryStore = defineStore('library', () => {
   async function refresh(): Promise<void> {
     loading.value = true
     error.value = null
+    // 渐进式加载：先把**曲目列表**刷出来（用户立刻能看到、可交互、可播放），
+    // 再把专辑 / 艺术家 / 统计等较慢的聚合转**后台**加载。避免「等所有聚合查询
+    // 都跑完才出列表」——大库下那些 CTE 聚合可能好几秒，拖住整个首屏。
+    let trackList: Track[] = []
+    let favs: string[] = []
     try {
-      const [trackList, albumList, cueList, sacdList, artistList, libraryStats, favs, recent] =
-        await Promise.all([
-          libraryService.tracks(),
-          libraryService.albums(),
-          libraryService.cueAlbums(),
-          libraryService.sacdAlbums(),
-          libraryService.artists(),
-          libraryService.stats(),
-          libraryService.favoriteIds(),
-          libraryService.recent(),
-        ])
-      allTracks.value = dedupeSongs(trackList)
-      // 普通列表剔除 SACD 5.1 环绕轨（与立体声区同曲目，只差 `[5.1]` 后缀）
-      tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
-      albums.value = albumList
-      cueAlbums.value = cueList
-      sacdAlbums.value = sacdList
-      artists.value = artistList
-      stats.value = libraryStats
-      favoriteIds.value = favs
-      recentEntries.value = recent
+      ;[trackList, favs] = await Promise.all([
+        libraryService.tracks(),
+        libraryService.favoriteIds(),
+      ])
     } catch (cause) {
       error.value = normalizeError(cause).message
-    } finally {
       loading.value = false
+      return
     }
+    allTracks.value = dedupeSongs(trackList)
+    // 普通列表剔除 SACD 5.1 环绕轨（与立体声区同曲目，只差 `[5.1]` 后缀）
+    tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
+    favoriteIds.value = favs
+    loading.value = false
+    // 聚合 / 最近播放：后台加载，不阻塞列表；单个失败不影响列表可用
+    void (async () => {
+      try {
+        recentEntries.value = await libraryService.recent()
+      } catch {
+        /* 最近播放加载失败不阻断 */
+      }
+      await refreshAggregates()
+    })()
   }
 
-  /** 触发一次扫描（扫描根目录取 settings.libraryDirs，由 Rust 侧读取配置） */
-  async function scan(): Promise<void> {
+  /** 触发一次扫描（扫描根目录取 settings.libraryDirs，由 Rust 侧读取配置）
+   *  @param force 为 true 时忽略「未变更则跳过」优化，强制重新遍历 + 解析 */
+  async function scan(force = false): Promise<void> {
     error.value = null
     scanError.value = null
     try {
-      await libraryService.scan()
+      await libraryService.scan(force)
       await refresh()
       // 后台补解析阶段（stage=backfilling）由后端事件驱动，
       // 不能被这里的 'done' 覆盖掉（否则「后台解析中 x/y」指示器会闪退）
@@ -317,10 +368,21 @@ export const useLibraryStore = defineStore('library', () => {
    * 合并进曲库视图（按 id 替换，不触发全量刷新），并同步刷新专辑聚合视图。
    * removedIds 用于替换场景：占位条目被后端删除（CUE 分轨 / SACD 虚拟分轨入库）时，
    * 前端同步移除旧占位，避免幽灵条目。
+   *
+   * 返回「旧占位 id → 新分轨 id 列表」的重映射（按同文件匹配），供播放器把当前曲目 /
+   * 队列里指向旧占位的引用平滑迁移到新分轨，避免后台解析打断正在进行的播放。
    */
-  function applyResolvedTracks(updated: Track[], removedIds: string[] = []): void {
+  function applyResolvedTracks(
+    updated: Track[],
+    removedIds: string[] = [],
+  ): Record<string, string[]> {
     const removed = new Set(removedIds)
+    // 记录被移除占位的 filePath：占位与分轨指向同一物理文件，据此映射到新分轨
+    const removedPaths = new Map<string, string>()
     if (removed.size > 0) {
+      for (const track of allTracks.value) {
+        if (removed.has(track.id)) removedPaths.set(track.id, track.filePath)
+      }
       allTracks.value = allTracks.value.filter((track) => !removed.has(track.id))
       tracks.value = tracks.value.filter((track) => !removed.has(track.id))
     }
@@ -332,6 +394,44 @@ export const useLibraryStore = defineStore('library', () => {
       tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
     }
     void refreshAggregates()
+
+    // 构建重映射：占位 id → 同文件的新分轨 id（按碟内曲目顺序）
+    const updatedByPath = new Map<string, Track[]>()
+    for (const track of updated) {
+      const arr = updatedByPath.get(track.filePath)
+      if (arr) arr.push(track)
+      else updatedByPath.set(track.filePath, [track])
+    }
+    const remap: Record<string, string[]> = {}
+    for (const [id, path] of removedPaths) {
+      const repl = updatedByPath.get(path)
+      if (repl && repl.length > 0) remap[id] = repl.map((t) => t.id)
+    }
+    return remap
+  }
+
+  /**
+   * 实验室「歌词元数据补全」：就地回填单条曲目的艺术家/专辑/标题（仅替换传入字段）。
+   *
+   * 性能：改用**就地变更对象属性**而非整体 `.map` 重建数组——避免每次回填触发
+   * `tracksById`(O(n)) 重算与数组引用变更带来的连锁重渲，消除大库回填期的 O(n²) 抖动；
+   * 行内显示因深层响应式仍即时更新，聚合视图按 id 关联不受影响。
+   */
+  function patchTrackMeta(
+    id: string,
+    patch: { artists?: string[]; album?: string; title?: string },
+  ): void {
+    const apply = (list: Track[]): void => {
+      for (const track of list) {
+        if (track.id !== id) continue
+        if (patch.artists) track.artists = patch.artists
+        if (patch.album !== undefined) track.album = patch.album
+        if (patch.title !== undefined) track.title = patch.title
+        break
+      }
+    }
+    apply(allTracks.value)
+    apply(tracks.value)
   }
 
   /** 播放前解析占位轨道（两阶段懒加载 - 阶段二按需解析）；返回解析后的曲目列表 */
@@ -350,8 +450,41 @@ export const useLibraryStore = defineStore('library', () => {
     }
   }
 
-  /** 轻量刷新专辑/艺术家/统计聚合（懒加载增量更新后调用，避免全量重拉曲目） */
-  async function refreshAggregates(): Promise<void> {
+  /**
+   * 列表滚动到可见区时按需批量补解析：只挑**还未解析的普通占位**（CUE 分轨已有
+   * 标题、ISO/SACD 另按需处理），请求后端补标签 / 时长后增量合并进列表。
+   * 这样"全部歌曲"无需后台整库解析——滚到哪补到哪，未滚动到的保持轻量占位。
+   */
+  async function resolveTracks(ids: string[]): Promise<void> {
+    if (ids.length === 0) return
+    const seen = new Set<string>()
+    const pending = ids.filter((id) => {
+      if (seen.has(id)) return false
+      seen.add(id)
+      const t = getTrack(id)
+      return !!t && t.metadataPending && !t.isCue
+    })
+    if (pending.length === 0) return
+    try {
+      const resolved = await libraryService.resolveTracks(pending)
+      if (resolved.length > 0) applyResolvedTracks(resolved, [])
+    } catch (cause) {
+      error.value = normalizeError(cause).message
+    }
+  }
+
+  // 聚合刷新节流 + 合池：后台补解析期间 `tracks-resolved` 事件密集，若每次都同步
+  // 拉 5 个全库聚合接口，会把主线程与后端 DB 拖垮（大曲库下表现为界面「未响应」）。
+  // 策略：同一时刻最多一个在跑；运行中到来的调用只置脏，跑完补一次；距上次不足
+  // AGG_THROTTLE_MS 的调用顺延到时间窗末尾。最终保证一定有一次反映最新数据的刷新。
+  let aggInFlight = false
+  let aggPending = false
+  let aggTimer: ReturnType<typeof setTimeout> | null = null
+  let aggLastRun = 0
+  const AGG_THROTTLE_MS = 500
+
+  async function runAggregates(): Promise<void> {
+    aggLastRun = Date.now()
     try {
       const [albumList, cueList, sacdList, artistList, libraryStats] = await Promise.all([
         libraryService.albums(),
@@ -367,7 +500,39 @@ export const useLibraryStore = defineStore('library', () => {
       stats.value = libraryStats
     } catch (cause) {
       error.value = normalizeError(cause).message
+    } finally {
+      aggInFlight = false
+      if (aggPending) {
+        aggPending = false
+        void refreshAggregates()
+      }
     }
+  }
+
+  /** 轻量刷新专辑/艺术家/统计聚合（懒加载增量更新后调用，避免全量重拉曲目） */
+  function refreshAggregates(): Promise<void> {
+    const now = Date.now()
+    // 正在跑：置脏，待其完成后补一次
+    if (aggInFlight) {
+      aggPending = true
+      return Promise.resolve()
+    }
+    // 距上次不足节流窗：置脏并顺延
+    if (now - aggLastRun < AGG_THROTTLE_MS) {
+      aggPending = true
+      if (aggTimer == null) {
+        aggTimer = setTimeout(
+          () => {
+            aggTimer = null
+            void refreshAggregates()
+          },
+          AGG_THROTTLE_MS - (now - aggLastRun),
+        )
+      }
+      return Promise.resolve()
+    }
+    aggInFlight = true
+    return runAggregates()
   }
 
   function setKeyword(value: string): void {
@@ -478,6 +643,8 @@ export const useLibraryStore = defineStore('library', () => {
     applyScanProgress,
     applyResolvedTracks,
     resolveTrack,
+    resolveTracks,
+    patchTrackMeta,
     refreshAggregates,
     setKeyword,
     toggleFavorite,

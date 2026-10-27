@@ -14,6 +14,7 @@ import { RecycleScroller } from 'vue-virtual-scroller'
 
 import type { PlayContext, Track } from '../../types'
 import { usePlayerStore } from '../../stores/player'
+import { useLibraryStore } from '../../stores/library'
 import { useTrackActions } from '../../composables/useTrackActions'
 import TrackRow from './TrackRow.vue'
 import TrackListHeader, {
@@ -50,7 +51,35 @@ const emit = defineEmits<{
 }>()
 
 const playerStore = usePlayerStore()
+const libraryStore = useLibraryStore()
 const { openTrackMenu } = useTrackActions()
+
+// ---- 滚动按需补解析 ---------------------------------------------------------
+// 「全部歌曲」不再后台整库解析：滚到可见区才补该区普通占位的标签 / 时长，
+// 未滚动到的保持轻量占位（文件夹推断的专辑/艺人），从而加载/滚动/播放都不卡。
+// debounce 200ms 避免快速滚动时频繁请求；可见区前后各多取 10 行做预取。
+let resolveTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleVisibleResolve(startIndex: number, endIndex: number): void {
+  if (resolveTimer != null) clearTimeout(resolveTimer)
+  resolveTimer = setTimeout(() => {
+    resolveTimer = null
+    const list = sortedTracks.value
+    const from = Math.max(0, startIndex - 10)
+    const to = Math.min(list.length - 1, endIndex + 10)
+    const ids: string[] = []
+    for (let i = from; i <= to; i += 1) {
+      const id = list[i]?.id
+      if (id) ids.push(id)
+    }
+    void libraryStore.resolveTracks(ids)
+  }, 200)
+}
+
+/** RecycleScroller 可见区变化（虚拟滚动回调） */
+function onVisibleUpdate(startIndex: number, endIndex: number): void {
+  scheduleVisibleResolve(startIndex, endIndex)
+}
 
 // ---- 虚拟滚动：行高与容器高度 -------------------------------------------
 // RecycleScroller 是泛型函数式组件，InstanceType 无法表示，仅声明需要用到的命令式 API
@@ -204,10 +233,25 @@ watch(sortedTracks, async () => {
   measure()
 })
 
+// 首屏解析：数据首次到达时补第一屏（约一屏行数 + 预取），保证第一屏即有真实
+// 标题 / 艺人 / 专辑，而非文件名。只做一次。
+const FIRST_SCREEN_ROWS = 40
+
 // 从其他路由切回（KeepAlive 激活）：确保当前曲目可见
 onActivated(() => {
   void nextTick(() => scrollCurrentIntoView(false))
+  // 切回时补一屏元数据（占位期间切走可能还未解析）
+  scheduleVisibleResolve(0, FIRST_SCREEN_ROWS)
 })
+
+const stopFirstScreen = watch(
+  () => sortedTracks.value.length,
+  (len) => {
+    if (len === 0) return
+    void nextTick(() => scheduleVisibleResolve(0, FIRST_SCREEN_ROWS))
+    stopFirstScreen()
+  },
+)
 
 const selectedSet = computed(() => new Set(props.selectedIds))
 const allSelected = computed(
@@ -323,6 +367,7 @@ function onKeydown(event: KeyboardEvent): void {
         class="track-list__scroller"
         role="grid"
         :style="{ height: `${scrollerHeight}px` }"
+        @update="onVisibleUpdate"
       >
         <template #default="{ item: track, index }">
           <div class="track-list__item">

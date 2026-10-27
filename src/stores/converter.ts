@@ -104,12 +104,24 @@ export const useConverterStore = defineStore('converter', () => {
   function applyEvent(event: ConvertEvent): void {
     switch (event.type) {
       case 'started': {
-        const task = tasks.value.find((t) => t.id === event.payload.taskId)
-        if (task) {
-          task.status = 'running'
-          task.progress = 0
-          task.outputPath = event.payload.outputPath
+        // 名称一律以真实输出文件名为准（含重名编号 / 分轨题名），确保与文件状态始终一致
+        const name = event.payload.outputPath.split(/[\\/]/).pop() ?? event.payload.taskId
+        let task = tasks.value.find((t) => t.id === event.payload.taskId)
+        if (!task) {
+          task = {
+            id: event.payload.taskId,
+            name,
+            status: 'pending',
+            progress: 0,
+            outputPath: null,
+            message: null,
+          }
+          tasks.value.push(task)
         }
+        task.name = name
+        task.status = 'running'
+        task.progress = 0
+        task.outputPath = event.payload.outputPath
         return
       }
       case 'progress': {
@@ -118,10 +130,15 @@ export const useConverterStore = defineStore('converter', () => {
         return
       }
       case 'completed': {
-        const task = tasks.value.find((t) => t.id === event.payload.taskId)
+        const taskId = event.payload.taskId
+        const task = tasks.value.find((t) => t.id === taskId)
         if (task) {
           task.status = 'done'
           task.progress = 100
+          // 已完成项自动清理：短暂展示「已完成」后从队列移除，避免已结束项目堆积造成状态脱节
+          window.setTimeout(() => {
+            tasks.value = tasks.value.filter((t) => t.id !== taskId || t.status !== 'done')
+          }, 1500)
         }
         return
       }
@@ -206,28 +223,27 @@ export const useConverterStore = defineStore('converter', () => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
   }
 
-  /** 启动转换；失败时回滚任务列表并向上抛出（由视图提示） */
+  /**
+   * 启动统一转换：把当前待转文件（普通音频 / .cue / .iso 可混排）一次性提交后端，
+   * 后端经 `expand_input` 按类型自动展开（单文件 / CUE 分轨 / SACD 分轨），用户无需区分。
+   *
+   * 每次启动先清空任务队列：任务名一律由后端 `started` 事件携带的真实 `outputPath`
+   * 回填，从而彻底消除「已结束项目未清除时，第二次转换名称未更新但实际文件已变更」的脱节。
+   */
   async function start(): Promise<void> {
     if (files.value.length === 0) throw new Error('请先添加待转文件')
     if (running.value) throw new Error('转换进行中，请等待当前任务完成')
     if (isTauri && !settings.value.outputDir.trim()) throw new Error('请先选择输出目录')
 
     ensureSubscribed()
-    const inputs: ConvertTaskStart[] = []
-    tasks.value = files.value.map((file) => {
-      const id = nextId('task')
-      inputs.push({ id, path: file.path })
-      return {
-        id,
-        name: file.name,
-        status: 'pending' as const,
-        progress: 0,
-        outputPath: null,
-        message: null,
-      }
-    })
+    // 清空队列：名称与文件状态始终由后端真实输出文件名驱动
+    tasks.value = []
     running.value = true
 
+    const inputs: ConvertTaskStart[] = files.value.map((file) => ({
+      id: nextId('task'),
+      path: file.path,
+    }))
     const options: ConvertOptions = {
       format: settings.value.format,
       sampleRate: settings.value.sampleRate,
@@ -248,6 +264,8 @@ export const useConverterStore = defineStore('converter', () => {
     if (!running.value) return
     await converterService.cancel()
   }
+
+  // 分轨转换已并入统一 start()：输入列表中的 .cue / .iso 会由后端自动识别展开。
 
   /** 清除已完成 / 已失败 / 已取消的任务 */
   function clearFinished(): void {

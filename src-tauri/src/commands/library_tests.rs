@@ -90,7 +90,7 @@ fn deep_resolve_replaces_mirror_placeholder_with_cue_tracks() {
     write_cue(&dir);
 
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
+    let mut ctx = ResolveContext::new(vec![], false);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     // 占位被分轨取代
@@ -113,7 +113,7 @@ fn deep_resolve_keeps_single_track_with_same_id_and_no_removal() {
     write_min_wav(&song);
 
     let ph = placeholder("ph-song", &song);
-    let mut ctx = ResolveContext::new(vec![], &[]);
+    let mut ctx = ResolveContext::new(vec![], false);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     // 普通单曲：同 id 覆盖占位，且**不能**把该 id 放进 removed
@@ -145,8 +145,7 @@ fn deep_resolve_discovers_cue_in_subdir_of_root() {
     f.write_all(cue.as_bytes()).expect("write cue");
 
     let ph = placeholder("ph-mirror", &mirror);
-    // 以 dir 为根递归发现 CUE（与后台补解析行为一致）
-    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
+    let mut ctx = ResolveContext::new(vec![], false);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     assert_eq!(outcome.removed, vec!["ph-mirror".to_string()]);
@@ -169,7 +168,7 @@ fn shallow_resolve_skips_virtual_tracks_for_network() {
     f.write_all(cue.as_bytes()).expect("write cue");
 
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(vec![], &[]);
+    let mut ctx = ResolveContext::new(vec![], false);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Shallow, &mut ctx);
 
     // 网络共享：只读文件头 → 只有普通单曲元数据，不产出 CUE 分轨
@@ -234,7 +233,7 @@ fn deep_resolve_real_cue_with_album_metadata() {
     f.write_all(cue.as_bytes()).expect("write cue");
 
     let ph = placeholder("ph-mirror", &mirror);
-    let mut ctx = ResolveContext::new(vec![], &[dir.clone()]);
+    let mut ctx = ResolveContext::new(vec![], false);
     let outcome = resolve_placeholder(&ph, ResolveDepth::Deep, &mut ctx);
 
     assert_eq!(outcome.removed, vec!["ph-mirror".to_string()]);
