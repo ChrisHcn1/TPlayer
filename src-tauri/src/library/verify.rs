@@ -413,7 +413,23 @@ async fn verify_one(app: &AppHandle, item: PendingVerify, mode: VerifyMode) -> O
     if hits.is_empty() {
         return Outcome::Failed("联网搜索无结果".to_string());
     }
-    let Some((cand, hit)) = judge(&item.candidates, &hits, item.duration_ms) else {
+    // 手动重试时：排除与当前标题完全一致的候选，避免系统倾向于返回同一条错误结果；
+    // 同时将当前标题传入 judge，进一步排除与之高度相似的搜索命中。
+    let candidates = if mode == VerifyMode::Manual {
+        item.candidates
+            .iter()
+            .filter(|c| c.title != item.local_title)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        item.candidates.clone()
+    };
+    let exclude_title = if mode == VerifyMode::Manual {
+        Some(item.local_title.as_str())
+    } else {
+        None
+    };
+    let Some((cand, hit)) = judge(&candidates, &hits, item.duration_ms, exclude_title.as_deref()) else {
         return Outcome::Failed(
             "未找到可信匹配（标题相似度 / 艺术家 / 时长均未确认）".to_string(),
         );
@@ -564,11 +580,16 @@ fn artist_matches(candidate: &str, hit_artists: &[String]) -> bool {
 ///
 /// 规则：标题相似度 ≥ 0.8，且（艺术家命中 或 时长差 ≤ 3s）才算确认；
 /// 两者方向都确认时取分高者。全部不通过 → None（调用方保留本地结果）。
+///
+/// `exclude_title`：手动重试时传入当前（可能错误的）标题，与之高度相似（≥0.9）
+/// 的搜索命中会被跳过，避免重复返回同一条错误结果，强制寻找更准确的匹配。
 pub fn judge(
     candidates: &[Candidate],
     hits: &[SearchHit],
     duration_ms: u64,
+    exclude_title: Option<&str>,
 ) -> Option<(Candidate, SearchHit)> {
+    let exclude_norm = exclude_title.map(|t| normalize_title(t));
     let mut best: Option<(f64, Candidate, SearchHit)> = None;
     for cand in candidates {
         let ct = normalize_title(&cand.title);
@@ -577,6 +598,12 @@ pub fn judge(
             let sim = similarity(&ct, &ht);
             if sim < TITLE_SIM_THRESHOLD {
                 continue;
+            }
+            // 手动重试时：排除与当前标题高度相似的命中，避免返回相同错误结果
+            if let Some(ref et) = exclude_norm {
+                if similarity(&ht, et) > 0.9 {
+                    continue;
+                }
             }
             let artist_ok = artist_matches(&cand.artist, &hit.artists);
             let dur_ok = duration_ms > 0
@@ -628,7 +655,7 @@ mod tests {
             cand("周杰伦", "晴天"),
         ];
         let hits = vec![hit("晴天", &["周杰伦"], 269_000)];
-        let (c, _) = judge(&cands, &hits, 269_000).expect("应命中");
+        let (c, _) = judge(&cands, &hits, 269_000, None).expect("应命中");
         assert_eq!(c.title, "晴天");
         assert_eq!(c.artist, "周杰伦");
     }
@@ -638,17 +665,17 @@ mod tests {
         // 候选无艺术家信息，仅靠时长对齐确认
         let cands = vec![cand("Mandy", "")];
         let hits = vec![hit("Mandy", &["Westlife"], 233_000)];
-        let (c, _) = judge(&cands, &hits, 232_500).expect("时长容差内应命中");
+        let (c, _) = judge(&cands, &hits, 232_500, None).expect("时长容差内应命中");
         assert_eq!(c.title, "Mandy");
         // 时长差超容差且无艺术家 → 不采纳
-        assert!(judge(&cands, &hits, 300_000).is_none());
+        assert!(judge(&cands, &hits, 300_000, None).is_none());
     }
 
     #[test]
     fn judge_rejects_low_similarity() {
         let cands = vec![cand("晴天", "周杰伦")];
         let hits = vec![hit("七里香", &["周杰伦"], 269_000)];
-        assert!(judge(&cands, &hits, 269_000).is_none());
+        assert!(judge(&cands, &hits, 269_000, None).is_none());
     }
 
     #[test]
@@ -656,7 +683,7 @@ mod tests {
         let cands = vec![cand("Welcome Home", "Coheed & Cambria")];
         // 命中艺术家带标点/大小写差异 → 归一化后仍命中
         let hits = vec![hit("Welcome Home", &["coheed and cambria"], 0)];
-        assert!(judge(&cands, &hits, 0).is_some());
+        assert!(judge(&cands, &hits, 0, None).is_some());
     }
 
     #[test]
