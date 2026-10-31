@@ -53,6 +53,10 @@ export interface Track {
   metadataPending?: boolean
   /** 两阶段懒加载：SACD ISO 占位条目（尚未解析出虚拟分轨） */
   isoPlaceholder?: boolean
+  /** ReplayGain 增益（dB，未分析为 null） */
+  replaygainDb?: number | null
+  /** ReplayGain 峰值（未分析为 null） */
+  replaygainPeak?: number | null
 }
 
 /** 专辑（聚合视图，不落盘为独立实体） */

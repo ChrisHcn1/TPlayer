@@ -1,0 +1,111 @@
+TPlayer Next - Third-Party Notices
+====================================
+Product: TPlayer Next
+Version: 2.0.3
+Date: 2026-10-29
+
+This product includes software developed by third parties, distributed under
+various open source licenses. The full license texts and source code (where
+required) are available as described below.
+
+--------------------------------------------------------------------------------
+1. RUST DEPENDENCIES (src-tauri/Cargo.toml)
+--------------------------------------------------------------------------------
+
+The following crates are used under permissive or weak copyleft licenses.
+Exact locked versions are recorded in Cargo.lock (committed to version control).
+
+  crate              version   license          purpose
+  ------------------ --------- ----------------- -------------------------------------------
+  tauri              2.x       Apache-2.0 OR MIT  Tauri 2 desktop application framework
+  tauri-plugin-dialog 2.x      Apache-2.0 OR MIT  System file dialog plugin
+  tauri-plugin-fs     2.x      Apache-2.0 OR MIT  File system access plugin
+  tauri-plugin-updater 2.x    Apache-2.0 OR MIT  GitHub Releases auto-updater
+  tauri-plugin-process 2.x    Apache-2.0 OR MIT  App restart after update
+  tauri-build         2.x      Apache-2.0 OR MIT  Tauri build script
+  rusqlite            0.32.x   MIT              SQLite database bindings (bundled)
+  serde               1.x      MIT OR Apache-2.0 Serialization framework
+  serde_json          1.x      MIT OR Apache-2.0 JSON serialization
+  thiserror           2.x      MIT OR Apache-2.0 Error type definitions
+  rodio               0.19.x   MIT OR Apache-2.0 Audio playback engine wrapper
+  lofty               0.22.x   MPL-2.0          Audio metadata tag reading
+  sha2                0.10.x   MIT OR Apache-2.0 Stable track ID hashing
+  byteorder           1.x      MIT OR Apache-2.0 Big-endian byte order reading
+  tokio               1.x      MIT              Async runtime
+  chrono              0.4.x    MIT OR Apache-2.0 Timestamp handling
+  rand                0.8.x    MIT OR Apache-2.0 Random playback mode
+  notify              6.x      MIT              Directory watcher
+  regex               1.x      MIT OR Apache-2.0 LRC tag parsing
+  rayon               1.x      MIT OR Apache-2.0 Parallel scanning
+  encoding_rs         0.8.x    MIT OR Apache-2.0 Text encoding detection
+  reqwest             0.12.x   MIT OR Apache-2.0 Online lyrics fetching
+  window-vibrancy     0.8.x    MIT OR Apache-2.0 Native window effects
+  windows             0.54.x   MIT OR Apache-2.0 Windows system media controls
+
+SPDX license texts for the above are available at https://spdx.org/licenses/.
+Source repositories: https://crates.io/crates/<crate-name>
+
+--------------------------------------------------------------------------------
+2. NODE.JS DEPENDENCIES (package.json)
+--------------------------------------------------------------------------------
+
+  package                    version   license          purpose
+  -------------------------- --------- ----------------- -------------------------------------------
+  @ffmpeg/core               0.12.x    LGPL-3.0         FFmpeg WebAssembly core
+  @ffmpeg/ffmpeg             0.12.x    LGPL-3.0         FFmpeg WebAssembly wrapper
+  @ffmpeg/util               0.12.x    LGPL-3.0         FFmpeg WebAssembly utilities
+  @tauri-apps/api            2.x       MIT OR Apache-2.0 Tauri frontend API
+  @tauri-apps/plugin-dialog  2.x       MIT OR Apache-2.0 Tauri dialog plugin binding
+  @tauri-apps/plugin-fs      2.x       MIT OR Apache-2.0 Tauri FS plugin binding
+  @tauri-apps/plugin-process 2.x       MIT OR Apache-2.0 Tauri process plugin binding
+  @tauri-apps/plugin-updater 2.x       MIT OR Apache-2.0 Tauri updater plugin binding
+  pinia                      3.x       MIT              Vue state management
+  vue                        3.x       MIT              Frontend UI framework
+  vue-router                 4.x       MIT              Frontend router
+  vue-virtual-scroller       2.x       MIT              Virtual scrolling
+
+Dev dependencies (not distributed): @tauri-apps/cli, @types/node,
+@vitejs/plugin-vue, @vue/test-utils, jsdom, typescript, vite, vitest, vue-tsc.
+
+--------------------------------------------------------------------------------
+3. BUNDLED BINARIES (distributed with installer)
+--------------------------------------------------------------------------------
+
+  binary        version   license    source                                  notes
+  ------------- --------- ---------- ---------------------------------------- --------------------------------------------
+  ffmpeg.exe    6.x       LGPL-2.1   https://ffmpeg.org/download.html        Independent process invocation. Source code
+                                                                             available at https://ffmpeg.org/download.html
+                                                                             (source releases or git). No modifications made.
+  sacd_extract  unspecified GPL-3.0   https://github.com/sacd-ripper/sacd-ripper Independent process invocation.
+                                                                             Source code available at the above URL.
+                                                                             No modifications made.
+
+Under LGPL-2.1 / GPL-3.0, you may request the corresponding source code for
+these binaries by contacting the project maintainer. This offer is valid for
+at least 3 years from the date of distribution.
+
+--------------------------------------------------------------------------------
+4. THIRD-PARTY CODE REFERENCES
+--------------------------------------------------------------------------------
+
+  reference                          source                                                       license        notes
+  ---------------------------------- ------------------------------------------------------------ -------------- --------------------------------------------
+  scarletbook DSD demux reference    https://github.com/sacd-ripper/sacd-ripper                  GPL-3.0 (ref)  Independently reimplemented; no source copied.
+  Robert Bristow-Johnson EQ cookbook https://www.w3.org/TR/Audio-EQ-Cookbook/                   Public Domain  Algorithm formulas only; no code copied.
+  ITU-R BS.775 downmix               https://www.itu.int/rec/R-REC-BS.775                       ITU standard   Standard coefficients; no code copied.
+
+--------------------------------------------------------------------------------
+5. PROJECT SOURCE CODE
+--------------------------------------------------------------------------------
+
+TPlayer Next application source code: ISC (see LICENSE file at repository root).
+Copyright (c) 2026 TPlayer Next Contributors.
+
+--------------------------------------------------------------------------------
+6. DISCLAIMER
+--------------------------------------------------------------------------------
+
+This notice is provided for informational purposes only. It does not grant any
+rights beyond those in the respective licenses. For commercial distribution,
+please review the full license texts and consult legal counsel regarding
+patent and trademark considerations (e.g., AAC, DSD/SACD, "TPlayer" trademark).

@@ -111,10 +111,13 @@ fn head_data_has_dts(head: &[u8]) -> bool {
 /// 读取文件头判断是否为「WAV 容器封装 DTS」（DTS-CD/DTS-ES 伪装 WAV）。
 /// 读失败按非 DTS 处理（保持原路由，由后续解码错误链路兜底）。
 fn wav_head_contains_dts(path: &Path) -> bool {
+    read_head_4k(path).is_some_and(|head| head_data_has_dts(&head))
+}
+
+/// 读取文件前 4KiB（WAV 头解析用，足以覆盖 fmt / LIST / data 前置 chunk）
+fn read_head_4k(path: &Path) -> Option<Vec<u8>> {
     const HEAD_LEN: usize = 4096;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut file = std::fs::File::open(path).ok()?;
     let mut head = vec![0u8; HEAD_LEN];
     let mut total = 0usize;
     while total < HEAD_LEN {
@@ -124,7 +127,62 @@ fn wav_head_contains_dts(path: &Path) -> bool {
             Err(_) => break,
         }
     }
-    head_data_has_dts(&head[..total])
+    head.truncate(total);
+    Some(head)
+}
+
+/// 解析 RIFF 头，返回 fmt chunk 数据区在 head 内的偏移；无法解析返回 None
+fn riff_fmt_offset(head: &[u8]) -> Option<usize> {
+    if head.len() < 12 || &head[0..4] != b"RIFF" {
+        return None;
+    }
+    let mut off = 12usize;
+    while off + 8 <= head.len() {
+        let id = &head[off..off + 4];
+        let size = u32::from_le_bytes([head[off + 4], head[off + 5], head[off + 6], head[off + 7]])
+            as usize;
+        if id == b"fmt " {
+            return Some(off + 8);
+        }
+        off += 8 + size + (size % 2);
+    }
+    None
+}
+
+/// 读取 WAV fmt chunk 声明的声道数（兼容 WAVEFORMATEXTENSIBLE）。
+///
+/// 用于识别「多声道 PCM WAV」（如 6.1 环绕 7ch）：rodio 0.19 的混音器假定
+/// 源声道与输出设备声道一致，直接把 7ch 交错样本按 2ch 步长写入设备 buffer，
+/// 结果是把相邻声道的采样点错误重排 → 播放为宽带白噪音。这类文件必须绕开
+/// 原生解码，交给 ffmpeg 管道 + `PcmStreamSource` 做显式下混。
+fn wav_head_channels(path: &Path) -> Option<u16> {
+    let head = read_head_4k(path)?;
+    let fmt = riff_fmt_offset(&head)?;
+    // fmt 数据区：wFormatTag(2) nChannels(2) ...
+    if fmt + 4 > head.len() {
+        return None;
+    }
+    Some(u16::from_le_bytes([head[fmt + 2], head[fmt + 3]]))
+}
+
+/// 读取 FLAC STREAMINFO 声明的声道数。
+///
+/// 同上：多声道 FLAC（5.1 环绕母带常见）经 rodio/claxon 原生解码后同样会被
+/// 混音器按设备 2ch 步长重排成白噪音，需改走 ffmpeg 管道显式下混。
+///
+/// STREAMINFO 布局（`fLaC` 后第一个 metadata block，类型 0，数据 34 字节）：
+/// 偏移 12（block 内）= sample_rate 低 4 位 + (channels-1) 3 位 + bps-1 最高位。
+fn flac_head_channels(path: &Path) -> Option<u16> {
+    let head = read_head_4k(path)?;
+    if head.len() < 21 || &head[0..4] != b"fLaC" {
+        return None;
+    }
+    // metadata block header：bit7 = last-block，低 7 位 = 类型；类型 0 = STREAMINFO
+    if head[4] & 0x7F != 0 {
+        return None;
+    }
+    // 数据区从 offset 8 起；channels-1 位于数据区第 12 字节的 bits 3..1
+    Some((((head[8 + 12] >> 1) & 0x07) as u16) + 1)
 }
 
 fn is_native_format(path: &Path) -> bool {
@@ -138,7 +196,20 @@ fn is_native_format(path: &Path) -> bool {
     // WAV 容器深检：fmt 声称 PCM 但数据实为 DTS 位流（如 DTS-ES 封装在 .wav 中，
     // symphonia 会按 PCM 打开并输出噪声）——识别后路由到 ffmpeg 管道解码。
     // 反向误判（真 PCM 数据开头恰好命中同步字）代价仅为换 ffmpeg 通道，播放结果一致。
-    if ext == "wav" && wav_head_contains_dts(path) {
+    if ext == "wav" {
+        if wav_head_contains_dts(path) {
+            return false;
+        }
+        // 多声道 PCM WAV（如 6.1 环绕 7ch 无损抓轨）：rodio 混音器按设备声道步长
+        // 直接重排交错样本会把环绕声拆成白噪音。强制走 ffmpeg 管道，由
+        // `PcmStreamSource` 按 src_channels 显式下混到设备声道（与 5.1 ape/wv/tta
+        // /dts-in-wav 同一语义）。ffmpeg 不可用时由前端兼容层兜底。
+        if wav_head_channels(path).is_some_and(|ch| ch > 2) {
+            return false;
+        }
+    }
+    // FLAC 同类深检：多声道 FLAC 原生解码同样会被混音器错位成白噪音。
+    if ext == "flac" && flac_head_channels(path).is_some_and(|ch| ch > 2) {
         return false;
     }
     true
@@ -283,6 +354,29 @@ pub fn resolve_ffprobe() -> Option<PathBuf> {
 /// 避免写死 `-ar/-ac`（不同格式/文件的采样率与声道数各异）。ffprobe 缺失或解析
 /// 失败返回 None，由调用方回退到扩展名判定与安全默认值。
 fn probe_audio_stream(path: &Path) -> Option<(bool, u32, u16)> {
+    // 缓存键含文件大小与修改时间：文件被替换/重新编码后自动失效。
+    // 命中缓存可完全避免 fork ffprobe（Windows 冷启动可达 100ms 级），
+    // 这是引擎线程在切歌/预加载期间保持响应的关键——探测与解码准备都在
+    // 引擎线程内同步执行，任何多余子进程都会延长 player 锁的持有时间。
+    let key = std::fs::metadata(path)
+        .ok()
+        .map(|m| {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (path.to_path_buf(), m.len(), mtime)
+        });
+    if let Some(key) = &key {
+        if let Ok(cache) = probe_cache().lock() {
+            if let Some(hit) = cache.get(key) {
+                return Some(*hit);
+            }
+        }
+    }
+
     let ffprobe = resolve_ffprobe()?;
     let out = crate::util::hidden_command(ffprobe)
         .args([
@@ -299,14 +393,36 @@ fn probe_audio_stream(path: &Path) -> Option<(bool, u32, u16)> {
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    let f: Vec<&str> = s.trim().split(',').collect();
+    // 只取首行并按逗号切分：多流/带 side_data 的输出会有多行，若整体 split
+    // 会让字段错位，进而推出错误的声道数（→ ffmpeg 输出与 PcmStreamSource
+    // 假设的声道不一致 → 逐帧错位成白噪音）。
+    let first = s.lines().next().unwrap_or("").trim();
+    let f: Vec<&str> = first.split(',').map(|x| x.trim()).collect();
     if f.len() < 3 {
         return None;
     }
-    let is_dsd = f[0].trim().starts_with("dsd");
-    let rate: u32 = f[1].trim().parse().ok()?;
-    let ch: u16 = f[2].trim().parse().ok()?;
+    let is_dsd = f[0].starts_with("dsd");
+    let rate: u32 = f[1].parse().ok()?;
+    let ch: u16 = f[2].parse().ok()?;
+    if let Some(key) = key {
+        if let Ok(mut cache) = probe_cache().lock() {
+            if cache.len() > 4096 {
+                cache.clear();
+            }
+            cache.insert(key, (is_dsd, rate, ch));
+        }
+    }
     Some((is_dsd, rate, ch))
+}
+
+/// ffprobe 探测缓存（路径 + 大小 + 修改时间 → 参数）。
+fn probe_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, u64, u64), (bool, u32, u16)>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, u64, u64), (bool, u32, u16)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 pub fn ffmpeg_available() -> bool {
@@ -584,11 +700,17 @@ pub fn spawn_engine() -> EngineHandle {
     .spawn(move || {
         let mut engine = RodioEngine::new();
             // 引擎级交叉淡化配置：是否启用 + 时长（ms）
+            // 初始值与 `RodioEngine::fade_ms` 及 config 默认一致（1000ms），
+            // 避免 set_crossfade 下发前两者不同步导致淡出起点按错误时长计算。
             let mut fade_enabled = true;
-            let mut fade_duration_ms: u64 = 400;
-            // recv 改为带超时轮询：无命令期间也能以 ~20ms 步进驱动淡入淡出
+            let mut fade_duration_ms: u64 = 1000;
+            // 带超时轮询：无命令期间也能步进驱动淡入淡出。
+            // 淡变进行中用 5ms 步进（与 rodio `periodic_access` 同频，音量阶跃
+            // 足够细，听感不再有 20ms 阶梯造成的"沙沙"调制噪声）；
+            // 空闲时退回 20ms，避免空转唤醒。
             loop {
-                match rx.recv_timeout(Duration::from_millis(20)) {
+                let tick_ms = if engine.fading_active() { 5 } else { 20 };
+                match rx.recv_timeout(Duration::from_millis(tick_ms)) {
                     Ok(cmd) => match cmd {
                         EngineCommand::Play(path, gain, range, sacd, ack) => {
                             let _ = ack.send(engine.play(&path, gain, range, sacd));
@@ -674,19 +796,38 @@ impl Playback {
     /// 立即终止播放（sink 停止拉流，ffmpeg 子进程随后退出；Drop 再 kill 兜底）
     fn halt(mut self) {
         self.sink.stop();
-        if let Some(child) = self.ffmpeg_child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.ffmpeg_child.take() {
+            reap_child(child);
         }
-        self.ffmpeg_child = None;
     }
 }
 
 impl Drop for Playback {
     fn drop(&mut self) {
-        if let Some(mut child) = self.ffmpeg_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.ffmpeg_child.take() {
+            reap_child(child);
+        }
+    }
+}
+
+/// 结束 ffmpeg 子进程并对回收动作设上限。
+///
+/// 旧实现 kill 后直接 `wait()`：若 ffmpeg 正卡在磁盘 I/O（大文件/网络盘），
+/// 引擎线程会被无限期挂住，期间所有播放命令（暂停/音量/seek/连播判定）
+/// 全部排队，前端表现为界面无响应。此处改为最多轮询 50ms，超时即放手
+/// 交给 `Drop`/系统回收。
+fn reap_child(mut child: Child) {
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
     }
 }
@@ -805,48 +946,40 @@ impl RodioEngine {
         }
     }
 
+    /// 是否有淡入 / 淡出正在进行（引擎线程据此在 5ms / 20ms 步进间切换）
+    fn fading_active(&self) -> bool {
+        self.fade_in_started.is_some() || self.fading_out.is_some()
+    }
+
     /// smoothstep 缓动，避免线性渐变在端点处可闻的台阶感
     fn ease(t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
-    /// 渐变驱动（每 ~20ms）：新曲目淡入到目标音量，旧曲目淡出到静默后回收
+    /// 渐变驱动（每 ~20ms）：旧曲目先淡出到静默后回收，随后新曲目再从静默淡入。
+    /// 任一时刻只有一个 Sink 发声，彻底绕开 rodio 多 Sink 混音产生的白噪音。
     /// fade_duration 为当前生效的交叉淡化时长（ms）；0 时关闭淡化。
     fn tick_fades(&mut self, fade_duration_ms: u64) {
         let fade_ms = if fade_duration_ms > 0 {
             fade_duration_ms
         } else {
-            // 关闭淡入淡出：直接设满音量 / 静默
-            if let Some(started) = self.fade_in_started {
-                let _ = started.elapsed();
-                if let Some(playback) = &self.current {
-                    playback.sink.set_volume(self.target_volume());
-                }
-                self.fade_in_started = None;
-            }
+            // 关闭淡入淡出：旧曲直接静默回收，新曲直接设满音量
             if let Some(fading) = &self.fading_out {
                 fading.playback.sink.set_volume(0.0);
                 if let Some(done) = self.fading_out.take() {
                     done.playback.halt();
                 }
             }
+            if let Some(_started) = self.fade_in_started.take() {
+                if let Some(playback) = &self.current {
+                    playback.sink.set_volume(self.target_volume());
+                }
+            }
             return;
         };
 
-        // 新曲目淡入
-        if let Some(started) = self.fade_in_started {
-            let t = started.elapsed().as_millis() as f32 / fade_ms as f32;
-            if let Some(playback) = &self.current {
-                playback.sink.set_volume(self.target_volume() * Self::ease(t));
-            }
-            if t >= 1.0 {
-                self.fade_in_started = None;
-                self.apply_volume();
-            }
-        }
-
-        // 旧曲目淡出：结束即停止并释放（含 ffmpeg 子进程）
+        // 旧曲目淡出：优先处理，淡出完毕后 halt，随后再开始新曲淡入
         if let Some(fading) = &self.fading_out {
             let t = fading.started.elapsed().as_millis() as f32 / fade_ms as f32;
             let gain = fading.from * (1.0 - Self::ease(t));
@@ -855,6 +988,21 @@ impl RodioEngine {
                 if let Some(done) = self.fading_out.take() {
                     done.playback.halt();
                 }
+                // 旧曲淡出完毕，开始新曲淡入
+                self.fade_in_started = Some(Instant::now());
+            }
+            return;
+        }
+
+        // 新曲目淡入（仅在旧曲淡出完毕后）
+        if let Some(started) = self.fade_in_started {
+            let t = started.elapsed().as_millis() as f32 / fade_ms as f32;
+            if let Some(playback) = &self.current {
+                playback.sink.set_volume(self.target_volume() * Self::ease(t));
+            }
+            if t >= 1.0 {
+                self.fade_in_started = None;
+                self.apply_volume();
             }
         }
     }
@@ -903,12 +1051,14 @@ impl RodioEngine {
         // 旧曲目转入淡出链路（交叉淡化）；淡出起点取其当前实际增益，
         // 淡入中途切歌也不会出现音量跳变
         if let Some(old) = self.current.take() {
+            // 注意：必须用 `old.gain_scale`——此刻 `self.current` 已被 take()，
+            // 再调 `target_volume()` 会因取不到 gain_scale 而回落 1.0，
+            // 造成淡出起点比实际音量高一截（切换瞬间"炸一下"）。
+            let base = if self.muted { 0.0 } else { self.volume } * old.gain_scale;
+            let fade = self.fade_ms.max(1) as f32;
             let from = match &self.fade_in_started {
-                Some(started) => {
-                    let t = started.elapsed().as_millis() as f32 / self.fade_ms as f32;
-                    self.target_volume() * Self::ease(t)
-                }
-                None => self.target_volume(),
+                Some(started) => base * Self::ease(started.elapsed().as_millis() as f32 / fade),
+                None => base,
             };
             // 同一时刻只保留一条淡出链路：更早的旧链路立即回收
             if let Some(older) = self.fading_out.take() {
@@ -1056,13 +1206,13 @@ impl RodioEngine {
         let next_path = self.next_path.take();
 
         // 旧曲目转入淡出链路（交叉淡化）；淡出起点取其当前实际增益
+        // （同 play：must 用 old.gain_scale，take 之后 target_volume() 会丢失增益）
         if let Some(old) = self.current.take() {
+            let base = if self.muted { 0.0 } else { self.volume } * old.gain_scale;
+            let fade = self.fade_ms.max(1) as f32;
             let from = match &self.fade_in_started {
-                Some(started) => {
-                    let t = started.elapsed().as_millis() as f32 / self.fade_ms as f32;
-                    self.target_volume() * Self::ease(t)
-                }
-                None => self.target_volume(),
+                Some(started) => base * Self::ease(started.elapsed().as_millis() as f32 / fade),
+                None => base,
             };
             if let Some(older) = self.fading_out.take() {
                 older.playback.halt();
@@ -1158,9 +1308,7 @@ impl RodioEngine {
             let (child, source) =
                 spawn_ffmpeg_decoder(&dsf, position_ms, None, &self.eq)?;
             if let Some(old) = playback.ffmpeg_child.take() {
-                let mut old = old;
-                let _ = old.kill();
-                let _ = old.wait();
+                reap_child(old);
             }
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
@@ -1197,9 +1345,7 @@ impl RodioEngine {
             let (child, source) =
                 spawn_ffmpeg_decoder(&path, abs_ms, dur_ms, &self.eq)?;
             if let Some(old) = playback.ffmpeg_child.take() {
-                let mut old = old;
-                let _ = old.kill();
-                let _ = old.wait();
+                reap_child(old);
             }
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
@@ -1527,20 +1673,27 @@ fn spawn_ffmpeg_decoder(
             .arg("f32le")
             .arg("-acodec")
             .arg("pcm_f32le")
+            // 显式与 `PcmStreamSource::src_channels` 对齐：ffprobe 探测失败时会
+            // 回退到 2 声道假设，若此时仍让 ffmpeg 按源声道（如 7ch）输出，
+            // 取样点会逐帧错位，整轨变成宽带白噪音。显式 `-ac` 让两者永远一致。
+            .arg("-ac")
+            .arg(src_ch.to_string())
             .arg("-")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
     } else {
-        // 非 DSD：同样**不指定 -ac**，让 ffmpeg 按源（文件头）声道输出——
-        // 多声道 ape/wv/tta/tak/dts-in-wav 5.1 与 DSD 分支保持同一语义，
-        // 设备适配统一由 PcmStreamSource 下混完成。
+        // 非 DSD：同样显式 `-ac src_ch`，与 PcmStreamSource 的 src_channels 对齐
+        // （多声道 ape/wv/tta/tak/dts-in-wav 与 7ch PCM WAV 走同一语义）。
+        // 设备适配（下混到立体声）仍由 PcmStreamSource 在输出侧完成。
         cmd.arg("-f")
             .arg("s16le")
             .arg("-acodec")
             .arg("pcm_s16le")
             .arg("-ar")
             .arg(out_rate.to_string())
+            .arg("-ac")
+            .arg(src_ch.to_string())
             .arg("-")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2070,10 +2223,29 @@ fn adapt_channels(frame: &[i16], dst: usize) -> Vec<i16> {
         match src {
             1 => return vec![frame[0], frame[0]],
             6 => {
-                // 5.1 → 立体声下混：C/LFE 以 1/√2 权重并入左右
+                // 5.1（FL FR FC LFE BL BR）→ 立体声：中置 / 环绕以 1/√2 并入左右，
+                // LFE 丢弃（低频能量并入会明显浑浊，且多数设备无独立低频通道）
                 const DOWNMIX: f32 = std::f32::consts::FRAC_1_SQRT_2;
                 let l = frame[0] as f32 + DOWNMIX * (frame[2] as f32 + frame[4] as f32);
                 let r = frame[1] as f32 + DOWNMIX * (frame[2] as f32 + frame[5] as f32);
+                return vec![clamp_i16(l), clamp_i16(r)];
+            }
+            7 => {
+                // 6.1（FL FR FC LFE BL BR FLC）→ 立体声：与 5.1 同规则，
+                // 前中左（FLC）以 0.5 权重并入左右；LFE 丢弃。
+                const DOWNMIX: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let center_l = 0.5 * frame[6] as f32;
+                let l = frame[0] as f32 + DOWNMIX * (frame[2] as f32 + frame[4] as f32) + center_l;
+                let r = frame[1] as f32 + DOWNMIX * (frame[2] as f32 + frame[5] as f32) + center_l;
+                return vec![clamp_i16(l), clamp_i16(r)];
+            }
+            8 => {
+                // 7.1（FL FR FC LFE BL BR SL SR）→ 立体声：侧环绕并入同侧
+                const DOWNMIX: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let l = frame[0] as f32
+                    + DOWNMIX * (frame[2] as f32 + frame[4] as f32 + frame[6] as f32);
+                let r = frame[1] as f32
+                    + DOWNMIX * (frame[2] as f32 + frame[5] as f32 + frame[7] as f32);
                 return vec![clamp_i16(l), clamp_i16(r)];
             }
             _ => {}
@@ -2207,6 +2379,68 @@ mod tests {
         assert!(hf < 1.3, "播放链路解出白噪 hf={:.3}", hf);
     }
 
+    /// 端到端验证「多声道 PCM WAV」播放链路（ffprobe 探测 → `ffmpeg -ac` → PcmStreamSource 下混）：
+    /// A) 不再解出白噪；B) 供给 rodio 的声道为设备立体声；C) `src_channels` 与探测值一致
+    /// —— C 不一致正是"逐帧错位成宽带白噪"的根因，故此断言直接守住回归。
+    ///
+    /// `TPLAYER_TEST_MULTICH_WAV` 指定样本文件（如 7 声道 6.1 抓轨 WAV）。
+    #[test]
+    fn multichannel_wav_pipeline_not_white_noise() {
+        let file = match std::env::var("TPLAYER_TEST_MULTICH_WAV") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("TPLAYER_TEST_MULTICH_WAV unset; skipping");
+                return;
+            }
+        };
+        let path = Path::new(&file);
+        let eq = std::sync::Arc::new(std::sync::Mutex::new(EqProcessor::new(
+            44100,
+            2,
+            &EqConfig::default(),
+        )));
+        // 从 30s 起播，绕开多数抓轨的静音前导
+        let (mut child, mut source) =
+            spawn_ffmpeg_decoder(path, 30_000, None, &eq).expect("启动 ffmpeg 解码失败");
+
+        // C) 声道对齐（不一致时 PcmStreamSource 会按错误步长切帧）
+        if let Some((_, _, ch)) = probe_audio_stream(path) {
+            assert_eq!(
+                source.src_channels, ch,
+                "ffmpeg 输出声道与 PcmStreamSource 假设不一致（会逐帧错位成白噪）"
+            );
+        }
+        // B) 供给 rodio 的声道应为设备立体声
+        assert_eq!(source.channels, 2, "输出声道应适配为立体声");
+
+        const TAKE: usize = 44_100 * 2 * 3;
+        let mut taken: Vec<i16> = Vec::with_capacity(TAKE);
+        for s in source.by_ref() {
+            taken.push(s);
+            if taken.len() >= TAKE {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(taken.len() > 44_100, "解码样本过少: {}", taken.len());
+        // A) 按声道分组统计高频占比（交错数据的跨声道相邻差无意义）
+        for ch in 0..2 {
+            let mono: Vec<f64> = taken
+                .iter()
+                .skip(ch)
+                .step_by(2)
+                .map(|&s| s as f64 / 32768.0)
+                .collect();
+            let sum_sq: f64 = mono.iter().map(|x| x * x).sum();
+            let diff_sq: f64 = mono.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
+            let hf = diff_sq / sum_sq.max(1e-9);
+            eprintln!("MULTICH WAV ch{ch} hf={hf:.3}（白噪≈2，音乐远低于 2）");
+            assert!(hf < 1.3, "声道 {ch} 解出白噪 hf={hf:.3}");
+        }
+    }
+
     /// 构造 WAV 文件字节：RIFF + WAVE + fmt(16B, PCM 44.1kHz/16bit/stereo) + 可选前置 chunk + data
     fn wav_bytes(data: &[u8], pre_chunk: Option<(&[u8], &[u8])>) -> Vec<u8> {
         let mut v = Vec::new();
@@ -2232,6 +2466,43 @@ mod tests {
         body.extend_from_slice(b"data");
         body.extend_from_slice(&(data.len() as u32).to_le_bytes());
         body.extend_from_slice(data);
+        v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    /// 构造 WAVEFORMATEXTENSIBLE 头（多声道 PCM 必须用此形式声明 channel mask）
+    fn wav_bytes_ext(data: &[u8], channels: u16) -> Vec<u8> {
+        let block_align = channels * 2;
+        let mask: u32 = match channels {
+            6 => 0x3F,  // 5.1：FL FR FC LFE BL BR
+            7 => 0x70F, // 6.1：FL FR FC LFE BL BR FLC
+            8 => 0x63F, // 7.1：FL FR FC LFE BL BR SL SR
+            _ => 0x3,   // 立体声
+        };
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&40u32.to_le_bytes()); // WAVEFORMATEXTENSIBLE
+        body.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
+        body.extend_from_slice(&channels.to_le_bytes());
+        body.extend_from_slice(&44100u32.to_le_bytes());
+        body.extend_from_slice(&(44100u32 * block_align as u32).to_le_bytes());
+        body.extend_from_slice(&block_align.to_le_bytes());
+        body.extend_from_slice(&16u16.to_le_bytes()); // wBitsPerSample
+        body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+        body.extend_from_slice(&16u16.to_le_bytes()); // wValidBitsPerSample
+        body.extend_from_slice(&mask.to_le_bytes());
+        // SubFormat：KSDATAFORMAT_SUBTYPE_PCM
+        body.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
         v.extend_from_slice(&(body.len() as u32).to_le_bytes());
         v.extend_from_slice(&body);
         v
@@ -2316,6 +2587,83 @@ mod tests {
         assert!(
             ratio_1k > 0.95 && ratio_1k < 1.05,
             "1kHz 不应被 60Hz 段影响（理论 1.01 倍），实测 {ratio_1k:.4} 倍"
+        );
+    }
+
+    #[test]
+    fn multichannel_pcm_wav_routes_to_ffmpeg() {
+        // 6.1 环绕 WAV（7ch 无损抓轨）：rodio 混音器会把交错样本按 2ch 步长重排成
+        // 白噪音，必须识别为非原生 → ffmpeg 管道 + PcmStreamSource 下混。
+        for ch in [6u16, 7, 8] {
+            let p = write_temp(&format!("multi{ch}.wav"), &wav_bytes_ext(&vec![0u8; 64], ch));
+            assert!(
+                !is_native_format(&p),
+                "{ch} 声道 PCM WAV 应路由到 ffmpeg 而非原生解码"
+            );
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn stereo_extensible_wav_stays_native() {
+        // 立体声 WAVEFORMATEXTENSIBLE（common in 48k 母带）仍走原生低延迟链路
+        let p = write_temp("stereo-ext.wav", &wav_bytes_ext(&[0x11, 0x22, 0x33, 0x44], 2));
+        assert!(is_native_format(&p));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn wav_head_channels_reads_extensible_field() {
+        for ch in [2u16, 6, 7, 8] {
+            let p = write_temp(&format!("ch{ch}.wav"), &wav_bytes_ext(&[0u8; 16], ch));
+            assert_eq!(wav_head_channels(&p), Some(ch));
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    /// 构造最小 FLAC 头（fLaC + STREAMINFO metadata block）
+    fn flac_bytes(channels: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"fLaC");
+        v.push(0x00); // last-block=0, type=0 (STREAMINFO)
+        v.extend_from_slice(&[0x00, 0x00, 0x22]); // 长度 34
+        let mut info = vec![0u8; 34];
+        // 偏移 12：sample_rate 低 4 位 | (channels-1) << 1 | bps 最高位
+        info[12] = (((channels - 1) & 0x07) << 1) as u8;
+        v.extend_from_slice(&info);
+        v
+    }
+
+    #[test]
+    fn flac_head_channels_reads_streaminfo() {
+        for ch in [1u16, 2, 6, 8] {
+            let p = write_temp(&format!("s{ch}.flac"), &flac_bytes(ch));
+            assert_eq!(flac_head_channels(&p), Some(ch));
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn multichannel_flac_routes_to_ffmpeg_stereo_stays_native() {
+        let p6 = write_temp("surround.flac", &flac_bytes(6));
+        assert!(!is_native_format(&p6), "5.1 FLAC 应走 ffmpeg 下混");
+        let _ = std::fs::remove_file(&p6);
+
+        let p2 = write_temp("stereo.flac", &flac_bytes(2));
+        assert!(is_native_format(&p2), "立体声 FLAC 保持原生低延迟链路");
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn six_point_one_downmix_keeps_stereo_image() {
+        // 6.1：FL=8000 FR=-8000 FC=2000 LFE=9999 BL=1000 BR=-1000 FLC=1000
+        // 期望：左 > 右（前左主导），LFE 不参与（否则左右都会异常抬高）
+        let out = adapt_channels(&[8000, -8000, 2000, 9999, 1000, -1000, 1000], 2);
+        assert_eq!(out.len(), 2);
+        assert!(out[0] > 0 && out[1] < 0, "左右应保持反相（前左/前右主导）");
+        assert!(
+            out[0] < 32000 && out[1] > -32000,
+            "LFE 不应被并入（合并会把左右都拉向正/负饱和）"
         );
     }
 

@@ -1,0 +1,585 @@
+schema_version: "1.0"
+project: "tplayer-next"
+product_name: "TPlayer Next"
+version: "2.0.3"
+generated_at: "2026-10-29"
+maintainer: "@tech-lead"
+
+# =============================================================================
+# 直接依赖 - Rust 后端 (src-tauri/Cargo.toml)
+# 作用域：runtime = 运行时链接/调用；build = 构建时插件
+# =============================================================================
+rust_direct_dependencies:
+  - name: tauri
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri"
+    scope: runtime
+    purpose: "Tauri 2 桌面应用框架核心"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+    notes: "随包分发 Tauri 运行时与 WebView2，需遵循 Tauri 分发条款"
+
+  - name: tauri-plugin-dialog
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri-plugin-dialog"
+    scope: runtime
+    purpose: "系统文件对话框插件"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: tauri-plugin-fs
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri-plugin-fs"
+    scope: runtime
+    purpose: "文件系统访问插件"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: tauri-plugin-updater
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri-plugin-updater"
+    scope: runtime
+    purpose: "GitHub Releases 自动升级（minisign 签名校验）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: tauri-plugin-process
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri-plugin-process"
+    scope: runtime
+    purpose: "升级完成后重启应用"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: tauri-build
+    version: "2"
+    locked_version: "2.x"
+    license: "Apache-2.0 OR MIT"
+    source: "https://crates.io/crates/tauri-build"
+    scope: build
+    purpose: "Tauri 构建脚本（代码生成、资源绑定）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: rusqlite
+    version: "0.32"
+    locked_version: "0.32.x"
+    license: "MIT"
+    source: "https://crates.io/crates/rusqlite"
+    scope: runtime
+    purpose: "曲库持久化（bundled SQLite amalgamation）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+    notes: "SQLite 本身为公有领域（Public Domain），rusqlite 绑定为 MIT"
+
+  - name: serde
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/serde"
+    scope: runtime
+    purpose: "序列化/反序列化框架"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: serde_json
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/serde_json"
+    scope: runtime
+    purpose: "JSON 序列化"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: thiserror
+    version: "2"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/thiserror"
+    scope: runtime
+    purpose: "错误类型定义"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: rodio
+    version: "0.19"
+    locked_version: "0.19.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/rodio"
+    scope: runtime
+    purpose: "音频播放引擎封装（内置 symphonia 解码器）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: lofty
+    version: "0.22"
+    locked_version: "0.22.x"
+    license: "MPL-2.0"
+    source: "https://crates.io/crates/lofty"
+    scope: runtime
+    purpose: "音频元数据标签读取（标题/艺术家/专辑/封面）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+    notes: "弱 copyleft：修改 lofty 自身源码需开源，作为依赖调用无义务"
+
+  - name: sha2
+    version: "0.10"
+    locked_version: "0.10.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/sha2"
+    scope: runtime
+    purpose: "稳定曲目 ID 生成（基于文件路径哈希）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: byteorder
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT OR Apache-2.0 OR Unlicense"
+    source: "https://crates.io/crates/byteorder"
+    scope: runtime
+    purpose: "SACD ISO 解析（大端字节序读取）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: tokio
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT"
+    source: "https://crates.io/crates/tokio"
+    scope: runtime
+    purpose: "异步运行时（扫描任务等）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: chrono
+    version: "0.4"
+    locked_version: "0.4.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/chrono"
+    scope: runtime
+    purpose: "时间戳处理"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: rand
+    version: "0.8"
+    locked_version: "0.8.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/rand"
+    scope: runtime
+    purpose: "随机播放模式"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: notify
+    version: "6"
+    locked_version: "6.x"
+    license: "MIT"
+    source: "https://crates.io/crates/notify"
+    scope: runtime
+    purpose: "曲库目录自动监控与增量同步"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: regex
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/regex"
+    scope: runtime
+    purpose: "LRC 时间标签解析"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: rayon
+    version: "1"
+    locked_version: "1.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/rayon"
+    scope: runtime
+    purpose: "曲库扫描解析并行化（受控线程池）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: encoding_rs
+    version: "0.8"
+    locked_version: "0.8.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/encoding_rs"
+    scope: runtime
+    purpose: "文本编码自动识别（GBK/GB18030 等 CUE/LRC 文件）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: reqwest
+    version: "0.12"
+    locked_version: "0.12.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/reqwest"
+    scope: runtime
+    purpose: "在线歌词抓取（默认关闭，受设置开关控制）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: window-vibrancy
+    version: "0.8"
+    locked_version: "0.8.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/window-vibrancy"
+    scope: runtime
+    purpose: "原生窗口底纹（Windows Mica/Acrylic、macOS Vibrancy）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: windows
+    version: "0.54"
+    locked_version: "0.54.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://crates.io/crates/windows"
+    scope: runtime
+    purpose: "Windows 系统媒体控制（SMTC/任务栏/锁屏/耳机线控）"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+    notes: "仅 Windows 目标编译"
+
+# =============================================================================
+# 直接依赖 - 前端 (package.json)
+# 作用域：runtime = 生产运行时；dev = 开发/构建/测试
+# =============================================================================
+node_direct_dependencies:
+  - name: "@ffmpeg/core"
+    version: "^0.12.10"
+    locked_version: "0.12.x"
+    license: "LGPL-3.0"
+    source: "https://ffmpeg.org/"
+    scope: runtime
+    purpose: "前端 FFmpeg WebAssembly 核心库"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+    notes: "LGPL-3.0：作为独立 WASM 模块调用，随包分发需附带许可证文本与源码获取方式"
+
+  - name: "@ffmpeg/ffmpeg"
+    version: "^0.12.15"
+    locked_version: "0.12.x"
+    license: "LGPL-3.0"
+    source: "https://ffmpeg.org/"
+    scope: runtime
+    purpose: "前端 FFmpeg WASM 封装"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@ffmpeg/util"
+    version: "^0.12.2"
+    locked_version: "0.12.x"
+    license: "LGPL-3.0"
+    source: "https://ffmpeg.org/"
+    scope: runtime
+    purpose: "前端 FFmpeg 工具函数"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@tauri-apps/api"
+    version: "^2.10.1"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/api"
+    scope: runtime
+    purpose: "Tauri 前端 API"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@tauri-apps/plugin-dialog"
+    version: "^2.6.0"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/plugin-dialog"
+    scope: runtime
+    purpose: "Tauri 对话框插件前端绑定"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@tauri-apps/plugin-fs"
+    version: "2.6.0"
+    locked_version: "2.6.0"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/plugin-fs"
+    scope: runtime
+    purpose: "Tauri 文件系统插件前端绑定"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@tauri-apps/plugin-process"
+    version: "^2.4.0"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/plugin-process"
+    scope: runtime
+    purpose: "Tauri 进程插件前端绑定"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@tauri-apps/plugin-updater"
+    version: "2.13.1"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/plugin-updater"
+    scope: runtime
+    purpose: "Tauri 升级插件前端绑定"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: pinia
+    version: "^3.0.0"
+    locked_version: "3.x"
+    license: "MIT"
+    source: "https://pinia.vuejs.org/"
+    scope: runtime
+    purpose: "Vue 状态管理"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vue
+    version: "^3.5.29"
+    locked_version: "3.x"
+    license: "MIT"
+    source: "https://vuejs.org/"
+    scope: runtime
+    purpose: "前端 UI 框架"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vue-router
+    version: "^4.6.4"
+    locked_version: "4.x"
+    license: "MIT"
+    source: "https://router.vuejs.org/"
+    scope: runtime
+    purpose: "前端路由"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vue-virtual-scroller
+    version: "^2.0.0-beta.8"
+    locked_version: "2.0.0-beta.8"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/vue-virtual-scroller"
+    scope: runtime
+    purpose: "长列表虚拟滚动"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+node_dev_dependencies:
+  - name: "@tauri-apps/cli"
+    version: "^2.10.1"
+    locked_version: "2.x"
+    license: "MIT OR Apache-2.0"
+    source: "https://www.npmjs.com/package/@tauri-apps/cli"
+    scope: dev
+    purpose: "Tauri 命令行构建工具"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@types/node"
+    version: "^22.0.0"
+    locked_version: "22.x"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/@types/node"
+    scope: dev
+    purpose: "Node.js TypeScript 类型定义"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@vitejs/plugin-vue"
+    version: "^6.0.4"
+    locked_version: "6.x"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/@vitejs/plugin-vue"
+    scope: dev
+    purpose: "Vite Vue 插件"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "@vue/test-utils"
+    version: "^2.5.1"
+    locked_version: "2.x"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/@vue/test-utils"
+    scope: dev
+    purpose: "Vue 组件测试工具"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: jsdom
+    version: "^26.1.0"
+    locked_version: "26.x"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/jsdom"
+    scope: dev
+    purpose: "测试环境 DOM 模拟"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: typescript
+    version: "^5.9.3"
+    locked_version: "5.x"
+    license: "Apache-2.0"
+    source: "https://www.typescriptlang.org/"
+    scope: dev
+    purpose: "TypeScript 编译器与类型检查"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vite
+    version: "^6.0.0"
+    locked_version: "6.x"
+    license: "MIT"
+    source: "https://vitejs.dev/"
+    scope: dev
+    purpose: "前端构建工具与开发服务器"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vitest
+    version: "^3.2.7"
+    locked_version: "3.x"
+    license: "MIT"
+    source: "https://vitest.dev/"
+    scope: dev
+    purpose: "前端单元测试框架"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: vue-tsc
+    version: "^2.2.0"
+    locked_version: "2.x"
+    license: "MIT"
+    source: "https://www.npmjs.com/package/vue-tsc"
+    scope: dev
+    purpose: "Vue TypeScript 类型检查"
+    maintainer: "@tech-lead"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+# =============================================================================
+# 随包分发二进制（Bundled Binaries）
+# 需随安装包附带许可证文本与源码获取方式
+# =============================================================================
+bundled_binaries:
+  - name: ffmpeg
+    version: "6.x"
+    license: "LGPL-2.1"
+    source: "https://ffmpeg.org/download.html"
+    purpose: "非原生格式音频解码子进程（后端调用）"
+    notes: "独立进程调用，非静态链接。随包分发需附带 LGPL-2.1 全文与对应源码获取方式（官网链接或随包压缩包）"
+    sha256: "PLACEHOLDER - 发布前填入实际文件哈希"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: sacd_extract
+    version: "unspecified"
+    license: "GPL-3.0"
+    source: "https://github.com/sacd-ripper/sacd-ripper"
+    purpose: "SACD DST 压缩区与多声道区外部解码"
+    notes: "独立进程调用，非链接。随包分发需附带 GPL-3.0 全文与完整对应源码（或书面提供要约），并注明是否修改"
+    sha256: "PLACEHOLDER - 发布前填入实际文件哈希"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+# =============================================================================
+# 第三方引用代码（Third-Party Code References）
+# 从互联网、AI 工具、技术博客等复制或改写的代码片段/算法
+# =============================================================================
+third_party_code:
+  - name: "scarletbook DSD demux reference"
+    source: "https://github.com/sacd-ripper/sacd-ripper"
+    license: "GPL-3.0 (reference only)"
+    purpose: "DSD 扇区结构参考（对照 sacd-ripper 的 C 代码与 sacd_extract 输出做基准校验）"
+    notes: "本项目为独立重写实现，未复制 sacd-ripper 源码，不构成衍生作品"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "Robert Bristow-Johnson EQ cookbook"
+    source: "https://www.w3.org/TR/Audio-EQ-Cookbook/"
+    license: "Public Domain / algorithm"
+    purpose: "峰值滤波器系数公式（Biquad EQ）"
+    notes: "算法公式，非代码复制，无许可证义务"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+  - name: "ITU-R BS.775 downmix"
+    source: "https://www.itu.int/rec/R-REC-BS.775"
+    license: "ITU standard"
+    purpose: "5.1 多声道下混为立体声系数"
+    notes: "国际标准算法，无代码复制，无许可证义务"
+    reviewed_at: "2026-10-29"
+    review_status: approved
+
+# =============================================================================
+# 许可证汇总统计
+# =============================================================================
+license_summary:
+  approved_count: 33
+  pending_count: 0
+  rejected_count: 0
+  unknown_count: 0
+  strong_copyleft:
+    - sacd_extract (GPL-3.0)
+    - ffmpeg (LGPL-2.1, weak copyleft)
+  commercial_restriction: []
+  notes: "所有直接依赖均为宽松许可或弱 copyleft，无强 copyleft 进入应用源码链路；随包二进制 ffmpeg/sacd_extract 为独立进程调用，不强制应用开源"

@@ -32,12 +32,66 @@ export function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
+/** 命令等待超时（后端未在期限内返回时解除前端等待） */
+export class IpcTimeoutError extends Error {
+  constructor(
+    public readonly command: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`命令 ${command} 超时（${timeoutMs}ms）`)
+    this.name = 'IpcTimeoutError'
+  }
+}
+
+/**
+ * 命令默认超时：仅解除**前端等待**，不取消后端任务。
+ *
+ * 必要性：播放命令在后端要打开文件、探测编码、拉起 ffmpeg（SACD 还需导出
+ * 分轨），极端情况可达数秒。若前端 Promise 无限挂起，状态机会永久停在
+ * `loading`——按钮点不动、进度条不动，用户唯一感受就是"界面卡死"。
+ * 超时后状态机回到可操作态并给出错误提示，滞后到达的真实结果仍会经
+ * `playback://event` 纠正界面（事件是后端推送，不受前端超时影响）。
+ */
+const DEFAULT_TIMEOUT_MS = 10_000
+
+/** 可能包含重量级准备工作的命令（ffmpeg 启动 / SACD 提取）使用更长等待上限 */
+export const LONG_RUNNING_TIMEOUT_MS = 30_000
+
 /** 调用后端命令；失败时抛出，由调用方决定是否降级 */
-export async function callCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export async function callCommand<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options?: { timeoutMs?: number },
+): Promise<T> {
   if (!isTauriRuntime()) {
     throw new IpcUnavailableError()
   }
-  return invoke<T>(command, args)
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  if (timeoutMs <= 0) {
+    return invoke<T>(command, args)
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new IpcTimeoutError(command, timeoutMs))
+    }, timeoutMs)
+    invoke<T>(command, args).then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 /** 调用后端命令并把结果规整为 AppResult<T>（不抛异常，供 UI 层直接消费） */
@@ -67,10 +121,12 @@ export function normalizeError(error: unknown): AppError {
     }
   }
 
+  const detail = error instanceof Error ? error.message : String(error)
   return {
     code: 'UNKNOWN',
-    message: '操作失败',
-    detail: error instanceof Error ? error.message : String(error),
+    // 兜底：把真实错误文本带出来，避免只显示笼统的“操作失败”导致无法定位
+    message: detail && detail !== 'undefined' && detail !== 'null' ? detail : '操作失败',
+    detail,
   }
 }
 

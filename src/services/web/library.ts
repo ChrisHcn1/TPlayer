@@ -153,33 +153,24 @@ export const webLibrary = {
     return exists ? syntheticCover(artist, artist) : null
   },
 
-  async albums(): Promise<Album[]> {
+  async aggregates(): Promise<{
+    albums: Album[]
+    cueAlbums: Album[]
+    sacdAlbums: Album[]
+    artists: Artist[]
+    stats: LibraryStats
+  }> {
     const tracks = visibleTracks()
-    // 普通专辑视图排除 CUE / SACD 专辑（均由独立入口承载）
-    return aggregateAlbums(tracks).filter(
-      (album) => !CUE_ALBUM_IDS.has(album.id) && !SACD_ALBUM_IDS.has(album.id),
-    )
-  },
-
-  async cueAlbums(): Promise<Album[]> {
-    const tracks = visibleTracks()
-    return aggregateAlbums(tracks).filter((album) => CUE_ALBUM_IDS.has(album.id))
-  },
-
-  async sacdAlbums(): Promise<Album[]> {
-    const tracks = visibleTracks()
-    return aggregateAlbums(tracks).filter((album) => SACD_ALBUM_IDS.has(album.id))
-  },
-
-  async artists(): Promise<Artist[]> {
-    return aggregateArtists(visibleTracks())
-  },
-
-  async stats(): Promise<LibraryStats> {
-    const tracks = visibleTracks()
-    const albums = aggregateAlbums(tracks)
-    const artists = aggregateArtists(tracks)
-    return buildStats(tracks, albums, artists)
+    const allAlbums = aggregateAlbums(tracks)
+    return {
+      albums: allAlbums.filter(
+        (album) => !CUE_ALBUM_IDS.has(album.id) && !SACD_ALBUM_IDS.has(album.id),
+      ),
+      cueAlbums: allAlbums.filter((album) => CUE_ALBUM_IDS.has(album.id)),
+      sacdAlbums: allAlbums.filter((album) => SACD_ALBUM_IDS.has(album.id)),
+      artists: aggregateArtists(tracks),
+      stats: buildStats(tracks, allAlbums, aggregateArtists(tracks)),
+    }
   },
 
   /* ---- 收藏 ---- */

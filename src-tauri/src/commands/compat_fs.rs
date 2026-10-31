@@ -28,7 +28,7 @@ fn ensure_library_path(state: &AppState, path: &str) -> AppResult<std::path::Pat
     let normalized = security::normalize(Path::new(path))?;
     let norm = normalize_path_str(path);
 
-    if state.library.lock().unwrap().has_file_path(path) {
+    if state.library.lock().unwrap_or_else(|e| e.into_inner()).has_file_path(path) {
         return Ok(normalized);
     }
 

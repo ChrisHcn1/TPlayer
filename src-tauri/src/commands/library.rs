@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::cover;
 use crate::error::{AppError, AppResult};
 use crate::library::models::{
-    disc_key, Album, Artist, LibraryStats, Playlist, RecentEntry, ScanProgress, ScanStage, Track,
+    disc_key, Playlist, RecentEntry, ScanProgress, ScanStage, Track,
 };
 use crate::library::scan::{self, collect_import_tracks, list_cue_files, parse_track, scan_directory};
 use crate::library::verify;
@@ -46,6 +46,7 @@ fn scan_library_sync(app: &AppHandle, force: bool) -> AppResult<()> {
             .map(PathBuf::from)
             .collect()
     };
+    eprintln!("[scan-debug] scan_library_sync ENTRY: roots={:?} force={}", roots, force);
 
     if roots.is_empty() {
         return Err(AppError::Library("未配置曲库目录，请先在设置中添加".into()));
@@ -112,7 +113,7 @@ fn scan_library_sync(app: &AppHandle, force: bool) -> AppResult<()> {
     // （`force` 或根目录配置发生变化、或无历史记录时走完整增量扫描。）
     if !force {
         let prev = {
-            let g = state.library.lock().unwrap();
+            let g = state.library.lock().unwrap_or_else(|e| e.into_inner());
             g.load_scan_roots()
         };
         let all_stable = match &prev {
@@ -126,19 +127,36 @@ fn scan_library_sync(app: &AppHandle, force: bool) -> AppResult<()> {
             }
             None => false,
         };
+        eprintln!("[scan-debug] stable-check: force={} all_stable={}", force, all_stable);
         if all_stable {
             // 直接复用：从 DB 装载曲目到播放器（与上次一致），不发任何扫描进度，
             // 前端因此不进入「扫描中」态——用户无感知地即时可用，免去等候。
             let tracks = {
-                let g = state.library.lock().unwrap();
+                let g = state.library.lock().unwrap_or_else(|e| e.into_inner());
                 g.tracks()
             };
+            eprintln!("[scan-debug] STABLE-SKIP: reusing DB (no scan). tracks by root:");
+            {
+                let mut bk: Vec<(String, usize)> =
+                    roots.iter().map(|r| (r.to_string_lossy().to_string(), 0)).collect();
+                for t in &tracks {
+                    for b in bk.iter_mut() {
+                        if t.file_path.starts_with(&b.0) {
+                            b.1 += 1;
+                            break;
+                        }
+                    }
+                }
+                for (r, c) in &bk {
+                    eprintln!("[scan-debug]   root {r} = {c}");
+                }
+            }
             state.player.lock().unwrap().set_tracks(tracks);
             // 仅当确有未完成的 SACD 占位（如首次扫描中途被中断、ISO 尚未拆轨）
             // 才补跑一次解析；曲库未变且已解析完时完全跳过，**避免每次启动都无谓地
             // 触发 SACD 解析线程 —— 这是「曲库没变就不浪费系统资源」的关键一环。
             let has_pending_sacd = {
-                let g = state.library.lock().unwrap();
+                let g = state.library.lock().unwrap_or_else(|e| e.into_inner());
                 g.pending_tracks().iter().any(|t| t.iso_placeholder)
             };
             if has_pending_sacd {
@@ -155,12 +173,28 @@ fn scan_library_sync(app: &AppHandle, force: bool) -> AppResult<()> {
     // force = 真正的全量重解析（传标志，基线仍保留）：逐文件 mtime 跳过全部失效，
     // 否则 lab 开关切换后的强扫不会重新解析未变更文件，增强解析与入队都不生效。
     // 基线保留 → 删除检测照常；ISO 的 unchanged 仍按 mtime 判定 → 不触发重复拆轨。
-    let snapshot = state.library.lock().unwrap().scan_snapshot();
-    let result = scan_directory(&roots, &snapshot, app, force);
+    let snapshot = state.library.lock().unwrap_or_else(|e| e.into_inner()).scan_snapshot();
+    let result = scan_directory(&roots, &snapshot, app, force, &state.scan_cancel);
     let changed = result.changed_count;
 
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.apply_scan(&result.upserts, &result.removed_ids)?;
+    eprintln!("[scan-debug] FULL-SCAN committed: upserts={} removed={}", result.upserts.len(), result.removed_ids.len());
+    {
+        let mut bk: Vec<(String, usize)> =
+            roots.iter().map(|r| (r.to_string_lossy().to_string(), 0)).collect();
+        for t in &result.upserts {
+            for b in bk.iter_mut() {
+                if t.file_path.starts_with(&b.0) {
+                    b.1 += 1;
+                    break;
+                }
+            }
+        }
+        for (r, c) in &bk {
+            eprintln!("[scan-debug]   upsert by root {r} = {c}");
+        }
+    }
 
     // 本次扫描成功提交 → 记为「好状态」快照（崩溃回退的还原点，内部 5 分钟节流）
     library.commit_good_snapshot();
@@ -204,7 +238,7 @@ pub(crate) fn spawn_sacd_resolve(app: &AppHandle) {
             return;
         };
         let isos: Vec<Track> = {
-            let library = state.library.lock().unwrap();
+            let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
             library
                 .pending_tracks()
                 .into_iter()
@@ -334,7 +368,7 @@ pub(crate) fn spawn_lazy_backfill(
         let mut processed = 0u32;
         // 库内已入库的 CUE 分轨（增量局部发现时用于清理失效分轨）
         let known_cue_tracks = {
-            let library = app_state.library.lock().unwrap();
+            let library = app_state.library.lock().unwrap_or_else(|e| e.into_inner());
             library.cue_tracks()
         };
         let mut ctx = ResolveContext::new(known_cue_tracks, true);
@@ -849,7 +883,7 @@ pub async fn library_resolve_tracks(app: AppHandle, ids: Vec<String>) -> AppResu
         let state = app.state::<AppState>();
         let mut upserts: Vec<Track> = Vec::new();
         for id in &ids {
-            let Some(track) = state.library.lock().unwrap().get_track(id) else {
+            let Some(track) = state.library.lock().unwrap_or_else(|e| e.into_inner()).get_track(id) else {
                 continue;
             };
             // 已解析曲目：仅当文本元数据仍为未知占位时重读文件头（预加载 / 滚动可见）；
@@ -892,7 +926,7 @@ pub async fn library_resolve_tracks(app: AppHandle, ids: Vec<String>) -> AppResu
 /// 返回可播放的曲目列表：解析失败时返回原占位（前端提示暂不可解析）。
 fn resolve_one(app_state: &AppState, id: &str) -> Vec<Track> {
     let (placeholder, known_cue_tracks) = {
-        let library = app_state.library.lock().unwrap();
+        let library = app_state.library.lock().unwrap_or_else(|e| e.into_inner());
         (library.get_track(id), library.cue_tracks())
     };
     let Some(placeholder) = placeholder else {
@@ -961,7 +995,7 @@ pub async fn library_tracks(app: AppHandle) -> AppResult<Vec<Track>> {
     // 重查询放到阻塞线程池，避免加载期间阻塞主线程 / 事件循环导致界面卡住
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().tracks())
+        Ok(state.library.lock().unwrap_or_else(|e| e.into_inner()).tracks())
     })
     .await
     .map_err(|e| AppError::Library(format!("查询曲目失败: {e}")))?
@@ -1052,7 +1086,7 @@ pub async fn library_cover(
 
     // 取曲目与在线开关后立即释放锁（不得跨 await 持锁）
     let (track, online_enabled) = {
-        let library = state.library.lock().unwrap();
+        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         let config = state.config.lock().unwrap();
         let enabled = config.online.enabled
             && !config.online.provider.is_empty()
@@ -1189,7 +1223,7 @@ pub async fn library_album_cover(
     album_id: String,
 ) -> AppResult<Option<String>> {
     let (tracks, online_enabled) = {
-        let library = state.library.lock().unwrap();
+        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         let config = state.config.lock().unwrap();
         let enabled = config.online.enabled
             && !config.online.provider.is_empty()
@@ -1206,7 +1240,7 @@ pub async fn library_artist_cover(
     artist: String,
 ) -> AppResult<Option<String>> {
     let (tracks, online_enabled) = {
-        let library = state.library.lock().unwrap();
+        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         let config = state.config.lock().unwrap();
         let enabled = config.online.enabled
             && !config.online.provider.is_empty()
@@ -1216,61 +1250,22 @@ pub async fn library_artist_cover(
     load_group_cover_path(&state, &format!("artist:{artist}"), tracks, online_enabled).await
 }
 
+/// 聚合查询：一次返回专辑 / CUE 专辑 / SACD 专辑 / 艺术家 / 统计，
+/// 前端 `refreshAggregates()` 改为调用此单一命令，避免 5 次独立 IPC
+/// 在大曲库下重复执行相似去重 SQL，减少主线程与数据库压力。
 #[tauri::command]
-pub async fn library_albums(app: AppHandle) -> AppResult<Vec<Album>> {
+pub async fn library_aggregates(app: AppHandle) -> AppResult<crate::library::store::LibraryAggregates> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().albums())
+        Ok(state.library.lock().unwrap_or_else(|e| e.into_inner()).aggregates())
     })
     .await
-    .map_err(|e| AppError::Library(format!("查询专辑失败: {e}")))?
-}
-
-#[tauri::command]
-pub async fn library_artists(app: AppHandle) -> AppResult<Vec<Artist>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().artists())
-    })
-    .await
-    .map_err(|e| AppError::Library(format!("查询艺术家失败: {e}")))?
-}
-
-#[tauri::command]
-pub async fn library_stats(app: AppHandle) -> AppResult<LibraryStats> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().stats())
-    })
-    .await
-    .map_err(|e| AppError::Library(format!("查询统计失败: {e}")))?
-}
-
-/// CUE 分轨专辑（M2 返回空）
-#[tauri::command]
-pub async fn library_cue_albums(app: AppHandle) -> AppResult<Vec<Album>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().cue_albums())
-    })
-    .await
-    .map_err(|e| AppError::Library(format!("查询 CUE 专辑失败: {e}")))?
-}
-
-/// SACD ISO 分轨专辑（整张 ISO 拆出的虚拟多轨专辑）
-#[tauri::command]
-pub async fn library_sacd_albums(app: AppHandle) -> AppResult<Vec<Album>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>().inner();
-        Ok(state.library.lock().unwrap().sacd_albums())
-    })
-    .await
-    .map_err(|e| AppError::Library(format!("查询 SACD 专辑失败: {e}")))?
+    .map_err(|e| AppError::Library(format!("查询聚合失败: {e}")))?
 }
 
 #[tauri::command]
 pub fn library_favorite_ids(state: State<'_, AppState>) -> AppResult<Vec<String>> {
-    Ok(state.library.lock().unwrap().favorite_ids())
+    Ok(state.library.lock().unwrap_or_else(|e| e.into_inner()).favorite_ids())
 }
 
 #[tauri::command]
@@ -1279,19 +1274,19 @@ pub fn library_set_favorite(
     track_id: String,
     favorite: bool,
 ) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.set_favorite(&track_id, favorite)?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn library_recent(state: State<'_, AppState>) -> AppResult<Vec<RecentEntry>> {
-    Ok(state.library.lock().unwrap().recent())
+    Ok(state.library.lock().unwrap_or_else(|e| e.into_inner()).recent())
 }
 
 #[tauri::command]
 pub fn library_record_played(state: State<'_, AppState>, track_id: String) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     // 自动记录，失败（如曲目刚被删除导致外键不匹配）不应打断播放流程
     let _ = library.record_played(&track_id);
     Ok(())
@@ -1299,7 +1294,7 @@ pub fn library_record_played(state: State<'_, AppState>, track_id: String) -> Ap
 
 #[tauri::command]
 pub fn library_remove_tracks(state: State<'_, AppState>, ids: Vec<String>) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.remove_tracks(&ids)?;
     Ok(())
 }
@@ -1320,7 +1315,7 @@ pub fn library_add_dir(state: State<'_, AppState>, path: String) -> AppResult<()
 #[tauri::command]
 pub fn library_remove_dir(state: State<'_, AppState>, path: String) -> AppResult<()> {
     {
-        let mut library = state.library.lock().unwrap();
+        let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         library.remove_tracks_under_dir(&path)?;
     }
     {
@@ -1333,7 +1328,7 @@ pub fn library_remove_dir(state: State<'_, AppState>, path: String) -> AppResult
 
 #[tauri::command]
 pub fn library_list_playlists(state: State<'_, AppState>) -> AppResult<Vec<Playlist>> {
-    Ok(state.library.lock().unwrap().playlists())
+    Ok(state.library.lock().unwrap_or_else(|e| e.into_inner()).playlists())
 }
 
 #[tauri::command]
@@ -1341,7 +1336,7 @@ pub fn library_create_playlist(
     state: State<'_, AppState>,
     name: String,
 ) -> AppResult<Playlist> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     let playlist = library.create_playlist(name)?;
     Ok(playlist)
 }
@@ -1352,7 +1347,7 @@ pub fn library_rename_playlist(
     id: String,
     name: String,
 ) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.rename_playlist(&id, name)?;
     Ok(())
 }
@@ -1360,7 +1355,7 @@ pub fn library_rename_playlist(
 /// 删除歌单
 #[tauri::command]
 pub fn library_delete_playlist(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.delete_playlist(&id)?;
     Ok(())
 }
@@ -1371,7 +1366,7 @@ pub fn library_set_playlist_tracks(
     id: String,
     track_ids: Vec<String>,
 ) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.set_playlist_tracks(&id, track_ids)?;
     Ok(())
 }
@@ -1382,7 +1377,7 @@ pub fn library_add_tracks_to_playlist(
     id: String,
     track_ids: Vec<String>,
 ) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.add_tracks_to_playlist(&id, track_ids)?;
     Ok(())
 }
@@ -1393,7 +1388,7 @@ pub fn library_remove_track_from_playlist(
     id: String,
     track_id: String,
 ) -> AppResult<()> {
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.remove_track_from_playlist(&id, &track_id)?;
     Ok(())
 }
@@ -1417,7 +1412,7 @@ pub fn library_import_files(
     }
 
     // 写入曲库并刷新播放器曲目缓存（与 library_scan 同构）
-    let mut library = state.library.lock().unwrap();
+    let mut library = state.library.lock().unwrap_or_else(|e| e.into_inner());
     library.apply_scan(&upserts, &[])?;
     let tracks = library.tracks();
     drop(library);
@@ -1599,7 +1594,7 @@ pub async fn library_track_info(
     track_id: String,
 ) -> AppResult<Option<TrackInfo>> {
     // 1. 查曲库缓存（路径 / 基础字段）
-    let track = match state.library.lock().unwrap().get_track(&track_id) {
+    let track = match state.library.lock().unwrap_or_else(|e| e.into_inner()).get_track(&track_id) {
         Some(t) => t,
         None => return Ok(None),
     };

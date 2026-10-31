@@ -5,7 +5,7 @@ dist-ssr
 *.local
 
 # Linux DEB 打包中间目录与产物
-build/deb-stage/
+build/
 dist/linux/
 
 # Rust / Tauri
@@ -70,6 +70,13 @@ sdsdec.c
 dst_test.c
 *.patch
 tauri-dev.err
+
+# 官网静态站（独立部署到 tplayer.gleckes.cn，不随应用仓库提交）
+website/
+
+# 本地打包产物（安装包 / MSIX / 签名证书私钥，均不入库）
+build/
+tplayer.zip
 
 # 编辑器
 .vscode/*

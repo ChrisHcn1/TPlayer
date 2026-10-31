@@ -28,3 +28,14 @@ Description: 本地优先的桌面音乐播放器（Tauri 2 + Rust）
  功能特性：曲库扫描与目录监控、播放队列与四种播放模式、交叉淡化、ReplayGain
  音量归一化、播放倍速、逐曲进度与拖动定位、内嵌/边车/在线封面、LRC 歌词
  （内嵌/边车/在线）、系统托盘与桌面歌词条。
+Description-en: Local-first desktop music player (Tauri 2 + Rust)
+ TPlayer is a local-first desktop music player: the local library is decoupled from online
+ features, online modules are disabled by default and local library information is never
+ uploaded. Native support for MP3/FLAC/WAV/AAC/OGG/Opus; APE/DSD/DTS/WMA/WV/TTA/TAK/AIFF
+ are decoded via FFmpeg (bundled with the package or taken from the system). All library
+ data is kept on this machine only.
+ .
+ Features: library scanning and directory monitoring, play queue with four playback modes,
+ crossfade, ReplayGain volume normalisation, playback speed, per-track progress and seeking,
+ embedded/sidecar/online cover art, LRC lyrics (embedded/sidecar/online), system tray and
+ desktop lyrics bar.

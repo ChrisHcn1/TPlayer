@@ -169,28 +169,68 @@ function onSort(field: TrackSortField): void {
   }
 }
 
+/** 排序结果缓存：仅在 tracks 引用 / 排序字段 / 排序方向变化时重排 */
+interface SortCache {
+  tracksRef: Track[]
+  sortField: TrackSortField | null
+  sortDir: SortDirection
+  result: Track[]
+}
+const sortCache = ref<SortCache | null>(null)
+
 const sortedTracks = computed<Track[]>(() => {
   if (!sortField.value) return props.tracks
+
+  const cache = sortCache.value
+  if (
+    cache &&
+    cache.tracksRef === props.tracks &&
+    cache.sortField === sortField.value &&
+    cache.sortDir === sortDir.value
+  ) {
+    return cache.result
+  }
+
   const field = sortField.value
   const dir = sortDir.value === 'asc' ? 1 : -1
-  const value = (track: Track): string | number => {
+
+  // 预计算排序键，避免 localeCompare 在 sort 回调中反复调用（O(n log n) → O(n)）
+  const keyed = props.tracks.map((track) => {
+    let value: string | number
     switch (field) {
       case 'title':
-        return track.title
+        value = track.title
+        break
       case 'artist':
-        return track.artists[0] ?? ''
+        value = track.artists[0] ?? ''
+        break
       case 'album':
-        return track.album
+        value = track.album
+        break
       case 'duration':
-        return track.duration
+        value = track.duration
+        break
     }
-  }
-  return [...props.tracks].sort((a, b) => {
-    const va = value(a)
-    const vb = value(b)
-    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
-    return String(va).localeCompare(String(vb), 'zh-Hans-CN') * dir
+    return { track, value }
   })
+
+  keyed.sort((a, b) => {
+    if (typeof a.value === 'number' && typeof b.value === 'number') {
+      return (a.value - b.value) * dir
+    }
+    return String(a.value).localeCompare(String(b.value), 'zh-Hans-CN') * dir
+  })
+
+  const result = keyed.map((k) => k.track)
+
+  sortCache.value = {
+    tracksRef: props.tracks,
+    sortField: sortField.value,
+    sortDir: sortDir.value,
+    result,
+  }
+
+  return result
 })
 
 /**

@@ -181,7 +181,7 @@ function onFitChange(fit: 'cover' | 'contain'): void {
 <template>
   <div class="lab">
     <div class="lab__intro">
-      实验室功能默认关闭、与现有功能隔离，开启后即可体验；成熟后并入正式版。
+      实验室模式：更多功能正在酝酿中，敬请期待。实验室功能默认关闭、与现有功能隔离，开启后即可体验；成熟后并入正式版。
     </div>
 
     <div v-for="f in topFeatures" :key="f.id" class="lab__card">

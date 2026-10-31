@@ -16,7 +16,9 @@ Comment=本地优先的桌面音乐播放器
 Comment[zh_CN]=本地优先的桌面音乐播放器，曲库与在线能力解耦
 Exec=@BIN_NAME@ %U
 TryExec=@BIN_NAME@
-Icon=tplayer
+# 使用绝对路径指向已安装的 hicolor 图标：不依赖当前图标主题的回退/缓存，
+# 任何桌面环境（GNOME/KDE/XFCE）都能稳定显示图标。
+Icon=@PREFIX@/share/icons/hicolor/256x256/apps/tplayer.png
 Terminal=false
 StartupNotify=true
 StartupWMClass=@WM_CLASS@

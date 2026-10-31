@@ -36,6 +36,8 @@ const DURATION_TOLERANCE_MS: i64 = 3000;
 const TITLE_SIM_THRESHOLD: f64 = 0.8;
 /// 批大小：每批回写一次 + 批间限速
 const BATCH_SIZE: usize = 50;
+/// 单批内并发搜索数（避免串行联网导致大量曲目识别总耗时过长）
+const CONCURRENCY: usize = 3;
 
 /// 待在线校验条目
 #[derive(Debug, Clone)]
@@ -293,11 +295,13 @@ fn now_str() -> String {
         .to_string()
 }
 
-/// 后台校验主循环：串行请求、批间限速、逐批回写。
+/// 后台校验主循环：受控并发搜索、批间限速、逐批回写、进度实时上报。
 async fn run(app: AppHandle, queue: Vec<PendingVerify>, gen: u64) {
     RUNNING.store(true, Ordering::SeqCst);
     let mut verified = 0usize;
     let mut failed = 0usize;
+    let mut processed = 0usize;
+    let total = queue.len();
 
     for batch in queue.chunks(BATCH_SIZE) {
         // 开关关闭 / 已被新任务取代 → 中止（未处理条目保留在队列外：
@@ -309,19 +313,54 @@ async fn run(app: AppHandle, queue: Vec<PendingVerify>, gen: u64) {
             return;
         }
 
+        // 单批内受控并发搜索：CONCURRENCY 个条目同时联网，其余等待槽位释放
         let mut updates: Vec<Track> = Vec::new();
-        for item in batch {
-            if !ENHANCED_METADATA.load(Ordering::SeqCst)
-                || GENERATION.load(Ordering::SeqCst) != gen
-            {
+        let mut batch_failed = 0usize;
+        let mut join_set: tokio::task::JoinSet<Outcome> = tokio::task::JoinSet::new();
+        let mut item_iter = batch.iter();
+
+        loop {
+            // 填满 JoinSet 到 CONCURRENCY
+            while join_set.len() < CONCURRENCY {
+                let Some(item) = item_iter.next() else {
+                    break;
+                };
+                if !ENHANCED_METADATA.load(Ordering::SeqCst)
+                    || GENERATION.load(Ordering::SeqCst) != gen
+                {
+                    break;
+                }
+                let app_clone = app.clone();
+                let item = item.clone();
+                join_set.spawn(async move {
+                    verify_one(&app_clone, item, VerifyMode::Auto).await
+                });
+            }
+            if join_set.is_empty() {
                 break;
             }
-            match verify_one(&app, item.clone(), VerifyMode::Auto).await {
-                Outcome::Updated(track) => updates.push(*track),
-                Outcome::Failed(_) => failed += 1,
-                Outcome::Skip(_) => {}
+            // 等待至少一个任务完成
+            let outcome = join_set.join_next().await.transpose().unwrap_or(None);
+            match outcome {
+                Some(Outcome::Updated(track)) => updates.push(*track),
+                Some(Outcome::Failed(_)) => batch_failed += 1,
+                Some(Outcome::Skip(_)) => {}
+                None => {}
             }
+            processed += 1;
+            // 实时上报进度（每条完成后立即发送，前端可显示进度条）
+            let _ = app.emit(
+                "library://meta-verify-progress",
+                serde_json::json!({
+                    "processed": processed,
+                    "total": total,
+                    "verified": verified,
+                    "failed": failed,
+                }),
+            );
         }
+
+        failed += batch_failed;
 
         if !updates.is_empty() {
             verified += updates.len();
@@ -409,7 +448,17 @@ async fn verify_one(app: &AppHandle, item: PendingVerify, mode: VerifyMode) -> O
         .find(|a| !a.trim().is_empty() && a.trim() != "未知艺术家")
         .map(String::as_str)
         .unwrap_or("");
-    let hits = search_hits(&item.local_title, artist).await;
+    // 联网搜索失败时自动重试，指数退避：500ms → 1s，最多 3 次尝试
+    let mut hits = search_hits(&item.local_title, artist).await;
+    let mut retry_delay = Duration::from_millis(500);
+    for _ in 0..2 {
+        if !hits.is_empty() {
+            break;
+        }
+        tokio::time::sleep(retry_delay).await;
+        hits = search_hits(&item.local_title, artist).await;
+        retry_delay *= 2;
+    }
     if hits.is_empty() {
         return Outcome::Failed("联网搜索无结果".to_string());
     }

@@ -19,7 +19,7 @@ import type {
   PlayerCapabilities,
 } from '../types'
 
-import { callCommand, isTauriRuntime } from './ipc'
+import { LONG_RUNNING_TIMEOUT_MS, callCommand, isTauriRuntime } from './ipc'
 import { WebPlayer } from './web/player'
 
 /** 前端默认（未初始化）播放快照：后端快照到达前，UI 的稳定初值 */
@@ -37,6 +37,26 @@ export function createIdleSnapshot(): PlaybackSnapshot {
   }
 }
 
+/**
+ * 在途快照请求（单飞）。
+ *
+ * 后端 `player` 是单一互斥体，切歌 / 连点 / 事件回拉叠加时会产生多个并发的
+ * `player_snapshot`，全部排在播放命令后面争锁，反过来拉长"点下一首"的感知延迟。
+ * 这里把并发拉取合并成一次；结果返回后自动清空，不会读到过期值。
+ */
+let snapshotInFlight: Promise<PlaybackSnapshot> | null = null
+
+function requestSnapshot(): Promise<PlaybackSnapshot> {
+  if (snapshotInFlight) return snapshotInFlight
+  const pending = callCommand<PlaybackSnapshot>('player_snapshot')
+  snapshotInFlight = pending
+  const clear = (): void => {
+    if (snapshotInFlight === pending) snapshotInFlight = null
+  }
+  pending.then(clear, clear)
+  return pending
+}
+
 /** Tauri 实现：经 callCommand 调用 Rust 命令，subscribe 桥接 playback://event */
 const tauriPlayer: IPlayer = {
   subscribe(listener: (event: PlaybackEvent) => void): () => void {
@@ -51,16 +71,18 @@ const tauriPlayer: IPlayer = {
       unlisten?.()
     }
   },
-  init: () => callCommand<PlayContext | null>('player_init'),
+  init: () => callCommand<PlayContext | null>('player_init', undefined, { timeoutMs: LONG_RUNNING_TIMEOUT_MS }),
   capabilities: () => callCommand<PlayerCapabilities>('player_capabilities'),
-  snapshot: () => callCommand<PlaybackSnapshot>('player_snapshot'),
+  // 快照单飞：切歌、连点、事件回拉可能在同一瞬间发起多次拉取，
+  // 合并为一次在途请求可显著减少对后端 player 锁的争用。
+  snapshot: () => requestSnapshot(),
   play: (trackId: string, context?: PlayContext) =>
-    callCommand('player_play', { trackId, context }),
+    callCommand('player_play', { trackId, context }, { timeoutMs: LONG_RUNNING_TIMEOUT_MS }),
   pause: () => callCommand('player_pause'),
-  resume: () => callCommand('player_resume'),
+  resume: () => callCommand('player_resume', undefined, { timeoutMs: LONG_RUNNING_TIMEOUT_MS }),
   stop: () => callCommand('player_stop'),
-  next: () => callCommand('player_next'),
-  previous: () => callCommand('player_previous'),
+  next: () => callCommand('player_next', undefined, { timeoutMs: LONG_RUNNING_TIMEOUT_MS }),
+  previous: () => callCommand('player_previous', undefined, { timeoutMs: LONG_RUNNING_TIMEOUT_MS }),
   seek: (positionMs: number) => callCommand('player_seek', { positionMs }),
   setVolume: (volume: number) => callCommand('player_set_volume', { volume }),
   setMuted: (muted: boolean) => callCommand('player_set_muted', { muted }),

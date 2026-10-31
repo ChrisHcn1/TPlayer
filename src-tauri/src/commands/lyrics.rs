@@ -52,7 +52,7 @@ pub async fn lyrics_load(
 ) -> AppResult<Option<Lyrics>> {
     // 取出所需数据后立即释放锁（不得跨 await 持锁）
     let (track, online_enabled) = {
-        let library = state.library.lock().unwrap();
+        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         let config = state.config.lock().unwrap();
         let track = library.get_track(&track_id);
         let enabled = config.online.enabled && !config.online.provider.is_empty() && config.online.provider != "none";
@@ -129,7 +129,7 @@ pub async fn lyrics_sidecar_metadata(
     track_id: String,
 ) -> AppResult<Option<SidecarMeta>> {
     let track = {
-        let library = state.library.lock().unwrap();
+        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
         library.get_track(&track_id)
     };
     let Some(track) = track else {

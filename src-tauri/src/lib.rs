@@ -21,6 +21,7 @@ pub mod lyrics;
 pub mod player;
 pub mod replaygain;
 pub mod security;
+pub mod website;
 #[cfg(windows)]
 pub mod smtc;
 pub mod watch;
@@ -148,6 +149,21 @@ pub fn run() {
 
             app.manage(state);
 
+            // 首次安装完成后自动打开官网一次（此后每次启动都不再自动弹出）。
+            // 延迟 2s 再执行：让主窗口先呈现出来，避免浏览器窗口直接盖住应用。
+            // 「至多一次」由应用数据目录下的标记文件保证（见 crate::website）；
+            // 设 TPLAYER_SKIP_WELCOME=1 可跳过（开发 / 自动化环境自用）。
+            {
+                let data_dir = app_data_dir.clone();
+                std::thread::spawn(move || {
+                    if std::env::var_os("TPLAYER_SKIP_WELCOME").is_some() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    let _ = crate::website::open_welcome_once(&data_dir);
+                });
+            }
+
             // 目录自动监控：按配置启动监听（默认开启，曲库目录白名单变化时增量同步）
             // 注意：config 两项必须先取出再调用（同一表达式里两次 lock 同一 Mutex
             // 会因临时 MutexGuard 存活到语句结束而自死锁，卡死主线程）
@@ -170,7 +186,7 @@ pub fn run() {
                 std::thread::spawn(move || {
                     let state = app_bg.state::<AppState>();
                     let plan = {
-                        let library = state.library.lock().unwrap();
+                        let library = state.library.lock().unwrap_or_else(|e| e.into_inner());
                         library::scan::sacd_duration_plan(&library)
                     };
                     if plan.is_empty() {
@@ -266,7 +282,7 @@ pub fn run() {
                             }
                         };
                         if let Some(id) = target_id {
-                            let track = state.library.lock().unwrap().get_track(&id);
+                            let track = state.library.lock().unwrap_or_else(|e| e.into_inner()).get_track(&id);
                             if let Some(track) = track {
                                 let _ = state.player.lock().unwrap().play(&track, None, app);
                             }
@@ -330,7 +346,7 @@ pub fn run() {
                             .unwrap_or_default()
                             .to_string();
                         let state = app_for_events.state::<AppState>();
-                        let track = state.library.lock().unwrap().get_track(&track_id);
+                        let track = state.library.lock().unwrap_or_else(|e| e.into_inner()).get_track(&track_id);
                         let tooltip = match &track {
                             Some(t) => format!("TPlayer - {}", t.title),
                             None => "TPlayer".to_string(),
@@ -453,6 +469,8 @@ pub fn run() {
             commands::player::player_sleep_timer_status,
             commands::player::player_remove_from_queue,
             commands::player::player_dispose,
+            // 应用级（官网入口）
+            commands::app::open_external_url,
             // 曲库
             commands::library::library_scan,
             commands::library::library_cancel_scan,
@@ -460,11 +478,7 @@ pub fn run() {
             commands::library::library_cover,
             commands::library::library_album_cover,
             commands::library::library_artist_cover,
-            commands::library::library_albums,
-            commands::library::library_artists,
-            commands::library::library_stats,
-            commands::library::library_cue_albums,
-            commands::library::library_sacd_albums,
+            commands::library::library_aggregates,
             commands::library::library_favorite_ids,
             commands::library::library_set_favorite,
             commands::library::library_recent,

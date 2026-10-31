@@ -192,14 +192,22 @@ impl PlayerHandle {
     /// 查询曲目的有效续播位置（毫秒）；无记录/无效记录/CUE 分轨返回 0（从头播）。
     /// CUE 分轨的位置语义是文件绝对偏移、与子轨时间轴不一致，不参与续播记忆；
     /// 且统一走 ffmpeg 输入 seek 精确定位（含首轨 cue_offset=None 但 is_cue=true）。
-    fn resume_position_for(&self, track: &Track) -> u64 {
+    fn resume_position_for(&mut self, track: &Track) -> u64 {
         if track.is_cue || track.is_sacd {
             return 0;
         }
-        let Some(&pos) = self.track_positions.get(&track.id) else {
+        let Some(pos) = self.track_positions.get(&track.id).copied() else {
             return 0;
         };
-        persist::sanitize_resume_position(pos, (track.duration * 1000.0) as u64)
+        let valid = persist::sanitize_resume_position(pos, (track.duration * 1000.0) as u64);
+        if valid == 0 && pos != 0 {
+            // 记忆已失效（越界 / 距末尾不足末尾保护）：连带删除，避免坏记忆长期残留。
+            // 这类值多来自上一次异常播放（如白噪/中途异常退出），留着只会让下次
+            // 点播再度「从末尾起播、几秒后自动跳走」。
+            self.track_positions.remove(&track.id);
+            self.positions_dirty = true;
+        }
+        valid
     }
 
     /// 刷新曲目缓存（曲库扫描完成后调用）
@@ -285,7 +293,7 @@ impl PlayerHandle {
                 if !self.track_needs_compat(&track.id) && track.cue_offset.is_none() && !track.is_sacd {
                     let mut position_ms = state.position_ms;
                     let duration_ms = (track.duration * 1000.0) as u64;
-                    // 剩余不足 3s 视为已播完，从头开始；时长未知（0）时按原样恢复
+                    // 剩余不足末尾保护阈值（10s）视为已播完，从头开始；时长未知（0）时按原样恢复
                     if duration_ms > 0
                         && duration_ms.saturating_sub(position_ms) < persist::RESUME_END_GUARD_MS
                     {

@@ -19,6 +19,16 @@ use super::verify;
 
 use rayon::prelude::*;
 
+// ============ 扫描调试追踪（验证后可整体移除：仅 eprintln，不影响流程）============
+const SCAN_DEBUG: bool = true;
+macro_rules! sdbg {
+    ($($arg:tt)*) => {
+        if SCAN_DEBUG {
+            eprintln!("[scan-debug] {}", format_args!($($arg)*));
+        }
+    };
+}
+
 /// 实验室·元数据增强开关（默认关闭）。
 ///
 /// 由 `lib.rs` 启动与 `lab_set_feature` 同步，避免在所有 `parse_track` 调用点
@@ -122,10 +132,15 @@ pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
 pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut dirs_walked = 0usize;
     while let Some(dir) = stack.pop() {
+        dirs_walked += 1;
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                sdbg!("discover_audio: read_dir FAILED {dir:?} -> {e}");
+                continue;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -138,7 +153,16 @@ pub(crate) fn discover_audio_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    without_junk(files)
+    let before = files.len();
+    let out = without_junk(files);
+    sdbg!(
+        "discover_audio: root={:?} dirs_walked={} files_before_junk={} files_after_junk={}",
+        root,
+        dirs_walked,
+        before,
+        out.len()
+    );
+    out
 }
 
 /// 递归发现目录下所有 .cue 索引文件（扫描与拖拽导入通用，Release 同样启用）。
@@ -746,7 +770,9 @@ pub fn scan_directory(
     existing: &[(String, String, i64, bool)],
     app: &AppHandle,
     force: bool,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> ScanResult {
+    sdbg!("scan_directory ENTRY: roots_count={} force={} roots={:?}", roots.len(), force, roots);
     let mut progress = ScanProgress {
         stage: ScanStage::Discovering,
         processed: 0,
@@ -773,12 +799,15 @@ pub fn scan_directory(
         #[cfg(target_os = "linux")]
         {
             let discovery = super::scan_linux::discover_files_checked(root, SUPPORTED_EXT);
+            sdbg!("audio root={:?} discovered={} running_total={}", root, discovery.files.len(), all_audio.len() + discovery.files.len());
             all_audio.extend(discovery.files);
             dir_errors.extend(discovery.errors);
         }
         #[cfg(not(target_os = "linux"))]
         {
-            all_audio.extend(discover_audio_files(root));
+            let got = discover_audio_files(root);
+            sdbg!("audio root={:?} discovered={} running_total={}", root, got.len(), all_audio.len() + got.len());
+            all_audio.extend(got);
         }
     }
 
@@ -795,7 +824,9 @@ pub fn scan_directory(
     {
         let mut cue_files = Vec::new();
         for root in roots {
-            cue_files.extend(discover_cue_files(root));
+            let got = discover_cue_files(root);
+            sdbg!("cue root={:?} discovered={} running_total={}", root, got.len(), cue_files.len() + got.len());
+            cue_files.extend(got);
         }
         for cue in &cue_files {
             let tracks = super::cue::parse_cue(cue);
@@ -822,7 +853,9 @@ pub fn scan_directory(
     {
         let mut iso_files = Vec::new();
         for root in roots {
-            iso_files.extend(discover_sacd_files(root));
+            let got = discover_sacd_files(root);
+            sdbg!("iso root={:?} discovered={} running_total={}", root, got.len(), iso_files.len() + got.len());
+            iso_files.extend(got);
         }
         for iso in &iso_files {
             referenced.insert(norm_path_for_match(iso));
@@ -841,6 +874,7 @@ pub fn scan_directory(
     // 排除被 CUE / SACD 引用的镜像文件（规范化后比较，避免路径表示差异漏配，
     // 否则整碟大文件会与分轨重复出现在播放列表）；同目录同基名的其它镜像副本
     // （.ape / .flac 等）同样排除。
+    let audio_pre = all_audio.len();
     if !referenced.is_empty() || !referenced_discs.is_empty() {
         all_audio.retain(|p| {
             if referenced.contains(&norm_path_for_match(p)) {
@@ -852,6 +886,7 @@ pub fn scan_directory(
             }
         });
     }
+    sdbg!("referenced exclusion: all_audio {} -> {} (virtual CUE/SACD kept={})", audio_pre, all_audio.len(), virtual_tracks.len());
 
     progress.total = (all_audio.len() + virtual_tracks.len()) as u32;
     progress.stage = ScanStage::Parsing;
@@ -898,7 +933,14 @@ pub fn scan_directory(
     // 分块并行：每块完成即推送一次进度，避免大库解析期间进度条长时间无反馈
     const PARSE_CHUNK: usize = 256;
     let mut parsed_count = 0usize;
+    let mut cancelled = false;
     for chunk in to_parse.chunks(PARSE_CHUNK) {
+        // 取消检查：用户点击「取消扫描」后，立即终止后续分块解析，
+        // 已解析的曲目仍回写，避免界面长时间停留在「扫描中」无响应。
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            cancelled = true;
+            break;
+        }
         let parsed: Vec<Track> = match &pool {
             Some(pool) => pool.install(|| {
                 chunk
@@ -915,6 +957,26 @@ pub fn scan_directory(
         emit(app, &progress);
     }
 
+    if cancelled {
+        // 扫描被用户取消：已解析的曲目仍回写，但标记失败态让用户知晓，
+        // 并跳过后续虚拟分轨重新解析与删除检测（避免基于不完整集合误删）。
+        // 已发现的虚拟分轨（CUE / SACD）一并纳入，避免列表缺失这些条目。
+        upserts.extend(virtual_tracks.clone());
+        for t in &virtual_tracks {
+            seen_ids.insert(t.id.clone());
+        }
+        progress.error = Some("扫描已取消".to_string());
+        progress.stage = ScanStage::Failed;
+        progress.current_path = None;
+        emit(app, &progress);
+        let changed_count = upserts.len();
+        return ScanResult {
+            upserts,
+            removed_ids: Vec::new(),
+            changed_count,
+        };
+    }
+
     progress.current_path = None;
     progress.processed = (all_audio.len() + virtual_tracks.len()) as u32;
     emit(app, &progress);
@@ -923,6 +985,8 @@ pub fn scan_directory(
     for t in &virtual_tracks {
         seen_ids.insert(t.id.clone());
     }
+    let virtual_tracks_count = virtual_tracks.len();
+    let virtual_tracks_len = virtual_tracks_count;
     upserts.extend(virtual_tracks);
 
     // 删除检测：基线中存在、本轮未发现的曲目（按 id 判定，
@@ -933,16 +997,39 @@ pub fn scan_directory(
     //    下一轮全盘扫描扫不到，但文件仍在，绝不能连收藏/歌单一起级联清除；
     //  - 目录读取失败（权限 / 网络挂载掉线 / Linux NTFS 未挂载）时该目录下的文件
     //    只是"没被发现"，同样必须保留。
-    let mut removed_ids: Vec<String> = existing
-        .iter()
-        .filter(|(id, path, _, _)| {
-            let p = std::path::Path::new(path);
-            // 文件确实消失，或落在回收站/快照等垃圾目录（此前误入库）→ 清出曲库
-            !seen_ids.contains(id) && (!p.exists() || is_junk_path(p))
-        })
-        .map(|(id, _, _, _)| id.clone())
-        .collect();
-    removed_ids.sort();
+    //
+    // 防御性保护：如果本轮发现的文件数远少于库内已有记录（例如磁盘/网络盘
+    // 暂时不可读、权限不足），说明扫描结果不可信——此时**跳过所有删除**，
+    // 避免把整库误删成残缺（历史上曾因此把 2903 首删成 26 首）。
+    // 仅在发现数 >= 库内 1/4 时才允许按 removed_ids 删除。
+    let discovered_count = all_audio.len() + virtual_tracks_len;
+    let existing_count = existing.len();
+    let mass_delete_guard = existing_count > 0
+        && (discovered_count == 0 || discovered_count * 4 < existing_count);
+    let removed_ids: Vec<String> = if mass_delete_guard {
+        sdbg!(
+            "MASS-DELETE GUARD: discovered={} existing={} -> skip removals",
+            discovered_count,
+            existing_count
+        );
+        eprintln!(
+            "[scan-debug] MASS-DELETE GUARD triggered: discovered={} existing={} -> skipping removals",
+            discovered_count, existing_count
+        );
+        Vec::new()
+    } else {
+        let mut ids: Vec<String> = existing
+            .iter()
+            .filter(|(id, path, _, _)| {
+                let p = std::path::Path::new(path);
+                // 文件确实消失，或落在回收站/快照等垃圾目录（此前误入库）→ 清出曲库
+                !seen_ids.contains(id) && (!p.exists() || is_junk_path(p))
+            })
+            .map(|(id, _, _, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
 
     let changed_count = upserts.len();
     progress.stage = ScanStage::Writing;
@@ -958,6 +1045,29 @@ pub fn scan_directory(
     progress.stage = ScanStage::Done;
     progress.current_path = None;
     emit(app, &progress);
+
+    // 调试：按根拆分最终入库对象（验证后可整体移除）
+    {
+        let mut bk: Vec<(String, usize)> =
+            roots.iter().map(|r| (r.to_string_lossy().to_string(), 0)).collect();
+        for t in &upserts {
+            for b in bk.iter_mut() {
+                if t.file_path.starts_with(&b.0) {
+                    b.1 += 1;
+                    break;
+                }
+            }
+        }
+        sdbg!(
+            "RESULT: upserts={} (virtual CUE/SACD={}) removed_ids={}",
+            upserts.len(),
+            virtual_tracks_count,
+            removed_ids.len()
+        );
+        for (r, c) in &bk {
+            sdbg!("  upserts by root {r} = {c}");
+        }
+    }
 
     ScanResult {
         upserts,

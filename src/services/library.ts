@@ -35,13 +35,15 @@ export interface LibraryService {
   albumCover(albumId: string): Promise<string | null>
   /** 艺术家聚合封面（asset URL）：名下曲目专辑封面回退 */
   artistCover(artist: string): Promise<string | null>
-  albums(): Promise<Album[]>
-  artists(): Promise<Artist[]>
-  stats(): Promise<LibraryStats>
-  /** CUE 分轨专辑（普通专辑视图之外的独立集合） */
-  cueAlbums(): Promise<Album[]>
-  /** SACD ISO 分轨专辑（普通专辑视图之外的独立集合） */
-  sacdAlbums(): Promise<Album[]>
+  /** 聚合查询：一次返回专辑 / CUE 专辑 / SACD 专辑 / 艺术家 / 统计，
+   * 避免 5 次独立 IPC 在大曲库下重复执行相似去重 SQL */
+  aggregates(): Promise<{
+    albums: Album[]
+    cueAlbums: Album[]
+    sacdAlbums: Album[]
+    artists: Artist[]
+    stats: LibraryStats
+  }>
   favoriteIds(): Promise<string[]>
   setFavorite(trackId: string, favorite: boolean): Promise<void>
   recent(): Promise<RecentEntry[]>
@@ -77,11 +79,14 @@ const tauriLibrary: LibraryService = {
     callCommand<string | null>('library_album_cover', { albumId }).then(toAssetUrl),
   artistCover: (artist) =>
     callCommand<string | null>('library_artist_cover', { artist }).then(toAssetUrl),
-  albums: () => callCommand<Album[]>('library_albums'),
-  artists: () => callCommand<Artist[]>('library_artists'),
-  stats: () => callCommand<LibraryStats>('library_stats'),
-  cueAlbums: () => callCommand<Album[]>('library_cue_albums'),
-  sacdAlbums: () => callCommand<Album[]>('library_sacd_albums'),
+  aggregates: () =>
+    callCommand<{
+      albums: Album[]
+      cueAlbums: Album[]
+      sacdAlbums: Album[]
+      artists: Artist[]
+      stats: LibraryStats
+    }>('library_aggregates'),
   favoriteIds: () => callCommand<string[]>('library_favorite_ids'),
   setFavorite: (trackId, favorite) =>
     callCommand('library_set_favorite', { trackId, favorite }),

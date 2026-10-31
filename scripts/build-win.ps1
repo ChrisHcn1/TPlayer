@@ -33,7 +33,10 @@
 [CmdletBinding()]
 param(
     # 跳过依赖安装（CI 或已手动 npm ci 时使用）
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    # 打包目标：nsis / msix / all（默认 all）
+    [ValidateSet('nsis', 'msix', 'all')]
+    [string]$Target = 'all'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,19 +96,45 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'npm ci 失败' }
     }
 
-    Write-Host '[build] 开始 Tauri 构建（NSIS + 升级签名）…' -ForegroundColor Cyan
-    npm run tauri build
-    if ($LASTEXITCODE -ne 0) { throw 'tauri build 失败' }
+    # 确定打包目标
+    $targets = @()
+    if ($Target -eq 'all' -or $Target -eq 'nsis') { $targets += 'nsis' }
+    if ($Target -eq 'all' -or $Target -eq 'msix') { $targets += 'msix' }
 
-    $bundleDir = Join-Path $root 'src-tauri\target\release\bundle\nsis'
+    foreach ($t in $targets) {
+        Write-Host "[build] 开始 Tauri 构建（$t）…" -ForegroundColor Cyan
+
+        if ($t -eq 'msix') {
+            # MSIX 签名证书检查
+            $certFile = Join-Path $root 'src-tauri\..\build\TPlayerNext.pfx'
+            if (-not (Test-Path $certFile)) {
+                throw "MSIX 打包需要签名证书文件：$certFile 。请先生成或获取 PFX 证书（见 MSIX_CERT_PASSWORD 说明）。"
+            }
+            if ($null -eq $env:MSIX_CERT_PASSWORD) {
+                throw 'MSIX 打包需要设置环境变量 MSIX_CERT_PASSWORD（PFX 证书密码）。'
+            }
+        }
+
+        npm run tauri build
+        if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
+    }
+
     Write-Host ''
     Write-Host '[build] 构建完成，产物目录:' -ForegroundColor Green
-    Write-Host "  $bundleDir" -ForegroundColor Green
-    if (Test-Path $bundleDir) {
-        Get-ChildItem $bundleDir | ForEach-Object { Write-Host "  - $($_.Name)" }
+    foreach ($t in $targets) {
+        $bundleDir = Join-Path $root "src-tauri\target\release\bundle\$t"
+        Write-Host ("  {0}: {1}" -f $t, $bundleDir) -ForegroundColor Green
+        if (Test-Path $bundleDir) {
+            Get-ChildItem $bundleDir | ForEach-Object { Write-Host "    - $($_.Name)" }
+        }
     }
     Write-Host ''
-    Write-Host '发布到 GitHub Releases 时，请同时上传 *-setup.exe、*-setup.exe.sig，并更新 latest.json。' -ForegroundColor Yellow
+    if ($targets -contains 'nsis') {
+        Write-Host '发布到 GitHub Releases 时，请同时上传 *-setup.exe、*-setup.exe.sig，并更新 latest.json。' -ForegroundColor Yellow
+    }
+    if ($targets -contains 'msix') {
+        Write-Host 'MSIX 产物可用于 Microsoft Store 提交或企业内部分发（需配合可信证书签名）。' -ForegroundColor Yellow
+    }
 } finally {
     Pop-Location
 }

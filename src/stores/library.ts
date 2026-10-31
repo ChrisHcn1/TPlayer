@@ -127,6 +127,21 @@ function dedupeSongs(list: Track[]): Track[] {
   return out
 }
 
+/**
+ * 当前 `allTracks` 的去重键集合（增量合并时避免 O(n) 全量 `dedupeSongs`）。
+ * 与 `allTracks` 保持同步：每次 `allTracks` 被整体替换（refresh / 移除 / 元数据回填）
+ * 后调用 `syncDedupSeen` 重建；增量 `applyResolvedTracks` 时就地增删，确保准确性。
+ */
+const songDedupSeen = new Set<string>()
+
+function syncDedupSeen(list: Track[]): void {
+  songDedupSeen.clear()
+  for (const track of list) {
+    if (track.isSacd === true) continue
+    songDedupSeen.add(songDedupKey(track))
+  }
+}
+
 export const useLibraryStore = defineStore('library', () => {
   /**
    * 全量曲目（含 SACD 的 5.1 环绕轨）。
@@ -256,21 +271,24 @@ export const useLibraryStore = defineStore('library', () => {
     // 再把专辑 / 艺术家 / 统计等较慢的聚合转**后台**加载。避免「等所有聚合查询
     // 都跑完才出列表」——大库下那些 CTE 聚合可能好几秒，拖住整个首屏。
     let trackList: Track[] = []
-    let favs: string[] = []
     try {
-      ;[trackList, favs] = await Promise.all([
-        libraryService.tracks(),
-        libraryService.favoriteIds(),
-      ])
+      // 曲目列表是核心：单独加载，绝不被收藏等次要数据的失败连带阻断
+      trackList = await libraryService.tracks()
     } catch (cause) {
       error.value = normalizeError(cause).message
       loading.value = false
       return
     }
     allTracks.value = dedupeSongs(trackList)
+    syncDedupSeen(allTracks.value)
     // 普通列表剔除 SACD 5.1 环绕轨（与立体声区同曲目，只差 `[5.1]` 后缀）
     tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
-    favoriteIds.value = favs
+    // 收藏为次要数据：单独加载，失败只影响收藏标记，不影响曲目列表
+    try {
+      favoriteIds.value = await libraryService.favoriteIds()
+    } catch {
+      /* 收藏加载失败忽略：曲目列表已可用 */
+    }
     loading.value = false
     // 聚合 / 最近播放：后台加载，不阻塞列表；单个失败不影响列表可用
     void (async () => {
@@ -291,6 +309,8 @@ export const useLibraryStore = defineStore('library', () => {
     try {
       await libraryService.scan(force)
       await refresh()
+      // 扫描完成后显式刷新聚合（专辑/艺术家/统计），避免后台节流导致列表空
+      await refreshAggregates()
       // 后台补解析阶段（stage=backfilling）由后端事件驱动，
       // 不能被这里的 'done' 覆盖掉（否则「后台解析中 x/y」指示器会闪退）
       if (scanProgress.value.stage !== 'backfilling') {
@@ -381,15 +401,34 @@ export const useLibraryStore = defineStore('library', () => {
     const removedPaths = new Map<string, string>()
     if (removed.size > 0) {
       for (const track of allTracks.value) {
-        if (removed.has(track.id)) removedPaths.set(track.id, track.filePath)
+        if (removed.has(track.id)) {
+          removedPaths.set(track.id, track.filePath)
+          // 同步去重键集合：被移除的非 SACD 曲目其键应释放，避免后续增量合并误判
+          if (!track.isSacd) songDedupSeen.delete(songDedupKey(track))
+        }
       }
       allTracks.value = allTracks.value.filter((track) => !removed.has(track.id))
       tracks.value = tracks.value.filter((track) => !removed.has(track.id))
     }
     if (updated.length > 0) {
+      // 增量合并：基于 id 的 Map 替换 / 新增，配合 songDedupSeen 就地增删去重键，
+      // 避免每次回填批次都对全量曲目执行 O(n) 的 dedupeSongs 重建（大库回填期
+      // 的 O(n²) 抖动根因）。SACD 分轨不走跨目录去重，直接保留。
       const byId = new Map(allTracks.value.map((track) => [track.id, track]))
-      for (const track of updated) byId.set(track.id, track)
-      allTracks.value = dedupeSongs([...byId.values()])
+      for (const track of updated) {
+        // 同 id 替换：先清旧键，避免旧 key 残留导致新条目被误判重复
+        const existing = byId.get(track.id)
+        if (existing && !existing.isSacd) songDedupSeen.delete(songDedupKey(existing))
+        if (track.isSacd) {
+          byId.set(track.id, track)
+        } else {
+          const key = songDedupKey(track)
+          if (songDedupSeen.has(key)) continue // 与另一条不同曲目重复，跳过
+          songDedupSeen.add(key)
+          byId.set(track.id, track)
+        }
+      }
+      allTracks.value = [...byId.values()]
       // 普通列表剔除 SACD 5.1 环绕轨，保持与 refresh() 的过滤口径一致
       tracks.value = allTracks.value.filter((track) => !isSacdMultich(track))
     }
@@ -432,6 +471,8 @@ export const useLibraryStore = defineStore('library', () => {
     }
     apply(allTracks.value)
     apply(tracks.value)
+    // 元数据就地变更会改变去重键，重建 seen 集合保持增量去重准确
+    syncDedupSeen(allTracks.value)
   }
 
   /** 播放前解析占位轨道（两阶段懒加载 - 阶段二按需解析）；返回解析后的曲目列表 */
@@ -486,20 +527,32 @@ export const useLibraryStore = defineStore('library', () => {
   async function runAggregates(): Promise<void> {
     aggLastRun = Date.now()
     try {
-      const [albumList, cueList, sacdList, artistList, libraryStats] = await Promise.all([
-        libraryService.albums(),
-        libraryService.cueAlbums(),
-        libraryService.sacdAlbums(),
-        libraryService.artists(),
-        libraryService.stats(),
-      ])
+      // 单一聚合命令一次返回全部聚合数据，替代 5 次独立 IPC（albums/cueAlbums/sacdAlbums/artists/stats）
+      // 大曲库下避免重复执行相似去重 SQL，降低主线程与数据库压力
+      const {
+        albums: albumList,
+        cueAlbums: cueList,
+        sacdAlbums: sacdList,
+        artists: artistList,
+        stats: libraryStats,
+      } = await libraryService.aggregates()
       albums.value = albumList
       cueAlbums.value = cueList
       sacdAlbums.value = sacdList
       artists.value = artistList
       stats.value = libraryStats
+      // 诊断：聚合列表为空时打点（正常情况下不打，避免大库回填期刷屏）
+      if (albumList.length === 0 || artistList.length === 0 || cueList.length === 0) {
+        // eslint-disable-next-line no-console
+        console.info('[agg] albums=%d cue=%d sacd=%d artists=%d tracks=%d',
+          albumList.length, cueList.length, sacdList.length, artistList.length,
+          libraryStats.trackCount)
+      }
     } catch (cause) {
-      error.value = normalizeError(cause).message
+      const msg = normalizeError(cause).message
+      error.value = msg
+      // eslint-disable-next-line no-console
+      console.error('[agg] FAILED:', msg, cause)
     } finally {
       aggInFlight = false
       if (aggPending) {

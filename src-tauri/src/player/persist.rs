@@ -20,12 +20,16 @@ use super::state::{PlayContext, PlayMode};
 /// trackId → 上次中断位置（毫秒），供"再次播放同一曲目时精准接续"使用
 pub const POSITIONS_FILE: &str = "track_positions.json";
 
-/// 末尾保护：记录位置距曲目末尾不足该值时视为已播完，下次从头播放
-pub const RESUME_END_GUARD_MS: u64 = 3000;
+/// 末尾保护：记录位置距曲目末尾不足该值时视为已播完，下次从头播放。
+///
+/// 取值 10s 而非更小的 3s：实测出现过「剩余 4.4s 仍被判有效续播」的情形——
+/// 用户点歌后只响 4 秒就自动连播下一首，体感等同于「这首不能播、被跳过」。
+/// 淡入本身还要占用约 1s，3s 剩余量在实际听感上几乎必然被误判为"没播"。
+pub const RESUME_END_GUARD_MS: u64 = 10_000;
 
 /// 续播位置有效性判定（纯函数，便于单测）：
 /// - 位置为 0 或时长未知（0）：无效，从头播放
-/// - 位置越界（≥ 时长）或剩余时长 < 3s：视为已播完，从头播放
+/// - 位置越界（≥ 时长）或剩余时长 < 10s：视为已播完，从头播放
 /// - 其余：返回原位置
 pub fn sanitize_resume_position(position_ms: u64, duration_ms: u64) -> u64 {
     if position_ms == 0 || duration_ms == 0 {
@@ -127,14 +131,20 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_rejects_near_end_within_3s() {
+    fn sanitize_rejects_near_end_within_10s() {
         assert_eq!(sanitize_resume_position(178_000, 180_000), 0);
-        assert_eq!(sanitize_resume_position(177_001, 180_000), 0);
+        assert_eq!(sanitize_resume_position(171_000, 180_000), 0);
+        // 剩余正好 10s 不触发保护（< 10s 才拒），边界值应放行
+        assert_eq!(sanitize_resume_position(170_000, 180_000), 170_000);
+        assert_eq!(sanitize_resume_position(170_001, 180_000), 0);
+        // 实测回归：175.334s 曲目记忆 170.942s（剩余 4.4s）曾被判有效 →
+        // 点播后只响 4 秒就自动连播，表现为「这首不能播、直接跳过」。
+        assert_eq!(sanitize_resume_position(170_942, 175_334), 0);
     }
 
     #[test]
     fn sanitize_accepts_valid_position() {
-        assert_eq!(sanitize_resume_position(177_000, 180_000), 177_000);
+        assert_eq!(sanitize_resume_position(169_999, 180_000), 169_999);
         assert_eq!(sanitize_resume_position(1, 180_000), 1);
     }
 

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags};
 
 use crate::error::{AppError, AppResult};
 
@@ -66,6 +66,13 @@ pub fn open(db_path: &Path) -> AppResult<Connection> {
     init_schema(&conn)?;
     migrate(&conn)?;
     migrate_data(&conn)?;
+    // 一次性补齐历史曲目的专辑聚合字段（album_id / track_artists），
+    // 与 schema_version 无关：旧库即便已是当前版本号，只要缺这些字段，
+    // 「专辑 / 艺术家 / 分轨专辑」列表就会为空。仅执行一次。
+    if get_meta(&conn, "aggregates_backfilled").is_none() {
+        backfill_aggregates(&conn)?;
+        set_meta(&conn, "aggregates_backfilled", "1")?;
+    }
 
     // 本次运行标记（干净退出时由 mark_clean 清除）
     let _ = std::fs::write(run_marker_path(db_path), b"running");
@@ -158,11 +165,11 @@ fn db_is_healthy(db_path: &Path) -> bool {
     }
 }
 
-/// 一次性数据迁移（区别于结构迁移 migrate）。
+/// 版本标记迁移（区别于结构迁移 migrate 与数据回填 backfill_aggregates）。
 ///
-/// v4 -> v5：CUE 分轨专辑的 `album_id` 归一为 `album:<专辑名>:`（仅按专辑名聚合）。
-/// 修复旧版把每轨演唱者写进 album_id，导致合辑（如 6CD 群星）每轨不同歌手被拆成
-/// "每轨一专辑"的问题；新扫描由 cue.rs 直接生成同形 album_id。
+/// 仅把旧库的 `schema_version` 推进到当前值；album_id / track_artists 的历史补齐
+/// 已统一收敛到 `backfill_aggregates`，在 `db::open` 内基于一次性标记执行（与版本号无关），
+/// 因此此处不再重复回填，避免两处入口维护漂移。
 ///
 /// 幂等/安全：
 ///  - 新库（无 schema_version）跳过，交由 store::open 迁移旧 JSON 后统一写版本，避免
@@ -175,14 +182,60 @@ fn migrate_data(conn: &Connection) -> AppResult<()> {
         Some(v) if v >= SCHEMA_VERSION => return Ok(()), // 已最新
         Some(_) => {}
     }
+    set_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
+    Ok(())
+}
+
+/// 数据迁移：为旧库（扫描早于 album_id / track_artists 规范化前入库的曲目）
+/// 补齐聚合所需的 `album_id` 与 `track_artists`，使「专辑 / 艺术家 / 分轨专辑」
+/// 三列表在**无需重新扫描**的情况下也能正常显示。
+///
+/// 仅补齐缺失项（album_id IS NULL、或该曲目尚无 track_artists 记录），幂等可重复执行。
+/// 这正是「修复多次仍为空」的深层根因：原迁移只回填了 CUE 的 album_id，普通曲目
+/// 的 album_id 与全部曲目的 track_artists 一直未被回填，旧库聚合查询自然全空。
+pub(crate) fn backfill_aggregates(conn: &Connection) -> AppResult<()> {
+    // CUE 分轨专辑：按「专辑名 + CUE 所在目录」归一，与 cue.rs 的生成规则一致。
+    // 旧版仅按专辑名聚合，会导致跨根同名的 CUE 专辑被折叠成一张
+    // （表现为「单目录扫描全有、双目录扫描部分缺失」），这里改按目录区分。
+    let mut cue_stmt = conn
+        .prepare("SELECT id, album, file_path FROM tracks WHERE is_cue = 1")
+        .map_err(|e| AppError::Library(format!("查询 CUE 曲目失败: {e}")))?;
+    let cue_rows: Vec<(String, String, String)> = cue_stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| AppError::Library(format!("读取 CUE 曲目失败: {e}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Library(format!("读取 CUE 曲目失败: {e}")))?;
+    for (cid, calbum, cpath) in cue_rows {
+        let cdir = std::path::Path::new(&cpath)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let new_id = crate::library::models::cue_album_id(&calbum, &cdir);
+        conn.execute(
+            "UPDATE tracks SET album_id = ?1 WHERE id = ?2",
+            params![new_id, cid],
+        )
+        .map_err(|e| AppError::Library(format!("回填 CUE 专辑 album_id 失败: {e}")))?;
+    }
+    // 普通曲目：album_id 归一为 album:<专辑名>:<主艺人>，与 album_id_of 一致
     conn.execute(
         "UPDATE tracks
-         SET album_id = 'album:' || album || ':'
-         WHERE is_cue = 1 AND album_id IS NOT NULL",
+         SET album_id = 'album:' || album || ':' || COALESCE(json_extract(artists_json, '$[0]'), '')
+         WHERE is_cue = 0 AND album_id IS NULL",
         [],
     )
-    .map_err(|e| AppError::Library(format!("迁移 CUE 专辑聚合（v5）失败: {e}")))?;
-    set_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
+    .map_err(|e| AppError::Library(format!("回填普通专辑 album_id 失败: {e}")))?;
+    // 艺术家关联：从 artists_json 展开，仅补齐尚无 track_artists 记录的曲目
+    conn.execute(
+        "INSERT OR IGNORE INTO track_artists(track_id, artist, position)
+         SELECT t.id, j.value, j.key
+         FROM tracks t, json_each(t.artists_json) j
+         WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id)",
+        [],
+    )
+    .map_err(|e| AppError::Library(format!("回填艺术家关联失败: {e}")))?;
     Ok(())
 }
 

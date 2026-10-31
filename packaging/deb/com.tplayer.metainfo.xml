@@ -1,24 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- AppStream 元数据（软件中心展示）。@VERSION@/@RELEASE_DATE@/@HOMEPAGE@ 由构建脚本替换。 -->
+<!-- AppStream 元数据（软件中心展示）。@VERSION@/@RELEASE_DATE@/@HOMEPAGE@ 由构建脚本替换。
+     组件 id 必须与 metainfo 文件名一致（com.tplayer.metainfo.xml → id=com.tplayer），
+     且 desktop-application 的 launchable 类型必须是现行规范的 "desktop-id"
+     （旧写法 "desktop-file-id" 会被 appstream 判为 unknown-type，导致软件中心解析失败、
+      本地化说明退化为乱码）。 -->
 <component type="desktop-application">
-  <id>com.tplayer.desktop</id>
+  <id>com.tplayer</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>ISC</project_license>
   <name>TPlayer</name>
-  <summary>本地优先的桌面音乐播放器</summary>
+  <summary>TPlayer 是本地优先的桌面音乐播放器</summary>
   <description>
     <p>TPlayer 是本地优先的桌面音乐播放器：曲库数据与在线能力解耦，在线模块默认关闭，且默认不上传本地曲库信息。</p>
-    <p>原生支持 MP3/FLAC/WAV/AAC/OGG/Opus；APE/DSD/DTS/WMA/WV/TTA/TAK/AIFF 等经由 FFmpeg 解码。所有曲库数据仅保存在本机。</p>
+    <p>TPlayer 原生支持 MP3/FLAC/WAV/AAC/OGG/Opus；APE/DSD/DTS/WMA/WV/TTA/TAK/AIFF 等经由 FFmpeg 解码。所有曲库数据仅保存在本机。</p>
   </description>
-  <launchable type="desktop-file-id">com.tplayer.desktop</launchable>
+  <developer>
+    <name>TPlayer Contributors</name>
+  </developer>
+  <!-- type 必须是 desktop-id（AppStream ≥ 0.15）；软件中心据此把组件与
+       /usr/share/applications/com.tplayer.desktop 关联并允许直接启动 -->
+  <launchable type="desktop-id">com.tplayer.desktop</launchable>
   <url type="homepage">@HOMEPAGE@</url>
   <provides>
-    <id>com.tplayer.desktop</id>
     <binary>@BIN_NAME@</binary>
   </provides>
   <categories>
     <category>AudioVideo</category>
-    <category>Music</category>
+    <category>Audio</category>
     <category>Player</category>
   </categories>
   <content_rating type="oars-1.1">
@@ -30,7 +38,7 @@
   <releases>
     <release version="@VERSION@" date="@RELEASE_DATE@">
       <description>
-        <p>原生 DEB 打包；支持 amd64/arm64。</p>
+        <p>TPlayer 2.0.3：原生 DEB 打包；支持 amd64/arm64。</p>
       </description>
     </release>
   </releases>

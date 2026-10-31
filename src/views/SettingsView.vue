@@ -25,6 +25,7 @@ import { useToastStore } from '../stores/toast'
 import { useDialogStore } from '../stores/dialog'
 import { pickDirectory } from '../services/dialog'
 import { lyricsService } from '../services/lyrics'
+import { appService } from '../services/app'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
 import { getWatcherStatus, subscribeWatcher, type WatcherStatus } from '../services/watcher'
 import BaseButton from '../components/common/BaseButton.vue'
@@ -312,6 +313,20 @@ async function checkUpdates(): Promise<void> {
 
 async function installUpdate(): Promise<void> {
   await updaterStore.confirmInstall()
+}
+
+/**
+ * 打开 TPlayer 官网（用系统默认浏览器）。
+ *
+ * 走后端命令而非 <a href>：Tauri v2 会拦截 WebView 内的外部导航，
+ * 由后端调系统默认浏览器打开才可靠（见 src-tauri/src/website.rs）。
+ */
+async function openOfficialSite(): Promise<void> {
+  try {
+    await appService.openWebsite()
+  } catch (cause) {
+    toastStore.error('打开官网失败：' + normalizeError(cause).message)
+  }
 }
 
 async function resetSettings(): Promise<void> {
@@ -731,6 +746,21 @@ async function resetSettings(): Promise<void> {
             <p class="setting-card__desc">下载完成后安装器将自动启动，应用会重启进入新版本。</p>
           </div>
         </section>
+
+        <!-- 官方网站入口（程序内常驻访问官网的方式） -->
+        <section class="setting-card">
+          <h2 class="setting-card__title">官方网站</h2>
+          <p class="setting-card__desc">
+            访问 TPlayer 官网，获取版本公告、使用帮助与最新消息。首次安装完成后已自动为你打开过一次，
+            之后不会再次自动弹出，可随时从这里进入。
+          </p>
+          <div class="panel__actions">
+            <BaseButton variant="subtle" size="sm" @click="openOfficialSite">
+              <Icon name="external-link" :size="15" />
+              打开官网
+            </BaseButton>
+          </div>
+        </section>
       </div>
 
       <!-- 关于 -->
@@ -750,7 +780,8 @@ async function resetSettings(): Promise<void> {
           <ul class="about__list">
             <li>
               <strong>广格式支持</strong>：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、
-              DSF/DFF（DSD）、DTS 等 18 种音频格式；DSD 曲目默认转 PCM 播放，兼容绝大多数声卡。
+              DSF/DFF（DSD）、DTS 等 18 种音频格式；播放以<strong>直接解码</strong>为主，DSD 等复杂格式由
+              ffmpeg 引擎解码为 PCM 播放（不落盘转码），兼容绝大多数声卡。
             </li>
             <li>
               <strong>播放体验</strong>：播放队列、交叉淡化（0–3 秒）、多种播放模式（顺序/单曲/随机/列表循环）、
@@ -758,7 +789,7 @@ async function resetSettings(): Promise<void> {
             </li>
             <li>
               <strong>曲库管理</strong>：支持多目录白名单与增量扫描（仅重新解析变更文件）、专辑 / 艺术家自动聚合、
-              CUE 分轨识别、SACD ISO 解析（导出为临时 DSF 后解码）、元数据增强（标签优先、附属文件识别、文件名拆分）。
+              分轨专辑识别（CUE 索引与 SACD ISO 均解析为多轨虚拟专辑）、元数据增强（标签优先、附属文件识别、文件名拆分）。
             </li>
             <li>
               <strong>歌词与封面</strong>：LRC 歌词与逐行偏移校正（按曲目保存）；封面自动匹配（内嵌标签 → 同名图片 →
@@ -792,7 +823,7 @@ async function resetSettings(): Promise<void> {
 
           <h3 class="about__heading">致谢</h3>
           <p class="about__intro">
-            感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式转换）、
+            感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式解码与转换）、
             minisign（升级签名）、Vue 与 Tauri 等开源项目。
           </p>
           <p class="about__intro">

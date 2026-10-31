@@ -112,6 +112,25 @@ pub fn album_id_of(album: &str, first_artist: &str) -> String {
     format!("album:{}:{}", album, first_artist)
 }
 
+/// CUE 分轨专辑的稳定 ID：在「专辑名」基础上叠加 CUE 所在目录指纹。
+///
+/// 这样同一 CUE 文件内的所有分轨（共享同一目录）仍聚合为一张专辑；
+/// 但同名 CUE 专辑位于不同目录（例如两个镜像 / 备份根目录）时会产生不同 ID，
+/// 不再被折叠为一张 —— 修复「单目录扫描全有、双目录扫描部分缺失」的深层根因
+/// （旧版 `album_id` 仅按专辑名聚合，跨根同名 CUE 专辑会合并成一张）。
+pub fn cue_album_id(album: &str, cue_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(cue_dir.as_bytes());
+    let d: String = hasher
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("album:{}:{}", album, d)
+}
+
 /// 专辑（聚合视图）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Album {

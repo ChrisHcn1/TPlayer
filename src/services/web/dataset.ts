@@ -130,6 +130,8 @@ function buildTracks(): Track[] {
       const artists = seed.cue
         ? [cueArtistFor(index)]
         : [seed.artist]
+      const isCue = seed.cue === true
+      const isSacd = seed.sacd === true
       list.push({
         id: `t${seq}`,
         title,
@@ -142,12 +144,22 @@ function buildTracks(): Track[] {
         filePath: `X:/Music/${artists[0]}/${seed.name}/${String(index + 1).padStart(2, '0')} - ${title}.${format}`,
         fileSize: duration * 32_000 + seq * 1024,
         format,
+        // 可为空字段统一给出默认值，保证前端展示 / 测试不出现 undefined
         bitrate: format === 'flac' ? 1_050_000 : 320_000,
         sampleRate: format === 'flac' ? 48_000 : 44_100,
         hasCover: seq % 4 !== 0,
         addedAt: BASE_TIME + seq * 86_400,
         modifiedAt: BASE_TIME + seq * 86_400,
-        isSacd: seed.sacd === true,
+        isCue,
+        cueOffset: isCue ? Math.round(index * duration) : null,
+        isSacd,
+        sacdTrackIndex: isSacd ? index : 0,
+        sacdArea: isSacd ? 'Stereo2ch' : undefined,
+        sacdDsdRate: isSacd ? 2_822_400 : undefined,
+        metadataPending: false,
+        isoPlaceholder: false,
+        replaygainDb: null,
+        replaygainPeak: null,
       })
     })
   }
@@ -197,6 +209,8 @@ export function aggregateAlbums(tracks: Track[]): Album[] {
       year: track.year,
       trackCount: 1,
       hasCover: track.hasCover,
+      isCue: track.isCue ?? false,
+      isSacd: track.isSacd ?? false,
     })
   }
   // 专辑排序：按种子声明顺序（年份/名字稳定），这里用首曲出现顺序天然保持

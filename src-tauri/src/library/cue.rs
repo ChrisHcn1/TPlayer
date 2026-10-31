@@ -27,7 +27,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::ItemKey;
 use sha2::{Digest, Sha256};
 
-use super::models::{album_id_of, Track};
+use super::models::{cue_album_id, Track};
 
 /// CUE 分轨时长计算基准：1 帧 = 1/75 秒（CDDA）
 const CUE_FRAME_RATE: f64 = 75.0;
@@ -208,9 +208,11 @@ fn parse_cue_inner(cue_path: &Path, probe_audio: bool) -> Vec<Track> {
         } else {
             split_artists(&artist_src)
         };
-        // 分轨专辑仅按「专辑名」聚合（album_id 不带演唱者），避免合辑（如 6CD 群星）
-        // 每轨不同歌手被拆成"每轨一专辑"；曲目自身仍保留各自演唱者供"艺术家"分类使用。
-        let album_id = Some(album_id_of(&album, ""));
+        // 分轨专辑按「专辑名 + CUE 所在目录」聚合（album_id 不带演唱者，但带目录指纹），
+        // 避免合辑（如 6CD 群星）每轨不同歌手被拆成"每轨一专辑"；同时让同名 CUE 专辑在
+        // 不同位置（两个镜像 / 备份根目录）下不再被折叠为一张 —— 修复双目录扫描部分缺失。
+        // 曲目自身仍保留各自演唱者供"艺术家"分类使用。
+        let album_id = Some(cue_album_id(&album, &cue_dir.to_string_lossy()));
 
         let title = t
             .title
