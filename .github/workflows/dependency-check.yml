@@ -45,8 +45,11 @@ jobs:
 
       - name: Run license-checker (Node.js)
         run: |
-          npx license-checker --production --csv > third_party/node_licenses.csv || true
-          cat third_party/node_licenses.csv
+          # third_party/ 不在仓库里，重定向前先建目录（否则本步骤会因
+          # "No such file or directory" 直接失败，|| true 也救不了重定向本身）
+          mkdir -p third_party
+          npx --yes license-checker --production --csv > third_party/node_licenses.csv || true
+          cat third_party/node_licenses.csv || true
 
       - name: Verify DEPENDENCIES.yml consistency
         run: |
