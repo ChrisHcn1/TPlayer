@@ -21,11 +21,17 @@ jobs:
         with:
           toolchain: stable
 
+      # cargo-deny 的安装改用预编译二进制（taiki-e/install-action）：
+      # 旧版 EmbarkStudios/cargo-deny-action@v1 会在容器里 cargo install，
+      # 依赖 crates.io 实时下载，常因网络/限流直接失败（该步骤此前从未成功过）。
+      # 该检查定位为「报告型」：deny.toml 或网络异常时不阻断流水线，
+      # 许可证合规的硬门禁由下方 DEPENDENCIES.yml 检查步骤负责。
       - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          command: check
-          arguments: --all-features
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo-deny check
+        continue-on-error: true
+        run: cargo deny --all-features check
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

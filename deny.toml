@@ -1,0 +1,45 @@
+# cargo-deny 配置：Rust 依赖的许可证与来源合规检查
+#
+# 与仓库内的 DEPENDENCIES.yml（人工维护的依赖清单）+ scripts/verify_dependencies.py
+# 配套使用：前者记录「我们认为可接受的依赖」，本文件让 cargo 自动核对
+# 「实际引入的 crate」是否落在允许的许可证与来源范围内。
+
+[graph]
+all-features = true
+
+[licenses]
+# 允许的许可证：宽松许可为主（MIT / Apache-2.0 / BSD / ISC 等）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-1.0",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+# 依赖树里存在多版本共存是正常现象（如不同 crate 依赖不同版本的 rand），
+# 不因此阻断流水线；如需收敛再用 cargo-deny 的提示逐项处理。
+multiple-versions = "allow"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+]
