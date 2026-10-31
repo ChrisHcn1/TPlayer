@@ -1,0 +1,151 @@
+{
+  "updated_at": "2026-10-31T03:55:48.496Z",
+  "repo": "ChrisHcn1/TPlayer",
+  "latest": {
+    "version": "2.0.0",
+    "tag": "v2.0.0",
+    "name": "TPlayer v2.0.0",
+    "published_at": "2026-10-17T05:26:19Z",
+    "url": "https://github.com/ChrisHcn1/TPlayer/releases/tag/v2.0.0",
+    "prerelease": false,
+    "body": "# TPlayer v2.0.0 发布说明\r\n\r\n- **发布日期**：2026-10-17\r\n- **平台**：Windows x64（`TPlayer_2.0.0_x64-setup.exe`）\r\n- **应用标识**：`com.tplayer`（对外名称统一为 **TPlayer**，不再使用 \"TPlayer Next\" 后缀）\r\n- **应用数据目录**：`%APPDATA%\\com.tplayer`\r\n\r\n## 重要变更：产品命名与升级方式\r\n\r\n本次起产品对外名称统一为 **TPlayer**（去掉 \"Next\" 后缀）。由于安装标识 `productName`\r\n由 `TPlayer Next` 变更为 `TPlayer`，NSIS 安装 GUID 随之改变：\r\n\r\n- **已安装旧版 \"TPlayer Next\" 的用户**：新版不会原地覆盖旧版，而是作为独立条目安装\r\n  （可能出现\"双装\"）。请在确认新版 `TPlayer` 运行正常后，手动卸载旧的 \"TPlayer Next\"。\r\n- **旧曲库与设置不会丢失**：新版首次启动时会自动把旧数据目录 `%APPDATA%\\TPlayer Next`\r\n  下的 `config.json`、`library.db`（曲库）、歌词偏移、播放状态等**一次性迁移**到新目录\r\n  `%APPDATA%\\com.tplayer`。旧目录保留，迁移失败仅记录日志、不影响启动。\r\n- 与更早的历史版本 `TPlayer`（v1，标识 `D57E920A.TPlayer`）仍按设计共存。\r\n\r\n## 升级签名密钥更换\r\n\r\n本版起更换了自动升级签名密钥对（旧密钥密码遗失，无法继续使用）。影响：\r\n\r\n- **v2.0.0-beta 及更早版本**内置的旧公钥无法校验本版及后续版本的更新签名，\r\n  这些用户**无法通过应用内自动更新升级到 v2.0.0**，请从本发布页手动下载安装。\r\n- 从 v2.0.0 起安装的用户不受影响，后续版本可正常自动更新。\r\n\r\n## 新特性与改进（相对 v2.0.0-beta）\r\n\r\n### 1. 单实例运行\r\n- 通过命名互斥体（`TPlayer_SingleInstance`）检测已有实例；若已有实例运行，新进程仅聚焦\r\n  已有窗口并退出，系统中始终仅一个常驻进程。\r\n\r\n### 2. 静默启动 / 续播接管\r\n- 续播或连播到原生引擎难以稳定解码的曲目（DTS / WAV 容器等）时，不再原生播放（避免噪声），\r\n  改由前端 core 解码层静默接管，core 就绪后自动接播且不打断当前曲。\r\n\r\n### 3. 拖拽加载播放列表\r\n- 从资源管理器拖入文件 / 文件夹：自动入库 → 生成「拖放列表」歌单 → 立即播放首曲，支持 NAS / 网盘路径。\r\n\r\n### 4. NAS / 网盘路径支持\r\n- `\\\\host\\share`（SMB）与映射盘符均可在「曲库目录」中加入并扫描；直接拖入的文件经入库后亦可播放。\r\n\r\n### 5. 曲库扫描稳定性修复\r\n- 修复「设置页已添加目录但扫描报\"未配置曲库目录\"」的错位：曲库白名单现通过专用命令\r\n  `library_add_dir` 直接写入配置，且设置保存对字段缺失更健壮（不再静默吞掉失败）。\r\n\r\n## 修复与异常处理\r\n- 设置持久化（`settings_save`）此前因前后端结构不匹配（前端缺 `replaygain.targetLufs`）\r\n  整体反序列化失败、被静默吞掉，导致配置（含曲库白名单）从未落盘；现后端结构加\r\n  `#[serde(default)]` 容错、前端补齐字段、保存失败显式记录并提示。\r\n- 新增 Rust 单元测试覆盖：前端载荷缺字段、旧配置缺可选段、缺 `libraryDirs` 被拒、落盘往返、\r\n  损坏 JSON、文件缺失等边界（6 项全部通过）。\r\n\r\n## 安装与升级\r\n- **全新安装**：运行 `TPlayer_2.0.0_x64-setup.exe`，按向导完成。\r\n- **已安装含升级按钮的版本**：打开应用 → `设置` → `更新` → `检查更新` → `下载并安装`（自动重启）。\r\n  - 注意：旧 \"TPlayer Next\" 的升级按钮会拉取到新 \"TPlayer\" 安装包并作为新条目安装（见上方\"重要变更\"）。\r\n- **手动升级**：前往 GitHub Releases 下载 `TPlayer_2.0.0_x64-setup.exe` 安装即可。\r\n\r\n## 已知事项\r\n- 安装包当前未做 Authenticode 代码签名，Windows SmartScreen 可能提示\"未知发布者\"，\r\n  选择「仍要运行」即可（不影响功能）；建议正式发布补充代码签名证书。\r\n- **自动更新仓库地址**：`tauri.conf.json` 的 updater `endpoints` 当前指向\r\n  `https://github.com/ChrisHcn1/TPlayer/releases/latest/download/latest.json`。发布前请确认该仓库\r\n  即为本项目的发版仓库，且 `pubkey` 与签名私钥匹配，否则自动更新会因校验失败而无法安装。\r\n\r\n## 构建产物\r\n位于 `src-tauri/target/release/bundle/nsis/`：\r\n- `TPlayer_2.0.0_x64-setup.exe`\r\n- `TPlayer_2.0.0_x64-setup.exe.sig`\r\n- `latest.json`\r\n",
+    "assets": [
+      {
+        "name": "latest.json",
+        "size": 1137,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/latest.json"
+      },
+      {
+        "name": "TPlayer_2.0.0_x64-setup.exe",
+        "size": 55547636,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe"
+      },
+      {
+        "name": "TPlayer_2.0.0_x64-setup.exe.sig",
+        "size": 436,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe.sig"
+      }
+    ],
+    "installer": {
+      "name": "TPlayer_2.0.0_x64-setup.exe",
+      "size": 55547636,
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe"
+    }
+  },
+  "releases": [
+    {
+      "version": "2.0.0",
+      "tag": "v2.0.0",
+      "name": "TPlayer v2.0.0",
+      "published_at": "2026-10-17T05:26:19Z",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/tag/v2.0.0",
+      "prerelease": false,
+      "body": "# TPlayer v2.0.0 发布说明\r\n\r\n- **发布日期**：2026-10-17\r\n- **平台**：Windows x64（`TPlayer_2.0.0_x64-setup.exe`）\r\n- **应用标识**：`com.tplayer`（对外名称统一为 **TPlayer**，不再使用 \"TPlayer Next\" 后缀）\r\n- **应用数据目录**：`%APPDATA%\\com.tplayer`\r\n\r\n## 重要变更：产品命名与升级方式\r\n\r\n本次起产品对外名称统一为 **TPlayer**（去掉 \"Next\" 后缀）。由于安装标识 `productName`\r\n由 `TPlayer Next` 变更为 `TPlayer`，NSIS 安装 GUID 随之改变：\r\n\r\n- **已安装旧版 \"TPlayer Next\" 的用户**：新版不会原地覆盖旧版，而是作为独立条目安装\r\n  （可能出现\"双装\"）。请在确认新版 `TPlayer` 运行正常后，手动卸载旧的 \"TPlayer Next\"。\r\n- **旧曲库与设置不会丢失**：新版首次启动时会自动把旧数据目录 `%APPDATA%\\TPlayer Next`\r\n  下的 `config.json`、`library.db`（曲库）、歌词偏移、播放状态等**一次性迁移**到新目录\r\n  `%APPDATA%\\com.tplayer`。旧目录保留，迁移失败仅记录日志、不影响启动。\r\n- 与更早的历史版本 `TPlayer`（v1，标识 `D57E920A.TPlayer`）仍按设计共存。\r\n\r\n## 升级签名密钥更换\r\n\r\n本版起更换了自动升级签名密钥对（旧密钥密码遗失，无法继续使用）。影响：\r\n\r\n- **v2.0.0-beta 及更早版本**内置的旧公钥无法校验本版及后续版本的更新签名，\r\n  这些用户**无法通过应用内自动更新升级到 v2.0.0**，请从本发布页手动下载安装。\r\n- 从 v2.0.0 起安装的用户不受影响，后续版本可正常自动更新。\r\n\r\n## 新特性与改进（相对 v2.0.0-beta）\r\n\r\n### 1. 单实例运行\r\n- 通过命名互斥体（`TPlayer_SingleInstance`）检测已有实例；若已有实例运行，新进程仅聚焦\r\n  已有窗口并退出，系统中始终仅一个常驻进程。\r\n\r\n### 2. 静默启动 / 续播接管\r\n- 续播或连播到原生引擎难以稳定解码的曲目（DTS / WAV 容器等）时，不再原生播放（避免噪声），\r\n  改由前端 core 解码层静默接管，core 就绪后自动接播且不打断当前曲。\r\n\r\n### 3. 拖拽加载播放列表\r\n- 从资源管理器拖入文件 / 文件夹：自动入库 → 生成「拖放列表」歌单 → 立即播放首曲，支持 NAS / 网盘路径。\r\n\r\n### 4. NAS / 网盘路径支持\r\n- `\\\\host\\share`（SMB）与映射盘符均可在「曲库目录」中加入并扫描；直接拖入的文件经入库后亦可播放。\r\n\r\n### 5. 曲库扫描稳定性修复\r\n- 修复「设置页已添加目录但扫描报\"未配置曲库目录\"」的错位：曲库白名单现通过专用命令\r\n  `library_add_dir` 直接写入配置，且设置保存对字段缺失更健壮（不再静默吞掉失败）。\r\n\r\n## 修复与异常处理\r\n- 设置持久化（`settings_save`）此前因前后端结构不匹配（前端缺 `replaygain.targetLufs`）\r\n  整体反序列化失败、被静默吞掉，导致配置（含曲库白名单）从未落盘；现后端结构加\r\n  `#[serde(default)]` 容错、前端补齐字段、保存失败显式记录并提示。\r\n- 新增 Rust 单元测试覆盖：前端载荷缺字段、旧配置缺可选段、缺 `libraryDirs` 被拒、落盘往返、\r\n  损坏 JSON、文件缺失等边界（6 项全部通过）。\r\n\r\n## 安装与升级\r\n- **全新安装**：运行 `TPlayer_2.0.0_x64-setup.exe`，按向导完成。\r\n- **已安装含升级按钮的版本**：打开应用 → `设置` → `更新` → `检查更新` → `下载并安装`（自动重启）。\r\n  - 注意：旧 \"TPlayer Next\" 的升级按钮会拉取到新 \"TPlayer\" 安装包并作为新条目安装（见上方\"重要变更\"）。\r\n- **手动升级**：前往 GitHub Releases 下载 `TPlayer_2.0.0_x64-setup.exe` 安装即可。\r\n\r\n## 已知事项\r\n- 安装包当前未做 Authenticode 代码签名，Windows SmartScreen 可能提示\"未知发布者\"，\r\n  选择「仍要运行」即可（不影响功能）；建议正式发布补充代码签名证书。\r\n- **自动更新仓库地址**：`tauri.conf.json` 的 updater `endpoints` 当前指向\r\n  `https://github.com/ChrisHcn1/TPlayer/releases/latest/download/latest.json`。发布前请确认该仓库\r\n  即为本项目的发版仓库，且 `pubkey` 与签名私钥匹配，否则自动更新会因校验失败而无法安装。\r\n\r\n## 构建产物\r\n位于 `src-tauri/target/release/bundle/nsis/`：\r\n- `TPlayer_2.0.0_x64-setup.exe`\r\n- `TPlayer_2.0.0_x64-setup.exe.sig`\r\n- `latest.json`\r\n",
+      "assets": [
+        {
+          "name": "latest.json",
+          "size": 1137,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/latest.json"
+        },
+        {
+          "name": "TPlayer_2.0.0_x64-setup.exe",
+          "size": 55547636,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe"
+        },
+        {
+          "name": "TPlayer_2.0.0_x64-setup.exe.sig",
+          "size": 436,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe.sig"
+        }
+      ],
+      "installer": {
+        "name": "TPlayer_2.0.0_x64-setup.exe",
+        "size": 55547636,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0/TPlayer_2.0.0_x64-setup.exe"
+      }
+    },
+    {
+      "version": "1.0.7",
+      "tag": "1.0.7",
+      "name": "TPlayer 1.0.7 (prerelease)",
+      "published_at": "2026-10-08T07:32:06Z",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/tag/1.0.7",
+      "prerelease": true,
+      "body": "## TPlayer 1.0.7 (prerelease)\n\n### 新增\n- 通用消息系统：统一 toast + confirm API（showError/showSuccess/showWarning/showInfo），支持自动消失、手动关闭、悬停暂停、堆叠限制\n- ToastContainer.vue 组件 + useMessage.ts composable\n\n### 重构\n- 巨石组件拆分：App.vue 抽离 format / coverImage / playbackMode 等工具模块\n- 单元测试覆盖新增工具模块（共 84 个 Vitest 用例通过）\n\n### 已知限制\n- MSIX 包未生成（targets=all 需代码签名证书）\n- 仅 Windows x64",
+      "assets": [
+        {
+          "name": "TPlayer_1.0.7_x64-setup.exe",
+          "size": 70354667,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/1.0.7/TPlayer_1.0.7_x64-setup.exe"
+        },
+        {
+          "name": "TPlayer_1.0.7_x64_en-US.msi",
+          "size": 101457920,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/1.0.7/TPlayer_1.0.7_x64_en-US.msi"
+        }
+      ],
+      "installer": {
+        "name": "TPlayer_1.0.7_x64-setup.exe",
+        "size": 70354667,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/1.0.7/TPlayer_1.0.7_x64-setup.exe"
+      }
+    },
+    {
+      "version": "2.0.0-beta",
+      "tag": "v2.0.0-beta",
+      "name": "TPlayer 2.0 Beta",
+      "published_at": "2026-10-07T14:09:43Z",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/tag/v2.0.0-beta",
+      "prerelease": true,
+      "body": "## TPlayer 2.0 Beta\n\n全新架构重写的桌面音乐播放器（Tauri 2 + Vue 3.5 + TypeScript + Rust/rodio）。\n\n### 新特性\n- **内置 FFmpeg 静态解码**：DSD（dff/dsf）、DTS、APE、WMA Lossless、TAK、TTA、WavPack、AIFF 开箱即播，用户零配置；ffmpeg/ffprobe 随安装包分发，无外部 DLL 依赖\n- rodio 原生解码 mp3/flac/wav/ogg/opus/aac/m4a\n- SQLite 曲库持久化 + 增量文件夹扫描（2000+ 首实测）\n- 断点续播、播放队列、随机/单曲循环、淡入淡出\n- 实时歌词 + 桌面歌词栏 + 在线歌词匹配\n- 封面提取与自动主题色（歌词辉光 / 进度饱和 / 按钮亮调三档）\n- 曲目列表虚拟滚动，大库流畅\n- NSIS 安装包，内置 minisign 签名的自动升级通道\n\n### 健壮性\n- 无法播放的曲目自动跳过（连续异常 8 首自动停止并单次提示）\n- 解码器缺失时不再弹出系统错误框，直接失败降级\n- 自动升级：设置页可手动检查；正式版发布后启动静默检查\n\n### 安装\n下载 `TPlayer Next_2.0.0-beta_x64-setup.exe` 直接安装（Windows x64）。\nBeta 为预发布版本，自动升级通道在正式版发布后启用。\n",
+      "assets": [
+        {
+          "name": "latest.json",
+          "size": 1085,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0-beta/latest.json"
+        },
+        {
+          "name": "TPlayer.Next_2.0.0-beta_x64-setup.exe",
+          "size": 46984007,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0-beta/TPlayer.Next_2.0.0-beta_x64-setup.exe"
+        },
+        {
+          "name": "TPlayer.Next_2.0.0-beta_x64-setup.exe.sig",
+          "size": 456,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0-beta/TPlayer.Next_2.0.0-beta_x64-setup.exe.sig"
+        }
+      ],
+      "installer": {
+        "name": "TPlayer.Next_2.0.0-beta_x64-setup.exe",
+        "size": 46984007,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.0-beta/TPlayer.Next_2.0.0-beta_x64-setup.exe"
+      }
+    },
+    {
+      "version": "Release",
+      "tag": "Release",
+      "name": "TPlayer V1.0.0.1",
+      "published_at": "2026-03-08T11:39:55Z",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/tag/Release",
+      "prerelease": true,
+      "body": "TPlayer\r\n版本 1.0.0.1\r\n\r\n程序简介\r\nTPlayer 是一款基于 Tauri + Vue 3 开发的现代化音乐播放器，支持丰富的音频格式播放，提供优质的音频体验和简洁的用户界面。\r\n\r\n主要功能\r\n支持多种音频格式：MP3、FLAC、WAV、AAC、OGG、M4A、APE、DSD 等\r\n智能音频转码：自动转码不支持的音频格式为 FLAC\r\n均衡器控制：提供多种预设和自定义均衡器\r\n播放列表管理：创建、编辑、删除歌单\r\n播放模式：顺序播放、随机播放、循环播放\r\n播放进度记忆：自动保存播放位置\r\n可视化效果：音频频谱可视化\r\n主题切换：支持亮色和暗色主题\r\n技术栈\r\nTauri 2.x - 跨平台桌面应用框架\r\nVue 3 - 现代化前端框架\r\nRust - 高性能后端\r\nFFmpeg - 音频解码和转码内置\r\nrodio - Rust 音频播放库\r\n开发者信息\r\n开发者：TPlayer 开发团队\r\n\r\n感谢 格力森酒业 智睿舒畅 忧蓝对项目的贡献\r\n\r\n许可证：ISC\r\n\r\n项目地址：https://github.com/ChrisHcn1/TPlayer\r\n\r\n使用说明\r\n1. 点击\"扫描目录\"按钮选择音乐文件夹\r\n\r\n2. 在播放列表中选择要播放的歌曲\r\n\r\n3. 使用底部播放控制栏控制播放\r\n\r\n4. 点击设置按钮调整音频和界面选项\r\n\r\n5. 使用均衡器调整音效\r\n\r\nFFmpeg 配置\r\n下载地址：https://ffmpeg.org/download.html\r\n\r\n安装方法：\r\n\r\nWindows：下载压缩包后解压到任意目录\r\nmacOS：使用 Homebrew 安装：brew install ffmpeg\r\nLinux：使用包管理器安装，如 apt install ffmpeg\r\n环境变量配置：\r\n\r\nWindows：将FFmpeg的bin目录添加到系统环境变量PATH中（已内置）\r\nmacOS/Linux：确保FFmpeg在系统PATH中，或在设置中指定FFmpeg可执行文件路径\r\n感谢您使用 TPlayer！\r\n\r\n© 2026 TPlayer. All rights reserved.",
+      "assets": [
+        {
+          "name": "TPlayer_1.0.1_x64-setup.exe",
+          "size": 68956877,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/Release/TPlayer_1.0.1_x64-setup.exe"
+        },
+        {
+          "name": "tplayer_V1.0.0_x64_en-US.msi",
+          "size": 4296704,
+          "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/Release/tplayer_V1.0.0_x64_en-US.msi"
+        }
+      ],
+      "installer": {
+        "name": "TPlayer_1.0.1_x64-setup.exe",
+        "size": 68956877,
+        "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/Release/TPlayer_1.0.1_x64-setup.exe"
+      }
+    }
+  ]
+}

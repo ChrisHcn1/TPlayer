@@ -1,0 +1,66 @@
+name: Sync Release to Site
+
+# =============================================================================
+# 把 GitHub Release 的版本信息同步成网站可消费的 JSON 快照（site/releases.json）。
+#
+# 触发方式（三条，全部自动，无需人工干预）：
+#   1. release: published  —— 发版自动触发（主路径）
+#   2. schedule            —— 每日 03:23 UTC 兜底巡检（防止漏触发 /
+#                             Release 被事后编辑 / 草稿迟发）
+#   3. workflow_dispatch    —— 手动补跑（Actions 页面点一下）
+#
+# 产出如何到达网站：
+#   - 快照提交进仓库后，jsDelivr 等 GitHub CDN 会自动同步（约 1 分钟），
+#     网站运行时直接从 CDN 拉取 → **不需要重新部署网站**；
+#   - 仓库里的 site/releases.json 同时作为可追溯的版本数据源，
+#     也可在部署网站时一并上传（同源路径，命中即零延迟）。
+#
+# 注意：release 事件下 GITHUB_REF 是 tag，必须显式 checkout 默认分支，
+#       否则会处于 detached HEAD 且无法 push。
+# =============================================================================
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Sync release metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/sync-release.mjs --out site/releases.json
+
+      - name: Commit snapshot if changed
+        run: |
+          if git diff --quiet -- site/releases.json; then
+            echo '快照无变化，无需提交。'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add site/releases.json
+          git commit -m 'chore(site): 同步 GitHub Release 版本信息'
+          git push
