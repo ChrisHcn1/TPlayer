@@ -20,6 +20,7 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const route = useRoute()
 const router = useRouter()
@@ -54,7 +55,7 @@ const { selectedIds, count, allFavorited, clear, play, favorite, addToPlaylist }
 
 function playAll(): void {
   if (tracks.value.length === 0) {
-    toastStore.warning('歌单还是空的')
+    toastStore.warning(t('common.playlistEmpty'))
     return
   }
   playTracks(tracks.value, { playContext: buildContext() })
@@ -70,9 +71,12 @@ async function shuffleAll(): Promise<void> {
 async function removeFromPlaylist(): Promise<void> {
   if (!playlist.value || selectedIds.value.length === 0) return
   const confirmed = await dialogStore.confirm({
-    title: '从歌单移除',
-    message: `确定从「${playlist.value.name}」移除选中的 ${selectedIds.value.length} 首吗？`,
-    confirmText: '移除',
+    title: t('playlistDetail.removeFromPlaylist'),
+    message: t('playlistDetail.removeMessage', {
+      name: playlist.value.name,
+      count: selectedIds.value.length,
+    }),
+    confirmText: t('common.remove'),
     danger: true,
   })
   if (!confirmed) return
@@ -80,33 +84,33 @@ async function removeFromPlaylist(): Promise<void> {
     await playlistStore.removeTrack(playlistId, id)
   }
   clear()
-  toastStore.success('已从歌单移除')
+  toastStore.success(t('playlistDetail.removed'))
 }
 
 async function renamePlaylist(): Promise<void> {
   if (!playlist.value) return
   const name = await dialogStore.prompt({
-    title: '重命名歌单',
+    title: t('playlists.rename'),
     initialValue: playlist.value.name,
-    placeholder: '歌单名称',
-    validate: (value) => (value.trim().length === 0 ? '请输入歌单名称' : null),
+    placeholder: t('playlists.namePlaceholder'),
+    validate: (value) => (value.trim().length === 0 ? t('playlists.nameRequired') : null),
   })
   if (!name || name === playlist.value.name) return
   await playlistStore.rename(playlistId, name)
-  toastStore.success('歌单已重命名')
+  toastStore.success(t('playlists.renamed'))
 }
 
 async function deletePlaylist(): Promise<void> {
   if (!playlist.value) return
   const confirmed = await dialogStore.confirm({
-    title: '删除歌单',
-    message: `确定删除歌单「${playlist.value.name}」吗？歌单内曲目不会从曲库移除。`,
-    confirmText: '删除',
+    title: t('playlists.delete'),
+    message: t('playlists.deleteMessage', { name: playlist.value.name }),
+    confirmText: t('common.delete'),
     danger: true,
   })
   if (!confirmed) return
   await playlistStore.remove(playlistId)
-  toastStore.success('歌单已删除')
+  toastStore.success(t('playlists.deleted'))
   router.push('/playlists')
 }
 </script>
@@ -117,23 +121,23 @@ async function deletePlaylist(): Promise<void> {
       <DetailHero
         icon="list-music"
         :title="playlist.name"
-        :subtitle="playlist.description || (playlist.isSystem ? '系统歌单（只读）' : '')"
-        :meta="`${tracks.length} 首`"
-        :badge="playlist.isSystem ? '系统' : ''"
+        :subtitle="playlist.description || (playlist.isSystem ? t('playlistDetail.systemReadonly') : '')"
+        :meta="t('common.trackCount', { count: tracks.length })"
+        :badge="playlist.isSystem ? t('playlists.systemBadge') : ''"
       >
         <template #actions>
           <BaseButton size="md" variant="primary" @click="playAll">
             <Icon name="play" :size="15" />
-            播放
+            {{ t('common.play') }}
           </BaseButton>
-          <BaseButton size="md" variant="subtle" title="随机播放" @click="shuffleAll">
+          <BaseButton size="md" variant="subtle" :title="t('common.shuffle')" @click="shuffleAll">
             <Icon name="shuffle" :size="15" />
           </BaseButton>
           <template v-if="!playlist.isSystem">
-            <BaseButton size="md" variant="ghost" title="重命名" @click="renamePlaylist">
+            <BaseButton size="md" variant="ghost" :title="t('playlistDetail.rename')" @click="renamePlaylist">
               <Icon name="edit" :size="16" />
             </BaseButton>
-            <BaseButton size="md" variant="ghost" title="删除歌单" @click="deletePlaylist">
+            <BaseButton size="md" variant="ghost" :title="t('playlists.delete')" @click="deletePlaylist">
               <Icon name="trash-2" :size="16" />
             </BaseButton>
           </template>
@@ -146,14 +150,14 @@ async function deletePlaylist(): Promise<void> {
         :source-id="playlistId"
         :show-artist="true"
         v-model:selected-ids="selectedIds"
-        empty-title="歌单还是空的"
-        empty-description="在曲目右键菜单选择“添加到歌单”即可加入"
+        :empty-title="t('common.playlistEmpty')"
+        :empty-description="t('playlistDetail.emptyDescription')"
       />
       <SelectionBar
         v-if="!playlist.isSystem"
         :count="count"
         :all-favorited="allFavorited"
-        remove-title="从歌单移除"
+        :remove-title="t('playlistDetail.removeFromPlaylist')"
         @play="play"
         @add-playlist="addToPlaylist"
         @favorite="favorite"
@@ -162,10 +166,15 @@ async function deletePlaylist(): Promise<void> {
       />
     </template>
 
-    <EmptyState v-else icon="list-music" title="歌单不存在" description="它可能已被删除">
+    <EmptyState
+      v-else
+      icon="list-music"
+      :title="t('playlistDetail.notFound')"
+      :description="t('playlistDetail.notFoundDescription')"
+    >
       <BaseButton size="sm" variant="subtle" @click="router.push('/playlists')">
         <Icon name="back" :size="14" />
-        返回歌单
+        {{ t('playlistDetail.backToPlaylists') }}
       </BaseButton>
     </EmptyState>
   </section>

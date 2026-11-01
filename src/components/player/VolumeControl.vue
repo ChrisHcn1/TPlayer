@@ -8,6 +8,7 @@ import { storeToRefs } from 'pinia'
 
 import { usePlayerStore } from '../../stores/player'
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 
 const playerStore = usePlayerStore()
 const { snapshot } = storeToRefs(playerStore)
@@ -48,8 +49,8 @@ function onInput(event: Event): void {
     <button
       type="button"
       class="volume__btn"
-      :aria-label="muted ? '取消静音' : '静音'"
-      :title="muted ? '取消静音（M）' : '静音（M）'"
+      :aria-label="muted ? t('player.unmute') : t('player.mute')"
+      :title="muted ? t('player.unmuteHint') : t('player.muteHint')"
       @click="toggleMute"
     >
       <Icon :name="iconName" :size="18" />
@@ -62,7 +63,7 @@ function onInput(event: Event): void {
       step="1"
       :value="Math.round(effectiveVolume * 100)"
       :style="{ '--value': `${Math.round(effectiveVolume * 100)}%` }"
-      aria-label="音量"
+      :aria-label="t('player.volume')"
       @input="onInput"
     />
   </div>

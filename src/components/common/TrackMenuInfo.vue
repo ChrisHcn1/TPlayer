@@ -13,6 +13,7 @@ import { computed, ref, watch } from 'vue'
 import { libraryService } from '../../services/library'
 import { lyricsService } from '../../services/lyrics'
 import type { Lyrics, TrackInfo } from '../../types'
+import { t } from '../../i18n'
 import Icon from './Icon.vue'
 import defaultCover from '../../assets/default-cover.svg'
 
@@ -92,13 +93,13 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
     <!-- 加载中：占位骨架，菜单保持可交互 -->
     <div v-if="loading" class="track-menu-info__state">
       <Icon name="loader" :size="18" spin />
-      <span>曲目信息加载中…</span>
+      <span>{{ t('track.infoLoading') }}</span>
     </div>
 
     <!-- 元数据加载失败：降级提示（动作菜单仍可用） -->
     <div v-else-if="failed || !info" class="track-menu-info__state">
       <Icon name="info" :size="18" />
-      <span>曲目信息不可用</span>
+      <span>{{ t('track.infoUnavailable') }}</span>
     </div>
 
     <!-- 正常渲染 -->
@@ -125,35 +126,35 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
       <!-- 完整元数据网格 -->
       <dl class="track-menu-info__grid">
         <div class="track-menu-info__cell">
-          <dt>格式</dt>
+          <dt>{{ t('track.format') }}</dt>
           <dd>{{ info.format ? info.format.toUpperCase() : '—' }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>时长</dt>
+          <dt>{{ t('track.duration') }}</dt>
           <dd>{{ formatDuration(info.duration) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>采样率</dt>
+          <dt>{{ t('track.sampleRate') }}</dt>
           <dd>{{ formatSampleRate(info.sampleRate) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>比特率</dt>
+          <dt>{{ t('track.bitrate') }}</dt>
           <dd>{{ formatBitrate(info.bitrate) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>位深</dt>
+          <dt>{{ t('track.bitDepth') }}</dt>
           <dd>{{ safeFormat(info.bitDepth, (n) => `${n} bit`) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>声道</dt>
-          <dd>{{ safeFormat(info.channels, (n) => (n === 1 ? '单声道' : n === 2 ? '立体声' : `${n} 声道`)) }}</dd>
+          <dt>{{ t('track.channels') }}</dt>
+          <dd>{{ safeFormat(info.channels, (n) => (n === 1 ? t('info.mono') : n === 2 ? t('info.stereo') : t('info.channels', { count: n }))) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>大小</dt>
+          <dt>{{ t('track.fileSize') }}</dt>
           <dd>{{ formatSize(info.fileSize) }}</dd>
         </div>
         <div class="track-menu-info__cell">
-          <dt>音轨</dt>
+          <dt>{{ t('track.trackNumber') }}</dt>
           <dd>{{ safeFormat(info.trackNumber, (n) => String(n)) }}</dd>
         </div>
       </dl>
@@ -168,10 +169,10 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
       <div class="track-menu-info__lyrics">
         <p class="track-menu-info__lyrics-title">
           <Icon name="lyrics" :size="13" />
-          <span>歌词</span>
+          <span>{{ t('track.lyrics') }}</span>
         </p>
         <pre v-if="lyricsText" class="track-menu-info__lyrics-body">{{ lyricsText }}</pre>
-        <p v-else class="track-menu-info__lyrics-empty">未找到歌词</p>
+        <p v-else class="track-menu-info__lyrics-empty">{{ t('track.noLyricsFound') }}</p>
       </div>
     </template>
   </div>

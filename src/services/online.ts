@@ -11,6 +11,7 @@
  */
 import type { Lyrics, OnlineModuleConfig } from '../types'
 
+import { t } from '../i18n'
 import { NotImplementedError } from './ipc'
 
 /** 在线能力默认配置：关闭 + 不允许上报本地信息 */
@@ -32,7 +33,7 @@ export interface OnlineSearchItem {
 /** 在线模块未开启 */
 export class OnlineDisabledError extends Error {
   constructor(action: string) {
-    super(`在线模块未开启，已拒绝：${action}`)
+    super(t('online.disabled', { action }))
     this.name = 'OnlineDisabledError'
   }
 }

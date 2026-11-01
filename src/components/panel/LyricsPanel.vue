@@ -15,6 +15,7 @@ import { usePlayerStore } from '../../stores/player'
 import { useLibraryStore } from '../../stores/library'
 import { useSettingsStore } from '../../stores/settings'
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 
 const OFFSET_STEP_MS = 500
 
@@ -98,13 +99,13 @@ function setLineRef(el: Element | null, index: number): void {
     <!-- 加载中 -->
     <div v-if="status === 'loading'" class="lyrics-panel__state">
       <Icon name="loader" :size="22" spin />
-      <p>歌词加载中…</p>
+      <p>{{ t('panel.lyricsLoading') }}</p>
     </div>
 
     <!-- 无歌词 -->
     <div v-else-if="status === 'empty'" class="lyrics-panel__state">
       <Icon name="lyrics" :size="26" />
-      <p>暂无歌词</p>
+      <p>{{ t('panel.noLyrics') }}</p>
       <button
         v-if="onlineEnabled"
         type="button"
@@ -112,15 +113,15 @@ function setLineRef(el: Element | null, index: number): void {
         @click="matchOnline"
       >
         <Icon name="refresh" :size="15" />
-        在线匹配
+        {{ t('panel.matchOnline') }}
       </button>
-      <p v-else class="lyrics-panel__hint">可在「设置 → 在线模块」开启后自动匹配在线歌词</p>
+      <p v-else class="lyrics-panel__hint">{{ t('panel.noLyricsHint') }}</p>
     </div>
 
     <!-- 加载失败 -->
     <div v-else-if="status === 'error'" class="lyrics-panel__state">
       <Icon name="alert-triangle" :size="26" />
-      <p>歌词加载失败</p>
+      <p>{{ t('panel.lyricsLoadFailed') }}</p>
       <button
         v-if="snapshot.trackId"
         type="button"
@@ -128,7 +129,7 @@ function setLineRef(el: Element | null, index: number): void {
         @click="lyricsStore.load(snapshot.trackId)"
       >
         <Icon name="refresh" :size="15" />
-        重试
+        {{ t('panel.retry') }}
       </button>
     </div>
 
@@ -150,14 +151,14 @@ function setLineRef(el: Element | null, index: number): void {
     <!-- 空闲（未播放） -->
     <div v-else class="lyrics-panel__state">
       <Icon name="music-off" :size="26" />
-      <p>播放曲目后显示歌词</p>
+      <p>{{ t('panel.playTrackToShowLyrics') }}</p>
     </div>
 
     <!-- 偏移校正 -->
     <div v-if="lyrics" class="lyrics-panel__offset">
-      <button type="button" title="歌词提前 0.5 秒" @click="adjustOffset(-OFFSET_STEP_MS)">−0.5s</button>
-      <span class="u-tabular" title="歌词偏移">{{ offsetText }}</span>
-      <button type="button" title="歌词延后 0.5 秒" @click="adjustOffset(OFFSET_STEP_MS)">+0.5s</button>
+      <button type="button" :title="t('panel.lyricsEarlier')" @click="adjustOffset(-OFFSET_STEP_MS)">−0.5s</button>
+      <span class="u-tabular" :title="t('panel.lyricsOffset')">{{ offsetText }}</span>
+      <button type="button" :title="t('panel.lyricsLater')" @click="adjustOffset(OFFSET_STEP_MS)">+0.5s</button>
     </div>
   </div>
 </template>

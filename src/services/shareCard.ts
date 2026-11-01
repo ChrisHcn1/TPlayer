@@ -10,6 +10,7 @@
  *  - 数据与视图解耦：调用方传 ShareCardData（由 stats store 构建）。
  */
 import type { ShareCardData, TopArtistItem, TopTrackItem } from '../types/stats'
+import { t } from '../i18n'
 import { isTauriRuntime } from './ipc'
 
 /** 卡片画布尺寸（竖版 3:4 分享卡） */
@@ -54,29 +55,33 @@ function clip(value: string, maxChars: number): string {
   return value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value
 }
 
-/** 时长格式化：毫秒 → "X 小时 Y 分钟"（不足 1 小时显示分钟） */
+/** 时长格式化：毫秒 → "X 小时 Y 分钟"（不足 1 小时显示分钟），单位随语言本地化 */
 export function formatDuration(ms: number): string {
   const totalMinutes = Math.floor(ms / 60_000)
   if (totalMinutes <= 0) {
     const seconds = Math.floor(ms / 1000)
-    return seconds > 0 ? `${seconds} 秒` : '0 分钟'
+    return seconds > 0
+      ? t('shareCard.durationSeconds', { count: seconds })
+      : t('shareCard.durationMinutes', { count: 0 })
   }
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
   if (hours > 0) {
-    return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+    return minutes > 0
+      ? t('shareCard.durationHoursMinutes', { hours, minutes })
+      : t('shareCard.durationHours', { hours })
   }
-  return `${minutes} 分钟`
+  return t('shareCard.durationMinutes', { count: minutes })
 }
 
 /** 时段名（按小时归类，用于"最常听时段"文案） */
 function hourLabel(hour: number): string {
-  if (hour >= 5 && hour < 9) return '清晨'
-  if (hour >= 9 && hour < 12) return '上午'
-  if (hour >= 12 && hour < 14) return '中午'
-  if (hour >= 14 && hour < 18) return '下午'
-  if (hour >= 18 && hour < 23) return '晚上'
-  return '深夜'
+  if (hour >= 5 && hour < 9) return t('shareCard.period.earlyMorning')
+  if (hour >= 9 && hour < 12) return t('shareCard.period.morning')
+  if (hour >= 12 && hour < 14) return t('shareCard.period.noon')
+  if (hour >= 14 && hour < 18) return t('shareCard.period.afternoon')
+  if (hour >= 18 && hour < 23) return t('shareCard.period.evening')
+  return t('shareCard.period.lateNight')
 }
 
 /** 格式化 Unix 秒 → "2026-10-10" */
@@ -111,7 +116,8 @@ function topTrackRow(
   countText: string,
 ): string {
   const title = clip(item.title, 18)
-  const artists = item.artists.length > 0 ? clip(item.artists.join(' / '), 26) : '未知艺术家'
+  const artists =
+    item.artists.length > 0 ? clip(item.artists.join(' / '), 26) : t('shareCard.unknownArtist')
   return `
     ${rankBadge(150, y, rank, brand, onBrand)}
     <text x="200" y="${y - 6}" font-size="32" font-weight="600" fill="${primary}">${xmlEscape(title)}</text>
@@ -196,18 +202,18 @@ export function buildShareCardSvg(data: ShareCardData): string {
 
   <g font-family="${xmlEscape(fontFamily)}">
     <text x="90" y="410" font-size="72" font-weight="700" fill="url(#card-accent)">${xmlEscape(totalText)}</text>
-    <text x="90" y="462" font-size="30" fill="${tertiary}">累计播放时长</text>
+    <text x="90" y="462" font-size="30" fill="${tertiary}">${xmlEscape(t('shareCard.totalDuration'))}</text>
 
     <text x="450" y="410" font-size="72" font-weight="700" fill="${primary}">${data.trackCount}</text>
-    <text x="450" y="462" font-size="30" fill="${tertiary}">播放曲目数</text>
+    <text x="450" y="462" font-size="30" fill="${tertiary}">${xmlEscape(t('shareCard.trackCount'))}</text>
 
     <text x="810" y="410" font-size="72" font-weight="700" fill="${primary}">${data.playCount}</text>
-    <text x="810" y="462" font-size="30" fill="${tertiary}">累计播放次数</text>
+    <text x="810" y="462" font-size="30" fill="${tertiary}">${xmlEscape(t('shareCard.playCount'))}</text>
   </g>
 
   <line x1="90" y1="540" x2="990" y2="540" stroke="${brandSubtle}" stroke-width="2"/>
 
-  <text x="90" y="640" font-size="34" font-weight="600" fill="${secondary}">TOP 曲目</text>
+  <text x="90" y="640" font-size="34" font-weight="600" fill="${secondary}">${xmlEscape(t('shareCard.topTracks'))}</text>
   ${topTracks
     .map((item, index) =>
       topTrackRow(
@@ -219,12 +225,12 @@ export function buildShareCardSvg(data: ShareCardData): string {
         tertiary,
         brand,
         onBrand,
-        `${item.playCount} 次`,
+        t('shareCard.plays', { count: item.playCount }),
       ),
     )
     .join('')}
 
-  <text x="90" y="1130" font-size="34" font-weight="600" fill="${secondary}">TOP 艺术家</text>
+  <text x="90" y="1130" font-size="34" font-weight="600" fill="${secondary}">${xmlEscape(t('shareCard.topArtists'))}</text>
   ${topArtists
     .map((item, index) =>
       topArtistRow(
@@ -235,16 +241,16 @@ export function buildShareCardSvg(data: ShareCardData): string {
         secondary,
         brand,
         onBrand,
-        `${item.playCount} 次`,
+        t('shareCard.plays', { count: item.playCount }),
       ),
     )
     .join('')}
 
-  <text x="90" y="1316" font-size="34" font-weight="600" fill="${secondary}">最常听时段</text>
-  <text x="990" y="1316" text-anchor="end" font-size="30" font-weight="600" fill="${brand}">${xmlEscape(hourLabel(peak))} ${peak} 点</text>
+  <text x="90" y="1316" font-size="34" font-weight="600" fill="${secondary}">${xmlEscape(t('shareCard.peakHour'))}</text>
+  <text x="990" y="1316" text-anchor="end" font-size="30" font-weight="600" fill="${brand}">${xmlEscape(t('shareCard.peakHourText', { period: hourLabel(peak), hour: peak }))}</text>
   ${bars}
 
-  <text x="90" y="${CARD_HEIGHT - 40}" font-size="26" fill="${tertiary}">生成于 ${formatDate(data.generatedAt)} · TPlayer</text>
+  <text x="90" y="${CARD_HEIGHT - 40}" font-size="26" fill="${tertiary}">${xmlEscape(t('shareCard.generatedAt', { date: formatDate(data.generatedAt) }))}</text>
 </svg>`
 }
 
@@ -270,7 +276,7 @@ export async function exportShareCardPng(data: ShareCardData): Promise<ExportRes
     img.decoding = 'async'
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve()
-      img.onerror = () => reject(new Error('卡片渲染失败'))
+      img.onerror = () => reject(new Error(t('shareCard.renderFailed')))
       img.src = url
     })
 
@@ -278,11 +284,11 @@ export async function exportShareCardPng(data: ShareCardData): Promise<ExportRes
     canvas.width = CARD_WIDTH
     canvas.height = CARD_HEIGHT
     const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('无法创建画布')
+    if (!ctx) throw new Error(t('shareCard.canvasFailed'))
     ctx.drawImage(img, 0, 0, CARD_WIDTH, CARD_HEIGHT)
 
     const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-    if (!png) throw new Error('PNG 编码失败')
+    if (!png) throw new Error(t('shareCard.pngEncodeFailed'))
 
     if (isTauriRuntime()) {
       return await saveViaDialog(png)
@@ -298,10 +304,12 @@ async function saveViaDialog(png: Blob): Promise<ExportResult> {
   try {
     const { save } = await import('@tauri-apps/plugin-dialog')
     const { writeFile } = await import('@tauri-apps/plugin-fs')
-    const defaultName = `收听报告-${formatDate(Math.floor(Date.now() / 1000))}.png`
+    const defaultName = t('shareCard.fileName', {
+      date: formatDate(Math.floor(Date.now() / 1000)),
+    })
     const path = await save({
       defaultPath: defaultName,
-      filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+      filters: [{ name: t('shareCard.pngFilter'), extensions: ['png'] }],
     })
     if (!path) return { ok: false, cancelled: true }
     const buffer = new Uint8Array(await png.arrayBuffer())
@@ -318,7 +326,9 @@ async function downloadViaAnchor(png: Blob): Promise<ExportResult> {
   try {
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `收听报告-${formatDate(Math.floor(Date.now() / 1000))}.png`
+    anchor.download = t('shareCard.fileName', {
+      date: formatDate(Math.floor(Date.now() / 1000)),
+    })
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()

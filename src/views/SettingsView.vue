@@ -13,7 +13,7 @@
  *  - 曲库目录白名单经 settings store；Tauri 下走系统目录选择器（services/dialog），
  *    浏览器降级为 prompt 文本输入；
  *  - 在线模块默认关闭；即使开启，allowLibraryUpload 仍需单独同意（privacy-first）。
- *  - 支持 /settings/:tab 直达（外观 / 播放 / 媒体库 / 歌词 / 在线服务 / 工具 / 更新 / 关于）。
+ *  - 支持 /settings/:tab 直达（外观 / 播放 / 媒体库 / 歌词 / 工具 / 更新 / 关于）。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
@@ -23,7 +23,7 @@ import { useLibraryStore } from '../stores/library'
 import { useTheme } from '../composables/useTheme'
 import { useToastStore } from '../stores/toast'
 import { useDialogStore } from '../stores/dialog'
-import { pickDirectory } from '../services/dialog'
+import { pickDirectory, pickDepsPackage } from '../services/dialog'
 import { lyricsService } from '../services/lyrics'
 import { appService } from '../services/app'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
@@ -35,30 +35,31 @@ import StatsView from './StatsView.vue'
 import LabView from './LabView.vue'
 import { useLayout } from '../composables/useLayout'
 import { useUpdaterStore } from '../stores/updater'
+import { useDepsStore } from '../stores/deps'
 import { useRoute, useRouter } from 'vue-router'
+import { depsService } from '../services/deps'
+import { t, useI18n } from '../i18n'
 
 type SettingsTab =
   | 'appearance'
   | 'playback'
   | 'library'
-  | 'report'
   | 'lyrics'
-  | 'online'
+  | 'report'
   | 'tools'
-  | 'window'
   | 'lab'
   | 'update'
   | 'about'
 
 interface TabDef {
   key: SettingsTab
-  label: string
+  labelKey: string
   icon: string
 }
 
 interface TabGroup {
   key: string
-  label: string
+  labelKey: string
   tabs: ReadonlyArray<TabDef>
 }
 
@@ -66,37 +67,35 @@ interface TabGroup {
 const TAB_GROUPS: ReadonlyArray<TabGroup> = [
   {
     key: 'interface',
-    label: '界面与外观',
+    labelKey: 'settings.group.interface',
     tabs: [
-      { key: 'appearance', label: '外观', icon: 'sun' },
-      { key: 'lyrics', label: '歌词', icon: 'lyrics' },
+      { key: 'appearance', labelKey: 'settings.appearance', icon: 'sun' },
     ],
   },
   {
     key: 'playback-media',
-    label: '播放与媒体',
+    labelKey: 'settings.group.playback',
     tabs: [
-      { key: 'playback', label: '播放', icon: 'play' },
-      { key: 'library', label: '媒体库', icon: 'disc' },
-      { key: 'report', label: '收听报告', icon: 'clock' },
+      { key: 'playback', labelKey: 'settings.playback', icon: 'play' },
+      { key: 'library', labelKey: 'settings.library', icon: 'disc' },
+      { key: 'lyrics', labelKey: 'settings.lyrics', icon: 'lyrics' },
     ],
   },
   {
     key: 'service',
-    label: '服务与工具',
+    labelKey: 'settings.group.service',
     tabs: [
-      { key: 'online', label: '在线服务', icon: 'globe' },
-      { key: 'tools', label: '工具', icon: 'swap' },
+      { key: 'tools', labelKey: 'settings.tools', icon: 'swap' },
+      { key: 'report', labelKey: 'settings.report', icon: 'clock' },
+      { key: 'lab', labelKey: 'settings.lab', icon: 'settings' },
     ],
   },
   {
     key: 'system',
-    label: '系统',
+    labelKey: 'settings.group.system',
     tabs: [
-      { key: 'lab', label: '实验室', icon: 'settings' },
-      { key: 'window', label: '窗口', icon: 'square' },
-      { key: 'update', label: '更新', icon: 'download' },
-      { key: 'about', label: '关于', icon: 'info' },
+      { key: 'update', labelKey: 'settings.update', icon: 'download' },
+      { key: 'about', labelKey: 'settings.about', icon: 'info' },
     ],
   },
 ]
@@ -118,6 +117,13 @@ const { isCoverAccentEnabled, setCoverAccent } = useLayout()
 const router = useRouter()
 const route = useRoute()
 
+/** 国际化：当前语言 / 可选语言清单 / 切换 */
+const { currentLocale, availableLocales, setLocale } = useI18n()
+function onLocaleChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value
+  void setLocale(value)
+}
+
 const DEFAULT_TAB: SettingsTab = 'appearance'
 const activeTab = ref<SettingsTab>(DEFAULT_TAB)
 const scanning = ref(false)
@@ -125,6 +131,8 @@ const scanning = ref(false)
 /** 目录自动监控状态（仅 Tauri 运行时后端提供；浏览器预览为 null） */
 const watcherStatus = ref<WatcherStatus | null>(null)
 let unlistenWatcher: (() => void) | null = null
+/** 解码组件安装进度事件取消订阅 */
+let unlistenDeps: (() => void) | null = null
 
 async function refreshWatcherStatus(): Promise<void> {
   watcherStatus.value = await getWatcherStatus()
@@ -145,6 +153,11 @@ onMounted(() => {
       last_event_desc: payload.desc,
     }
   })
+  // 解码组件：进入设置页时检测一次；订阅安装进度事件
+  void depsStore.refresh()
+  void depsService.onProgress((progress) => depsStore.onProgress(progress)).then((unlisten) => {
+    unlistenDeps = unlisten
+  })
 })
 
 // 浏览器前进/后退或地址栏变化时同步页签
@@ -157,6 +170,7 @@ watch(
 
 onUnmounted(() => {
   unlistenWatcher?.()
+  unlistenDeps?.()
 })
 
 /**
@@ -165,9 +179,11 @@ onUnmounted(() => {
  * 图标随当前主题变化（深色=月亮，浅色=太阳）。
  */
 const themeIcon = computed(() => (theme.value === 'dark' ? 'moon' : 'sun'))
-const themeLabel = computed(() => (theme.value === 'dark' ? '深色' : '浅色'))
+const themeLabel = computed(() =>
+  theme.value === 'dark' ? t('nav.theme-to-light') : t('nav.theme-to-dark'),
+)
 const themeToggleLabel = computed(() =>
-  theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
+  theme.value === 'dark' ? t('settings.themeToLight') : t('settings.themeToDark'),
 )
 
 const isTauri = computed(() => isTauriRuntime())
@@ -184,23 +200,23 @@ function selectTab(tab: SettingsTab): void {
 async function addLibraryDir(): Promise<void> {
   const picked = await pickDirectory()
   if (picked) {
-    await persistLibraryDir(() => settingsStore.addLibraryDir(picked), '已添加曲库目录')
+    await persistLibraryDir(() => settingsStore.addLibraryDir(picked), t('settings.dirAdded'))
     return
   }
   // 浏览器（或选择器不可用）：降级为手动输入路径
   const input = await dialogStore.prompt({
-    title: '添加曲库目录',
+    title: t('settings.addDirDialogTitle'),
     message: isTauri.value
-      ? '未能打开系统目录选择器，请手动输入目录路径。'
-      : '浏览器预览环境不支持系统目录选择，请输入一个模拟目录路径。',
-    placeholder: '例如 D:\\Music',
+      ? t('settings.addDirDialogTauriMsg')
+      : t('settings.addDirDialogBrowserMsg'),
+    placeholder: t('settings.addDirPlaceholder'),
     validate: (value) => {
       const v = value.trim()
-      if (!v) return '路径不能为空'
+      if (!v) return t('settings.pathRequired')
       // Windows 绝对路径需盘符（C:\）或 UNC（\\host\share）；网络共享若写成
       // 172.18.0.21/songs 这类非法形式，扫描时会静默失败，这里提前提示正确写法
       if (!/^[A-Za-z]:\\|\\\\/.test(v)) {
-        return '请填绝对路径；Windows 网络共享需以 \\\\ 开头（如 \\\\172.18.0.21\\songs），或先映射为盘符（如 Y:\\songs）'
+        return t('settings.pathInvalid')
       }
       return null
     },
@@ -208,10 +224,10 @@ async function addLibraryDir(): Promise<void> {
   if (input === null) return
   const dir = input.trim()
   if (settingsStore.libraryDirs.includes(dir)) {
-    toastStore.warning('该目录已在白名单中')
+    toastStore.warning(t('settings.dirExists'))
     return
   }
-  await persistLibraryDir(() => settingsStore.addLibraryDir(dir), '已添加曲库目录')
+  await persistLibraryDir(() => settingsStore.addLibraryDir(dir), t('settings.dirAdded'))
 }
 
 /**
@@ -224,18 +240,18 @@ async function persistLibraryDir(action: () => Promise<void>, successText: strin
     await action()
     toastStore.success(successText)
   } catch (cause) {
-    toastStore.error('保存曲库目录失败：' + normalizeError(cause).message)
+    toastStore.error(t('settings.dirSaveFailed') + normalizeError(cause).message)
   }
 }
 
 async function removeLibraryDir(dir: string): Promise<void> {
   const confirmed = await dialogStore.confirm({
-    title: '移除曲库目录',
-    message: `确定将「${dir}」从曲库白名单中移除吗？已扫描的曲目不受影响。`,
-    confirmText: '移除',
+    title: t('settings.removeDirDialogTitle'),
+    message: t('settings.removeDirDialogMessage', { dir }),
+    confirmText: t('settings.removeConfirm'),
   })
   if (!confirmed) return
-  await persistLibraryDir(() => settingsStore.removeLibraryDir(dir), '已移除曲库目录')
+  await persistLibraryDir(() => settingsStore.removeLibraryDir(dir), t('settings.dirRemoved'))
 }
 
 async function scanNow(): Promise<void> {
@@ -243,8 +259,8 @@ async function scanNow(): Promise<void> {
   try {
     // 智能扫描：曲目自上次扫描未变更时直接复用曲库 DB（瞬时），否则增量刷新
     await libraryStore.scan(false)
-    if (libraryStore.error) toastStore.error('扫描失败：' + libraryStore.error)
-    else toastStore.success('曲库扫描完成')
+    if (libraryStore.error) toastStore.error(t('settings.scanFailed') + libraryStore.error)
+    else toastStore.success(t('settings.scanDone'))
   } finally {
     scanning.value = false
   }
@@ -257,16 +273,77 @@ async function scanNow(): Promise<void> {
  */
 async function cancelScanNow(): Promise<void> {
   await libraryStore.cancelScan()
-  toastStore.info('已请求取消扫描（已入库部分保留）')
+  toastStore.info(t('settings.scanCancelRequested'))
 }
 
 async function clearLyricsCache(): Promise<void> {
   await lyricsService.clearCache()
-  toastStore.success('歌词缓存已清除')
+  toastStore.success(t('settings.lyricsCacheCleared'))
 }
 
 // ---- 应用更新（Tauri Updater，委托给 updater store）----------------
 const updaterStore = useUpdaterStore()
+
+// ---- 解码组件（第三方可选依赖）--------------------------------------
+const depsStore = useDepsStore()
+
+/** 解码组件状态（null = 尚未检测） */
+const depsStatus = computed(() => depsStore.status)
+/** 是否正在检测 */
+const depsChecking = computed(() => depsStore.checking)
+/** 是否正在安装 */
+const depsInstalling = computed(() => depsStore.installing)
+/** 当前阶段 */
+const depsPhase = computed(() => depsStore.phase)
+/** 状态摘要 */
+const depsSummary = computed(() => depsStore.summary())
+/** 工具展示名 */
+const depsToolLabel = (name: string): string => depsStore.toolLabel(name)
+/** 工具用途 */
+const depsToolPurpose = (name: string): string => depsStore.toolPurpose(name)
+/** 来源说明 */
+const depsSourceLabel = (source: string): string => depsStore.sourceLabel(source)
+
+/** 下载百分比（总大小未知时为 null → 不定进度条） */
+const depsPercent = computed<number | null>(() => {
+  const p = depsStore.progress
+  if (!p || !p.total || p.total <= 0) return null
+  return Math.min(100, Math.round((p.downloaded / p.total) * 100))
+})
+
+/** 阶段提示文案 */
+const depsProgressHint = computed(() => {
+  if (depsPhase.value === 'error') return depsStore.error || t('settings.depsInstallFailed')
+  if (depsStore.progress?.message) return depsStore.progress.message
+  return t('settings.depsPreparing')
+})
+
+/** 重新检测 */
+async function depsRefresh(): Promise<void> {
+  await depsStore.refresh()
+}
+
+/** 安装 / 更新解码组件 */
+async function depsInstall(): Promise<void> {
+  await depsStore.install()
+}
+
+/** 从本地 zip 安装依赖包（用户自行下载后选择） */
+async function depsInstallLocal(): Promise<void> {
+  const picked = await pickDepsPackage()
+  if (!picked) return
+  await depsStore.installLocal(picked)
+}
+
+/** 打开公共依赖目录 */
+async function depsOpenFolder(): Promise<void> {
+  await depsStore.openFolder()
+}
+
+/** 卸载解码组件 */
+async function depsRemove(): Promise<void> {
+  await depsStore.remove()
+}
 
 // 与模板兼容的状态别名（模板变量名保持不变，零改动）
 const updateStatus = computed(() => {
@@ -325,29 +402,40 @@ async function openOfficialSite(): Promise<void> {
   try {
     await appService.openWebsite()
   } catch (cause) {
-    toastStore.error('打开官网失败：' + normalizeError(cause).message)
+    toastStore.error(t('settings.openOfficialFailed') + normalizeError(cause).message)
   }
 }
 
 async function resetSettings(): Promise<void> {
   const confirmed = await dialogStore.confirm({
-    title: '恢复默认设置',
-    message: '将重置语言、曲库目录、在线服务等全部设置（不影响曲库文件、收藏与播放历史，主题保持不变）。',
-    confirmText: '恢复默认',
+    title: t('settings.resetConfirm'),
+    message: t('settings.resetDesc'),
+    confirmText: t('settings.resetConfirmText'),
     danger: true,
   })
   if (!confirmed) return
   await settingsStore.reset()
-  toastStore.success('设置已恢复默认')
+  toastStore.success(t('settings.resetDone'))
+}
+
+/** 复制版本信息（应用名 + 版本 + 运行环境）到剪贴板 */
+async function copyVersionInfo(): Promise<void> {
+  const text = `TPlayer v${appVersion} · ${isTauri ? t('settings.runtimeTauri') : t('settings.runtimeBrowser')}`
+  try {
+    await navigator.clipboard.writeText(text)
+    toastStore.success(t('settings.versionCopied'))
+  } catch {
+    toastStore.error(t('settings.copyFailed'))
+  }
 }
 </script>
 
 <template>
   <section class="settings">
     <!-- 左侧分组页签 -->
-    <nav class="settings__nav" aria-label="设置页签">
+    <nav class="settings__nav" :aria-label="t('settings.navLabel')">
       <template v-for="group in TAB_GROUPS" :key="group.key">
-        <p class="settings__nav-group">{{ group.label }}</p>
+        <p class="settings__nav-group">{{ t(group.labelKey) }}</p>
         <button
           v-for="tab in group.tabs"
           :key="tab.key"
@@ -357,18 +445,30 @@ async function resetSettings(): Promise<void> {
           @click="selectTab(tab.key)"
         >
           <Icon :name="tab.icon" :size="17" />
-          {{ tab.label }}
+          {{ t(tab.labelKey) }}
         </button>
       </template>
     </nav>
 
     <!-- 右侧内容 -->
     <div class="settings__content">
-      <!-- 外观：主题 / 氛围 -->
+      <!-- 外观：语言 / 主题 / 氛围 -->
       <div v-if="activeTab === 'appearance'" class="panel">
         <section class="setting-card">
-          <h2 class="setting-card__title">主题</h2>
-          <p class="setting-card__desc">主题选择会立即生效并持久化。</p>
+          <h2 class="setting-card__title">{{ t('settings.language') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.languageDesc') }}</p>
+          <div class="setting-row setting-row--end">
+            <select class="lang-select" :value="currentLocale" @change="onLocaleChange">
+              <option v-for="loc in availableLocales" :key="loc.code" :value="loc.code">
+                {{ loc.nativeName }}
+              </option>
+            </select>
+          </div>
+        </section>
+
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.theme') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.themeDesc') }}</p>
           <div class="theme-options">
             <button
               type="button"
@@ -385,32 +485,102 @@ async function resetSettings(): Promise<void> {
         </section>
 
         <section class="setting-card">
-          <h2 class="setting-card__title">氛围</h2>
-          <p class="setting-card__desc">让界面色调跟随当前歌曲封面，营造统一氛围。</p>
-          <label class="setting-row">
-            <span class="setting-row__text">
-              <span class="setting-row__label">皮肤色跟随当前歌曲封面</span>
-              <span class="setting-row__hint">从封面提取主色，接管按钮、选中态、进度条、歌词高亮等强调色，并为界面晕染同色氛围</span>
-            </span>
+          <h2 class="setting-card__title">{{ t('settings.coverAccent') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.coverAccentDesc') }}</p>
+          <div class="setting-row setting-row--end">
             <input
               type="checkbox"
               class="switch"
               :checked="isCoverAccentEnabled"
               @change="setCoverAccent(($event.target as HTMLInputElement).checked)"
             />
+          </div>
+        </section>
+
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.windowCloseTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.windowCloseDesc') }}</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">{{ t('settings.quitOnClose') }}</span>
+              <span class="setting-row__hint">{{ t('settings.quitOnCloseHint') }}</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.quitOnClose"
+              @change="settingsStore.setQuitOnClose(($event.target as HTMLInputElement).checked)"
+            />
           </label>
+        </section>
+      </div>
+
+      <!-- 歌词 + 在线服务 -->
+      <div v-else-if="activeTab === 'lyrics'" class="panel">
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.lyricsTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.lyricsDesc1') }}</p>
+          <p class="setting-card__desc">{{ t('settings.lyricsDesc2') }}</p>
+
+          <p class="setting-card__desc">{{ t('settings.onlineDesc') }}</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">{{ t('settings.onlineEnable') }}</span>
+              <span class="setting-row__hint">{{ t('settings.onlineEnableHint') }}</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.online.enabled"
+              @change="settingsStore.setOnlineEnabled(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <label class="setting-row" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
+            <span class="setting-row__text">
+              <span class="setting-row__label">{{ t('settings.allowUpload') }}</span>
+              <span class="setting-row__hint">{{ t('settings.allowUploadHint') }}</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.online.allowLibraryUpload"
+              :disabled="!settingsStore.online.enabled"
+              @change="settingsStore.setAllowLibraryUpload(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+          <div class="setting-row setting-row--column" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
+            <span class="setting-row__text">
+              <span class="setting-row__label">{{ t('settings.provider') }}</span>
+            </span>
+            <select
+              class="select"
+              :value="settingsStore.online.provider"
+              disabled
+              :title="t('settings.providerMore')"
+            >
+              <option value="netease">{{ t('settings.providerNetease') }}</option>
+              <option value="none">{{ t('settings.providerNone') }}</option>
+            </select>
+          </div>
+
+          <div class="panel__actions">
+            <BaseButton variant="subtle" size="sm" @click="clearLyricsCache">
+              <Icon name="trash-2" :size="15" />
+              {{ t('settings.clearLyricsCache') }}
+            </BaseButton>
+          </div>
         </section>
       </div>
 
       <!-- 播放：交叉淡化 / 音量归一化 -->
       <div v-else-if="activeTab === 'playback'" class="panel">
         <section class="setting-card">
-          <h2 class="setting-card__title">交叉淡化</h2>
-          <p class="setting-card__desc">切换曲目时旧曲淡出、新曲淡入，避免突兀断音；实时生效并持久化。</p>
+          <h2 class="setting-card__title">{{ t('settings.crossfadeTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.crossfadeDesc') }}</p>
           <label class="setting-row">
             <span class="setting-row__text">
-              <span class="setting-row__label">启用交叉淡化</span>
-              <span class="setting-row__hint">关闭后切歌为即时切换</span>
+              <span class="setting-row__label">{{ t('settings.crossfadeEnable') }}</span>
+              <span class="setting-row__hint">{{ t('settings.crossfadeEnableHint') }}</span>
             </span>
             <input
               type="checkbox"
@@ -424,8 +594,8 @@ async function resetSettings(): Promise<void> {
             :class="{ 'setting-row--disabled': !settingsStore.crossfade.enabled }"
           >
             <span class="setting-row__text">
-              <span class="setting-row__label">淡入淡出时长</span>
-              <span class="setting-row__hint">0 – 3 秒，默认 1 秒</span>
+              <span class="setting-row__label">{{ t('settings.crossfadeDuration') }}</span>
+              <span class="setting-row__hint">{{ t('settings.crossfadeDurationHint') }}</span>
             </span>
             <input
               type="range"
@@ -448,14 +618,12 @@ async function resetSettings(): Promise<void> {
         </section>
 
         <section class="setting-card">
-          <h2 class="setting-card__title">音量归一化</h2>
-          <p class="setting-card__desc">
-            按曲目响度自动调整播放音量：优先读取音频内嵌 ReplayGain 标签，无标签曲目首次播放时后台分析响度并持久化；开启后避免不同歌曲音量忽大忽小。
-          </p>
+          <h2 class="setting-card__title">{{ t('settings.normalizeTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.normalizeDesc') }}</p>
           <label class="setting-row">
             <span class="setting-row__text">
-              <span class="setting-row__label">启用音量归一化（ReplayGain）</span>
-              <span class="setting-row__hint">目标响度 -14 LUFS，峰值防削波；实时生效并持久化</span>
+              <span class="setting-row__label">{{ t('settings.normalizeEnable') }}</span>
+              <span class="setting-row__hint">{{ t('settings.normalizeEnableHint') }}</span>
             </span>
             <input
               type="checkbox"
@@ -465,13 +633,30 @@ async function resetSettings(): Promise<void> {
             />
           </label>
         </section>
+
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.audioQualityBadgeTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.audioQualityBadgeDesc') }}</p>
+          <label class="setting-row">
+            <span class="setting-row__text">
+              <span class="setting-row__label">{{ t('settings.audioQualityBadgeEnable') }}</span>
+              <span class="setting-row__hint">{{ t('settings.audioQualityBadgeEnableHint') }}</span>
+            </span>
+            <input
+              type="checkbox"
+              class="switch"
+              :checked="settingsStore.showAudioQuality"
+              @change="settingsStore.setShowAudioQuality(($event.target as HTMLInputElement).checked)"
+            />
+          </label>
+        </section>
       </div>
 
       <!-- 媒体库：曲库目录 / 启动行为 / 目录自动监控 -->
       <div v-else-if="activeTab === 'library'" class="panel">
         <section class="setting-card">
-          <h2 class="setting-card__title">曲库目录</h2>
-          <p class="setting-card__desc">只有白名单内的目录才允许被扫描与读取。</p>
+          <h2 class="setting-card__title">{{ t('settings.dirTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.dirDesc') }}</p>
           <ul v-if="settingsStore.libraryDirs.length > 0" class="dir-list">
             <li v-for="dir in settingsStore.libraryDirs" :key="dir" class="dir-list__item">
               <Icon name="folder" :size="17" />
@@ -479,43 +664,43 @@ async function resetSettings(): Promise<void> {
               <button
                 type="button"
                 class="dir-list__remove"
-                aria-label="移除目录"
-                title="移除目录"
+                :aria-label="t('settings.removeDir')"
+                :title="t('settings.removeDir')"
                 @click="removeLibraryDir(dir)"
               >
                 <Icon name="trash-2" :size="15" />
               </button>
             </li>
           </ul>
-          <p v-else class="panel__empty">尚未添加曲库目录</p>
+          <p v-else class="panel__empty">{{ t('settings.noDir') }}</p>
           <div class="panel__actions">
             <BaseButton variant="primary" size="sm" @click="addLibraryDir">
               <Icon name="folder-plus" :size="15" />
-              添加目录
+              {{ t('settings.addDir') }}
             </BaseButton>
             <BaseButton variant="subtle" size="sm" :disabled="scanning" @click="scanNow">
               <Icon name="refresh" :size="15" />
-              {{ scanning ? '扫描中…' : '立即扫描' }}
+              {{ scanning ? t('settings.scanning') : t('settings.scanNow') }}
             </BaseButton>
             <BaseButton
               v-if="scanning"
               variant="subtle"
               size="sm"
-              title="停止扫描（已入库部分保留）"
+              :title="t('settings.stopScan')"
               @click="cancelScanNow"
             >
               <Icon name="close" :size="15" />
-              取消扫描
+              {{ t('settings.cancelScan') }}
             </BaseButton>
           </div>
         </section>
 
         <section class="setting-card">
-          <h2 class="setting-card__title">启动与同步</h2>
+          <h2 class="setting-card__title">{{ t('settings.startupTitle') }}</h2>
           <label class="setting-row">
             <span class="setting-row__text">
-              <span class="setting-row__label">启动时自动扫描曲库</span>
-              <span class="setting-row__hint">应用启动后在后台检查白名单目录的变化</span>
+              <span class="setting-row__label">{{ t('settings.scanOnStartup') }}</span>
+              <span class="setting-row__hint">{{ t('settings.scanOnStartupHint') }}</span>
             </span>
             <input
               type="checkbox"
@@ -526,8 +711,8 @@ async function resetSettings(): Promise<void> {
           </label>
           <label class="setting-row">
             <span class="setting-row__text">
-              <span class="setting-row__label">启用目录自动监控</span>
-              <span class="setting-row__hint">默认开启；关闭后需手动「扫描曲库」更新</span>
+              <span class="setting-row__label">{{ t('settings.watchEnable') }}</span>
+              <span class="setting-row__hint">{{ t('settings.watchEnableHint') }}</span>
             </span>
             <input
               type="checkbox"
@@ -538,160 +723,154 @@ async function resetSettings(): Promise<void> {
           </label>
           <div v-if="isTauri && watcherStatus" class="setting-row setting-row--static">
             <span class="setting-row__text">
-              <span class="setting-row__label">监控状态</span>
+              <span class="setting-row__label">{{ t('settings.watchStatus') }}</span>
               <span class="setting-row__hint">
                 {{
                   watcherStatus.dirs.length > 0
-                    ? `正在监控 ${watcherStatus.dirs.length} 个目录`
-                    : '暂无已登记曲库目录'
+                    ? t('settings.watchStatusDirs', { count: watcherStatus.dirs.length })
+                    : t('settings.watchStatusNone')
                 }}
                 <template v-if="watcherStatus.last_event_desc">
-                  ｜最近：{{ watcherStatus.last_event_desc }}（{{ watcherStatus.last_event_at }}）
+                  {{ t('settings.watchLast', { desc: watcherStatus.last_event_desc ?? '', time: watcherStatus.last_event_at ?? '' }) }}
                 </template>
               </span>
             </span>
           </div>
           <div v-if="isTauri && !watcherStatus" class="setting-row setting-row--static">
             <span class="setting-row__text">
-              <span class="setting-row__label">监控状态</span>
-              <span class="setting-row__hint">状态查询暂不可用</span>
+              <span class="setting-row__label">{{ t('settings.watchStatus') }}</span>
+              <span class="setting-row__hint">{{ t('settings.watchUnavailable') }}</span>
             </span>
           </div>
         </section>
       </div>
 
-      <!-- 歌词 -->
-      <div v-else-if="activeTab === 'lyrics'" class="panel">
+      <!-- 收听报告（服务与工具组） -->
+      <div v-else-if="activeTab === 'report'" class="panel">
+        <StatsView embedded />
+      </div>
+
+      <!-- 工具：音频转换器 + 解码组件（可选依赖工具归并至此，避免散落在"更新"中） -->
+      <div v-else-if="activeTab === 'tools'" class="settings__tools">
+        <ConverterView />
+
+        <!-- 解码组件（第三方可选依赖）：检测 / 安装 / 更新 / 打开目录 -->
         <section class="setting-card">
-          <h2 class="setting-card__title">歌词来源</h2>
-          <p class="setting-card__desc">
-            歌词优先级为：音频内嵌歌词 &gt; 同名 .lrc 边车文件 &gt; 在线匹配（需开启在线服务，M3 落地）。
-            逐行偏移校正在右侧歌词面板底部进行，按曲目单独保存。
+          <h2 class="setting-card__title">{{ t('settings.depsTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.depsDesc') }}</p>
+
+          <!-- 状态摘要 -->
+          <div class="deps__summary" :class="{ 'deps__summary--warn': depsStatus && !depsStatus.ok }">
+            <Icon
+              :name="depsStatus && depsStatus.ok ? 'check' : 'info'"
+              :size="15"
+            />
+            <span>{{ depsSummary }}</span>
+          </div>
+
+          <!-- 各工具明细 -->
+          <ul v-if="depsStatus" class="deps__list">
+            <li v-for="tool in depsStatus.tools" :key="tool.name" class="deps__item">
+              <Icon
+                :name="tool.installed ? 'check' : 'minus'"
+                :size="14"
+                :class="tool.installed ? 'deps__ok' : 'deps__miss'"
+              />
+              <span class="deps__name">{{ depsToolLabel(tool.name) }}</span>
+              <span class="deps__purpose">{{ depsToolPurpose(tool.name) }}</span>
+              <span class="deps__source">
+                {{ tool.installed ? depsSourceLabel(tool.source) : t('settings.notInstalled') }}
+              </span>
+            </li>
+          </ul>
+
+          <!-- 安装进度 -->
+          <div v-if="depsInstalling || depsPhase === 'error'" class="deps__progress">
+            <div class="deps__hint" :class="{ 'deps__hint--error': depsPhase === 'error' }">
+              <Icon :name="depsPhase === 'error' ? 'info' : 'loader'" :size="15" :spin="depsPhase !== 'error'" />
+              <span>{{ depsProgressHint }}</span>
+            </div>
+            <div v-if="depsPhase !== 'error'" class="update__progress">
+              <div class="update__progress-bar">
+                <div
+                  class="update__progress-fill"
+                  :style="{ width: depsPercent === null ? '100%' : `${depsPercent}%` }"
+                  :class="{ 'update__progress-fill--indeterminate': depsPercent === null }"
+                />
+              </div>
+            </div>
+          </div>
+
+          <p class="deps__dir">
+            {{ t('settings.depsDir') }}<code>{{ depsStatus?.depsDir ?? '—' }}</code>
           </p>
+
           <div class="panel__actions">
-            <BaseButton variant="subtle" size="sm" @click="clearLyricsCache">
-              <Icon name="trash-2" :size="15" />
-              清除歌词缓存
+            <BaseButton
+              variant="primary"
+              size="sm"
+              :disabled="depsInstalling"
+              @click="depsInstall"
+            >
+              <Icon name="download" :size="15" />
+              {{ depsStatus?.installedPack ? t('settings.depsUpdate') : t('settings.depsInstall') }}
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" :disabled="depsChecking" @click="depsRefresh">
+              <Icon name="refresh" :size="15" />
+              {{ t('settings.depsRecheck') }}
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" :disabled="depsInstalling" @click="depsInstallLocal">
+              <Icon name="folder" :size="15" />
+              {{ t('settings.depsInstallLocal') }}
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" @click="depsOpenFolder">
+              <Icon name="folder" :size="15" />
+              {{ t('settings.depsOpenFolder') }}
+            </BaseButton>
+            <BaseButton
+              v-if="depsStatus?.installedPack"
+              variant="ghost"
+              size="sm"
+              :disabled="depsInstalling"
+              @click="depsRemove"
+            >
+              {{ t('settings.depsUninstall') }}
             </BaseButton>
           </div>
         </section>
       </div>
 
-      <!-- 收听报告（由"工具"页签独立为"播放与媒体"下的页签，置于媒体库之后） -->
-      <div v-else-if="activeTab === 'report'" class="panel">
-        <StatsView embedded />
-      </div>
-
-      <!-- 在线服务 -->
-      <div v-else-if="activeTab === 'online'" class="panel">
-        <section class="setting-card">
-          <h2 class="setting-card__title">在线能力</h2>
-          <p class="setting-card__desc">在线服务默认关闭；开启后按需使用，本地曲库默认不上报。</p>
-          <label class="setting-row">
-            <span class="setting-row__text">
-              <span class="setting-row__label">启用在线服务</span>
-              <span class="setting-row__hint">开启后可使用在线音源匹配与歌词匹配（M3 落地）</span>
-            </span>
-            <input
-              type="checkbox"
-              class="switch"
-              :checked="settingsStore.online.enabled"
-              @change="settingsStore.setOnlineEnabled(($event.target as HTMLInputElement).checked)"
-            />
-          </label>
-
-          <label class="setting-row" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
-            <span class="setting-row__text">
-              <span class="setting-row__label">允许上报本地曲库特征</span>
-              <span class="setting-row__hint">用于提高在线匹配准确率；默认关闭，需单独同意</span>
-            </span>
-            <input
-              type="checkbox"
-              class="switch"
-              :checked="settingsStore.online.allowLibraryUpload"
-              :disabled="!settingsStore.online.enabled"
-              @change="settingsStore.setAllowLibraryUpload(($event.target as HTMLInputElement).checked)"
-            />
-          </label>
-
-          <div class="setting-row setting-row--column" :class="{ 'setting-row--disabled': !settingsStore.online.enabled }">
-            <span class="setting-row__text">
-              <span class="setting-row__label">服务提供方</span>
-            </span>
-            <select
-              class="select"
-              :value="settingsStore.online.provider"
-              disabled
-              title="更多服务提供方将在 M3 接入"
-            >
-              <option value="netease">网易云音乐</option>
-              <option value="none">未选择</option>
-            </select>
-          </div>
-        </section>
-      </div>
-
-      <!-- 工具：音频转换器（收听报告已独立为"播放与媒体"下的页签） -->
-      <div v-else-if="activeTab === 'tools'" class="settings__tools">
-        <ConverterView />
-      </div>
-
       <!-- 实验室：实验功能开关（默认关闭、与现有功能隔离，可上线 / 废除） -->
       <div v-else-if="activeTab === 'lab'" class="panel">
         <section class="setting-card">
-          <h2 class="setting-card__title">实验室</h2>
+          <h2 class="setting-card__title">{{ t('settings.lab') }}</h2>
           <LabView />
-        </section>
-      </div>
-
-      <!-- 窗口：关闭按钮行为 -->
-      <div v-else-if="activeTab === 'window'" class="panel">
-        <section class="setting-card">
-          <h2 class="setting-card__title">关闭按钮</h2>
-          <p class="setting-card__desc">决定点击窗口右上角 X 时的行为，立即生效并持久化。</p>
-          <label class="setting-row">
-            <span class="setting-row__text">
-              <span class="setting-row__label">点击 X 直接关闭程序</span>
-              <span class="setting-row__hint">
-                开启后点击右上角 X 立即退出；关闭时（默认）仅隐藏到托盘后台驻留，可从托盘菜单恢复或退出
-              </span>
-            </span>
-            <input
-              type="checkbox"
-              class="switch"
-              :checked="settingsStore.quitOnClose"
-              @change="settingsStore.setQuitOnClose(($event.target as HTMLInputElement).checked)"
-            />
-          </label>
         </section>
       </div>
 
       <!-- 更新 -->
       <div v-else-if="activeTab === 'update'" class="panel">
         <section class="setting-card">
-          <h2 class="setting-card__title">检查更新</h2>
-          <p class="setting-card__desc">
-            当前版本：{{ appVersion }}。更新包经数字签名校验，仅从官方发布通道获取，
-            下载与安装均需你手动确认，不会静默升级。
-          </p>
+          <h2 class="setting-card__title">{{ t('settings.updateTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.updateDesc', { version: appVersion }) }}</p>
 
           <!-- 未检查 / 检查中 / 已是最新 / 失败 / 浏览器环境 -->
           <div v-if="updateStatus !== 'available' && updateStatus !== 'downloading'" class="update">
             <div v-if="updateStatus === 'checking'" class="update__hint">
               <Icon name="loader" :size="15" spin />
-              正在检查更新…
+              {{ t('settings.checking') }}
             </div>
             <div v-else-if="updateStatus === 'up-to-date'" class="update__hint update__hint--ok">
               <Icon name="check" :size="15" />
-              已是最新版本
+              {{ t('settings.upToDate') }}
             </div>
             <div v-else-if="updateStatus === 'error'" class="update__hint update__hint--error">
               <Icon name="info" :size="15" />
-              检查更新失败{{ updateError ? `：${updateError}` : '' }}
+              {{ updateError ? t('settings.checkFailedWith', { error: updateError }) : t('settings.checkFailed') }}
             </div>
             <div v-else-if="updateStatus === 'unsupported'" class="update__hint">
               <Icon name="info" :size="15" />
-              浏览器预览环境不支持应用内升级，请使用安装版 TPlayer。
+              {{ t('settings.unsupported') }}
             </div>
 
             <div class="panel__actions">
@@ -702,7 +881,7 @@ async function resetSettings(): Promise<void> {
                 @click="checkUpdates"
               >
                 <Icon name="refresh" :size="15" />
-                {{ updateStatus === 'error' ? '重试' : '检查更新' }}
+                {{ updateStatus === 'error' ? t('settings.retry') : t('settings.checkUpdate') }}
               </BaseButton>
             </div>
           </div>
@@ -711,7 +890,7 @@ async function resetSettings(): Promise<void> {
           <div v-else-if="updateStatus === 'available' && availableUpdate" class="update">
             <div class="update__card">
               <div class="update__version">
-                新版本 v{{ availableUpdate.version }}
+                {{ t('settings.newVersion', { version: availableUpdate.version }) }}
                 <span class="update__date">{{ availableUpdate.date }}</span>
               </div>
               <pre v-if="availableUpdate.body" class="update__notes">{{ availableUpdate.body }}</pre>
@@ -719,7 +898,7 @@ async function resetSettings(): Promise<void> {
             <div class="panel__actions">
               <BaseButton variant="primary" size="sm" @click="installUpdate">
                 <Icon name="download" :size="15" />
-                下载并安装
+                {{ t('settings.downloadInstall') }}
               </BaseButton>
             </div>
           </div>
@@ -728,7 +907,7 @@ async function resetSettings(): Promise<void> {
           <div v-else class="update">
             <div class="update__hint">
               <Icon name="loader" :size="15" spin />
-              正在下载更新…
+              {{ t('settings.downloading') }}
             </div>
             <div class="update__progress">
               <div class="update__progress-bar">
@@ -739,26 +918,11 @@ async function resetSettings(): Promise<void> {
                 />
               </div>
               <div class="update__progress-meta u-tabular">
-                <span>{{ updatePercent === null ? '下载中' : `${updatePercent}%` }}</span>
+                <span>{{ updatePercent === null ? t('settings.downloadProgress') : `${updatePercent}%` }}</span>
                 <span>{{ updateSizeText }}</span>
               </div>
             </div>
-            <p class="setting-card__desc">下载完成后安装器将自动启动，应用会重启进入新版本。</p>
-          </div>
-        </section>
-
-        <!-- 官方网站入口（程序内常驻访问官网的方式） -->
-        <section class="setting-card">
-          <h2 class="setting-card__title">官方网站</h2>
-          <p class="setting-card__desc">
-            访问 TPlayer 官网，获取版本公告、使用帮助与最新消息。首次安装完成后已自动为你打开过一次，
-            之后不会再次自动弹出，可随时从这里进入。
-          </p>
-          <div class="panel__actions">
-            <BaseButton variant="subtle" size="sm" @click="openOfficialSite">
-              <Icon name="external-link" :size="15" />
-              打开官网
-            </BaseButton>
+            <p class="setting-card__desc">{{ t('settings.installNote') }}</p>
           </div>
         </section>
       </div>
@@ -767,87 +931,105 @@ async function resetSettings(): Promise<void> {
       <div v-else class="panel">
         <section class="setting-card">
           <h2 class="setting-card__title">TPlayer</h2>
-          <p class="about__tagline">本地优先的桌面音乐播放器</p>
+          <p class="about__tagline">{{ t('settings.aboutTagline') }}</p>
 
-          <p class="about__intro">
-            TPlayer 是基于 Tauri 2、Vue 3 与 Rust 构建的本地优先桌面音乐播放器。所有曲目数据、
-            播放记录、收藏与歌单都保存在本机 SQLite 数据库（%APPDATA%\com.tplayer），不依赖任何云服务
-            即可完成曲库管理与播放。在线能力（歌词匹配、封面补全、元数据识别）作为可选增强存在，
-            默认关闭，开启后按需使用，且「上报本地曲库特征」仍需单独同意。
-          </p>
+          <p class="about__intro">{{ t('settings.aboutIntro') }}</p>
 
-          <h3 class="about__heading">主要特性</h3>
+          <h3 class="about__heading">{{ t('settings.aboutFeatures') }}</h3>
           <ul class="about__list">
             <li>
-              <strong>广格式支持</strong>：MP3、FLAC、WAV、AAC、OGG/Opus、M4A、WMA、APE、WV、TTA、TAK、
-              DSF/DFF（DSD）、DTS 等 18 种音频格式；播放以<strong>直接解码</strong>为主，DSD 等复杂格式由
-              ffmpeg 引擎解码为 PCM 播放（不落盘转码），兼容绝大多数声卡。
+              <strong>{{ t('settings.featFormatTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featFormatDesc') }}
             </li>
             <li>
-              <strong>播放体验</strong>：播放队列、交叉淡化（0–3 秒）、多种播放模式（顺序/单曲/随机/列表循环）、
-              音量归一化（ReplayGain，目标 -14 LUFS）、托盘控制与全局快捷键。
+              <strong>{{ t('settings.featPlaybackTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featPlaybackDesc') }}
             </li>
             <li>
-              <strong>曲库管理</strong>：支持多目录白名单与增量扫描（仅重新解析变更文件）、专辑 / 艺术家自动聚合、
-              分轨专辑识别（CUE 索引与 SACD ISO 均解析为多轨虚拟专辑）、元数据增强（标签优先、附属文件识别、文件名拆分）。
+              <strong>{{ t('settings.featLibraryTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featLibraryDesc') }}
             </li>
             <li>
-              <strong>歌词与封面</strong>：LRC 歌词与逐行偏移校正（按曲目保存）；封面自动匹配（内嵌标签 → 同名图片 →
-              目录封面 → 可选在线补全），并按封面主色生成界面皮肤（氛围模式）。
+              <strong>{{ t('settings.featLyricsTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featLyricsDesc') }}
             </li>
             <li>
-              <strong>播放历史与歌单</strong>：收藏、最近播放、自定义歌单、收听报告（播放时长 / 频次统计）。
+              <strong>{{ t('settings.featHistoryTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featHistoryDesc') }}
             </li>
             <li>
-              <strong>性能与启动</strong>：万级曲库的虚拟滚动与 SQLite 持久化，启动与列表浏览更快；目录自动监控
-              可在后台感知曲库变更，无需手动重扫。
+              <strong>{{ t('settings.featPerfTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featPerfDesc') }}
             </li>
             <li>
-              <strong>应用内自动升级</strong>：启动后每日首次静默检查更新，发现新版本时弹窗征求确认；用户确认后
-              自动下载（带进度、失败重试与断点续传）并安装，安装完成后提示「已是最新版本」。更新包经数字签名
-              校验，手动确认后安装，不会静默升级；也可在「设置 → 更新」手动检查。
+              <strong>{{ t('settings.featUpdateTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featUpdateDesc') }}
             </li>
             <li>
-              <strong>实验室功能</strong>：均衡器（10 段频段 ±15 dB、多种预设）、皮肤配色（强调色 / 窗口底纹 /
-              渐变 / 纹理）、自定义壁纸（本地 / 每日 Bing）、元数据增强（联网校验补未知字段）、CUE/SACD 分轨转换。
-              默认全部关闭，与现有功能隔离，成熟后并入正式版。
+              <strong>{{ t('settings.featLabTitle') }}</strong>{{ t('common.colon') }}{{ t('settings.featLabDesc') }}
             </li>
           </ul>
 
-          <h3 class="about__heading">隐私说明</h3>
-          <p class="about__intro">
-            曲库文件、收藏、歌单与播放记录只存储在本机（<span class="u-tabular">%APPDATA%\com.tplayer</span>）。
-            应用不会上传你的曲目信息；歌词、封面等在线增强默认关闭，即使手动开启，
-            「上报本地曲库特征」仍需单独同意。
-          </p>
+          <h3 class="about__heading">{{ t('settings.aboutPrivacy') }}</h3>
+          <p class="about__intro">{{ t('settings.aboutPrivacyText') }}</p>
 
-          <h3 class="about__heading">致谢</h3>
-          <p class="about__intro">
-            感谢 rodio / Symphonia（音频解码）、lofty（标签读取）、FFmpeg（格式解码与转换）、
-            minisign（升级签名）、Vue 与 Tauri 等开源项目。
-          </p>
-          <p class="about__intro">
-            特别感谢 格力森酒业、钱伟成、芥末墩儿、安安、忧蓝 对项目的支持与帮助。
-          </p>
+          <h3 class="about__heading">{{ t('settings.aboutThanks') }}</h3>
+          <p class="about__intro">{{ t('settings.aboutThanksText1') }}</p>
+          <p class="about__intro">{{ t('settings.aboutThanksText2') }}</p>
+        </section>
 
+        <!-- 资源与操作：官网 / 检查更新 / 复制版本信息 -->
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.resourcesTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.resourcesDesc') }}</p>
+          <div class="panel__actions">
+            <BaseButton variant="subtle" size="sm" @click="openOfficialSite">
+              <Icon name="external-link" :size="15" />
+              {{ t('settings.openOfficial') }}
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" @click="checkUpdates">
+              <Icon name="refresh" :size="15" />
+              {{ t('settings.checkUpdate') }}
+            </BaseButton>
+            <BaseButton variant="subtle" size="sm" @click="copyVersionInfo">
+              <Icon name="copy" :size="15" />
+              {{ t('settings.copyInfo') }}
+            </BaseButton>
+          </div>
+        </section>
+
+        <!-- 键盘快捷键（当前已接线的布局快捷键） -->
+        <section class="setting-card">
+          <h2 class="setting-card__title">{{ t('settings.shortcutsTitle') }}</h2>
+          <p class="setting-card__desc">{{ t('settings.shortcutsDesc') }}</p>
+          <dl class="about__shortcuts">
+            <div class="about__row">
+              <dt><kbd>Ctrl</kbd><kbd>B</kbd></dt>
+              <dd>{{ t('settings.shortcutSidebar') }}</dd>
+            </div>
+            <div class="about__row">
+              <dt><kbd>Ctrl</kbd><kbd>U</kbd></dt>
+              <dd>{{ t('settings.shortcutLyrics') }}</dd>
+            </div>
+            <div class="about__row">
+              <dt><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>U</kbd></dt>
+              <dd>{{ t('settings.shortcutQueue') }}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="setting-card">
           <dl class="about">
             <div class="about__row">
-              <dt>版本</dt>
+              <dt>{{ t('settings.version') }}</dt>
               <dd class="u-tabular">{{ appVersion }}</dd>
             </div>
             <div class="about__row">
-              <dt>运行环境</dt>
-              <dd>{{ isTauri ? 'Tauri 桌面环境' : '浏览器预览环境' }}</dd>
+              <dt>{{ t('settings.runtime') }}</dt>
+              <dd>{{ isTauri ? t('settings.runtimeTauri') : t('settings.runtimeBrowser') }}</dd>
             </div>
             <div class="about__row">
-              <dt>技术栈</dt>
+              <dt>{{ t('settings.techStack') }}</dt>
               <dd>Tauri 2 · Vue 3 · TypeScript · Rust</dd>
             </div>
           </dl>
           <div class="panel__actions">
             <BaseButton variant="danger" size="sm" @click="resetSettings">
               <Icon name="trash-2" :size="15" />
-              恢复默认设置
+              {{ t('settings.restoreDefaults') }}
             </BaseButton>
           </div>
         </section>
@@ -1095,6 +1277,11 @@ async function resetSettings(): Promise<void> {
   align-items: flex-start;
 }
 
+/* 仅含控件、无行内文案的行：控件靠右（避免与卡片标题/描述重复） */
+.setting-row--end {
+  justify-content: flex-end;
+}
+
 .setting-row__text {
   display: flex;
   flex-direction: column;
@@ -1142,6 +1329,23 @@ async function resetSettings(): Promise<void> {
 .switch:checked {
   background-color: var(--color-brand-solid);
   border-color: var(--color-brand-solid);
+}
+
+/* 语言选择器：沿用主题色 token，匹配暗/亮主题 */
+.lang-select {
+  flex: 0 0 auto;
+  min-width: 160px;
+  padding: 6px 10px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.lang-select:focus-visible {
+  outline: 2px solid var(--color-brand-solid);
+  outline-offset: 1px;
 }
 
 .switch:checked::after {
@@ -1293,6 +1497,30 @@ async function resetSettings(): Promise<void> {
   color: var(--color-text-primary);
 }
 
+.about__shortcuts .about__row dt {
+  flex: 0 0 auto;
+  min-width: 136px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 2px 6px;
+  font-family: var(--font-family-mono, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+}
+
 /* ---- 更新页签 ---- */
 .update {
   margin-top: var(--space-3);
@@ -1370,6 +1598,96 @@ async function resetSettings(): Promise<void> {
 .update__progress-fill--indeterminate {
   width: 40% !important;
   animation: update-progress-slide 1.2s ease-in-out infinite alternate;
+}
+
+/* ---- 解码组件（第三方可选依赖）------------------------------------ */
+.deps__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-base);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.deps__summary--warn {
+  color: var(--color-warning);
+  border-color: var(--color-warning);
+}
+
+.deps__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.deps__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.deps__ok {
+  color: var(--color-success);
+}
+
+.deps__miss {
+  color: var(--color-text-tertiary);
+}
+
+.deps__name {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.deps__purpose {
+  flex: 1 1 auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.deps__source {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.deps__progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.deps__hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.deps__hint--error {
+  color: var(--color-danger);
+}
+
+.deps__dir {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  word-break: break-all;
+}
+
+.deps__dir code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
 }
 
 @keyframes update-progress-slide {

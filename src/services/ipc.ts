@@ -10,11 +10,12 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type { AppError, AppResult } from '../types'
+import { t } from '../i18n'
 
 /** 非 Tauri 运行环境（例如直接用浏览器打开 vite dev 页面）调用命令时抛出 */
 export class IpcUnavailableError extends Error {
   constructor() {
-    super('当前不在 Tauri 运行环境中，无法调用后端命令')
+    super(t('ipc.notTauri'))
     this.name = 'IpcUnavailableError'
   }
 }
@@ -22,7 +23,7 @@ export class IpcUnavailableError extends Error {
 /** 后端命令尚未实现（M0 骨架阶段的预期行为） */
 export class NotImplementedError extends Error {
   constructor(action: string) {
-    super(`M0 骨架未实现：${action}`)
+    super(t('ipc.notImplemented', { action }))
     this.name = 'NotImplementedError'
   }
 }
@@ -38,7 +39,7 @@ export class IpcTimeoutError extends Error {
     public readonly command: string,
     public readonly timeoutMs: number,
   ) {
-    super(`命令 ${command} 超时（${timeoutMs}ms）`)
+    super(t('ipc.timeout', { command, timeoutMs }))
     this.name = 'IpcTimeoutError'
   }
 }
@@ -125,7 +126,7 @@ export function normalizeError(error: unknown): AppError {
   return {
     code: 'UNKNOWN',
     // 兜底：把真实错误文本带出来，避免只显示笼统的“操作失败”导致无法定位
-    message: detail && detail !== 'undefined' && detail !== 'null' ? detail : '操作失败',
+    message: detail && detail !== 'undefined' && detail !== 'null' ? detail : t('ipc.operationFailed'),
     detail,
   }
 }

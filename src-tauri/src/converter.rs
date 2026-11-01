@@ -200,13 +200,11 @@ pub fn start_batch(
         let format = OutputFormat::parse(&options.format)
             .ok_or_else(|| AppError::Converter(format!("不支持的输出格式: {}", options.format)))?;
         resolve_ffmpeg().ok_or_else(|| {
-            // 平台化提示：Linux 下 ffmpeg 可来自系统 PATH 或随包内置
-            // （/usr/lib/tplayer/bin）；Windows 下随安装包分发于 bin/。
-            #[cfg(target_os = "linux")]
-            let hint = "未找到 ffmpeg（请安装系统 ffmpeg：apt install ffmpeg，或使用随包内置版本）";
-            #[cfg(not(target_os = "linux"))]
-            let hint = "未找到 bin/ffmpeg.exe，无法执行转换";
-            AppError::Converter(hint.into())
+            // 缺依赖走独立错误码：前端据此弹出「安装解码组件」引导，
+            // 而非只显示一条会被忽略的 toast。
+            AppError::DependencyMissing(
+                "音频转换需要 FFmpeg。请在「设置 → 解码组件」中安装 FFmpeg 后重试".into(),
+            )
         })?;
 
         let output_dir = PathBuf::from(&options.output_dir);

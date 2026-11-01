@@ -34,6 +34,7 @@ export function createIdleSnapshot(): PlaybackSnapshot {
     rate: 1,
     mode: 'order',
     error: null,
+    errorCode: null,
   }
 }
 

@@ -321,7 +321,7 @@ impl SacdDisc {
         let exe = resolve_sacd_extract().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "未找到 sacd_extract（应随安装包分发），无法解码该音轨",
+                "未找到 sacd_extract（请在「设置 → 解码组件」中安装 SACD Extract 后重试），无法解码该音轨",
             )
         })?;
 
@@ -498,6 +498,8 @@ impl SacdDisc {
                 sacd_track_index: i as u32,
                 sacd_area: Some(SacdArea::Stereo2ch),
                 sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
+                codec: None,
+                codec_profile: None,
                 metadata_pending: false,
                 iso_placeholder: false,
             });
@@ -548,6 +550,8 @@ impl SacdDisc {
                 sacd_track_index: (n + i) as u32,
                 sacd_area: Some(SacdArea::MultiCh),
                 sacd_dsd_rate: Some(self.dsd_sample_rate.to_string()),
+                codec: None,
+                codec_profile: None,
                 metadata_pending: false,
                 iso_placeholder: false,
             });

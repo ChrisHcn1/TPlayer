@@ -15,6 +15,7 @@ import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../../stores/player'
 import { useLyricsStore } from '../../stores/lyrics'
 import { useLayout } from '../../composables/useLayout'
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
 
 const playerStore = usePlayerStore()
@@ -51,9 +52,9 @@ const nextLine = computed(() => {
 
 /** 占位文案：未播放 / 无同步歌词 */
 const placeholder = computed(() => {
-  if (!snapshot.value.trackId) return '未在播放'
-  if (!lyrics.value) return '暂无歌词，点击打开歌词面板在线匹配'
-  if (!lyrics.value.synced) return '当前为静态歌词，暂无逐字时间轴'
+  if (!snapshot.value.trackId) return t('player.idle')
+  if (!lyrics.value) return t('desktopLyrics.noLyricsHint')
+  if (!lyrics.value.synced) return t('desktopLyrics.staticLyrics')
   return ''
 })
 
@@ -67,14 +68,14 @@ function openLyricsPanel(): void {
     <!-- 左：标识 -->
     <div class="desktop-lyrics__label">
       <Icon name="lyrics" :size="15" />
-      <span>实时歌词</span>
+      <span>{{ t('desktopLyrics.label') }}</span>
     </div>
 
     <!-- 中：当前歌词行（点击打开右侧歌词面板） -->
     <button
       type="button"
       class="desktop-lyrics__main"
-      title="打开歌词面板"
+      :title="t('desktopLyrics.openPanel')"
       @click="openLyricsPanel"
     >
       <template v-if="currentLine">
@@ -88,8 +89,8 @@ function openLyricsPanel(): void {
     <button
       type="button"
       class="desktop-lyrics__close"
-      aria-label="收起实时歌词"
-      title="收起实时歌词"
+      :aria-label="t('player.desktopLyricsHide')"
+      :title="t('player.desktopLyricsHide')"
       @click="toggleDesktopLyrics"
     >
       <Icon name="chevron-down" :size="17" />

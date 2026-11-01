@@ -18,6 +18,7 @@ import { useLyricsStore } from '../../stores/lyrics'
 import { useLayout } from '../../composables/useLayout'
 import { useTrackCover } from '../../composables/useTrackCover'
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 import defaultCover from '../../assets/default-cover.svg'
 
 const playerStore = usePlayerStore()
@@ -72,7 +73,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <Teleport to="body">
-    <div class="now-overlay" role="dialog" aria-label="正在播放">
+    <div class="now-overlay" role="dialog" :aria-label="t('player.nowPlaying')">
       <!-- 铺满窗口的封面背景（切歌时淡入） -->
       <img
         :key="bgSrc"
@@ -87,8 +88,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       <button
         type="button"
         class="now-overlay__close"
-        aria-label="关闭封面视图（Esc）"
-        title="关闭（Esc）"
+        :aria-label="t('player.closeCoverView')"
+        :title="t('player.closeEsc')"
         @click="closeNowPlaying"
       >
         <Icon name="x" :size="20" />
@@ -101,7 +102,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             {{ lyricTrio.prev }}
           </p>
           <p :key="lyricTrio.current ?? lyricTrio.next" class="now-overlay__line now-overlay__line--current">
-            {{ hasLyrics ? (lyricTrio.current ?? lyricTrio.next) : '暂无歌词' }}
+            {{ hasLyrics ? (lyricTrio.current ?? lyricTrio.next) : t('panel.noLyrics') }}
           </p>
           <p v-if="lyricTrio.next && lyricTrio.current" class="now-overlay__line now-overlay__line--next">
             {{ lyricTrio.next }}
@@ -109,7 +110,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         </div>
 
         <div class="now-overlay__meta">
-          <p class="now-overlay__title">{{ track?.title ?? '未在播放' }}</p>
+          <p class="now-overlay__title">{{ track?.title ?? t('player.idle') }}</p>
           <p class="now-overlay__artist">{{ track?.artists.join(' / ') ?? '—' }}</p>
         </div>
 
@@ -117,7 +118,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <button
             type="button"
             class="now-overlay__btn"
-            aria-label="上一首"
+            :aria-label="t('common.previous')"
             :disabled="!track"
             @click="playerStore.previous()"
           >
@@ -126,7 +127,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <button
             type="button"
             class="now-overlay__btn now-overlay__btn--primary"
-            :aria-label="isPlaying ? '暂停' : '播放'"
+            :aria-label="isPlaying ? t('common.pause') : t('common.play')"
             :disabled="!track"
             @click="playerStore.toggle()"
           >
@@ -135,7 +136,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <button
             type="button"
             class="now-overlay__btn"
-            aria-label="下一首"
+            :aria-label="t('common.next')"
             :disabled="!track"
             @click="playerStore.next()"
           >

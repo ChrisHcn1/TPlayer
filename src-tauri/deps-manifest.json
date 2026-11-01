@@ -1,0 +1,41 @@
+{
+  "packVersion": "1.0.0",
+  "packs": [
+    {
+      "platform": "windows-x86_64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-windows-x86_64-1.0.0.zip",
+      "sha256": "38eb7aad52b8b3b015121f36e8923faee3e7363c55db2283038bb2c77fe37aa5",
+      "size": 181992585
+    },
+    {
+      "platform": "windows-aarch64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-windows-aarch64-1.0.0.zip",
+      "sha256": null,
+      "size": null
+    },
+    {
+      "platform": "macos-aarch64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-macos-aarch64-1.0.0.zip",
+      "sha256": null,
+      "size": null
+    },
+    {
+      "platform": "macos-x86_64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-macos-x86_64-1.0.0.zip",
+      "sha256": null,
+      "size": null
+    },
+    {
+      "platform": "linux-x86_64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-linux-x86_64-1.0.0.zip",
+      "sha256": null,
+      "size": null
+    },
+    {
+      "platform": "linux-aarch64",
+      "url": "https://github.com/ChrisHcn1/TPlayer/releases/download/v2.0.4/tplayer-deps-linux-aarch64-1.0.0.zip",
+      "sha256": null,
+      "size": null
+    }
+  ]
+}

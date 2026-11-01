@@ -15,6 +15,7 @@ import { useDialogStore } from '../stores/dialog'
 import { useToastStore } from '../stores/toast'
 import { useLabStore } from '../stores/lab'
 import { useMetaRetryStore } from '../stores/metaRetry'
+import { t } from '../i18n'
 
 export interface TrackMenuOptions {
   /** “播放”使用的列表上下文；缺省时按传入曲目自身构成 library 上下文 */
@@ -58,26 +59,26 @@ export function useTrackActions() {
       icon: 'list-music',
       onClick: () => {
         void playlistStore.addTracks(playlist.id, tracks.map((track) => track.id))
-        toastStore.success(`已添加 ${tracks.length} 首到「${playlist.name}」`)
+        toastStore.success(t('actions.addedToPlaylist', { count: tracks.length, name: playlist.name }))
       },
     }))
     items.push({ divider: true, key: 'pl-divider' })
     items.push({
       key: 'pl-new',
-      label: '新建歌单…',
+      label: t('actions.newPlaylist'),
       icon: 'plus',
       onClick: async () => {
         const name = await dialogStore.prompt({
-          title: '新建歌单',
-          placeholder: '歌单名称',
-          validate: (value) => (value.length === 0 ? '请输入歌单名称' : null),
+          title: t('actions.newPlaylistTitle'),
+          placeholder: t('actions.playlistNamePlaceholder'),
+          validate: (value) => (value.length === 0 ? t('actions.playlistNameRequired') : null),
         })
         if (!name) return
         await playlistStore.create(name)
         const created = playlistStore.current
         if (created) {
           await playlistStore.addTracks(created.id, tracks.map((track) => track.id))
-          toastStore.success(`已创建「${name}」并加入 ${tracks.length} 首`)
+          toastStore.success(t('actions.playlistCreated', { name, count: tracks.length }))
         }
       },
     })
@@ -86,17 +87,17 @@ export function useTrackActions() {
 
   async function removeFromLibrary(tracks: Track[]): Promise<void> {
     const confirmed = await dialogStore.confirm({
-      title: '从曲库移除',
+      title: t('actions.removeFromLibraryTitle'),
       message:
         tracks.length === 1
-          ? `确定从曲库移除「${tracks[0]?.title ?? ''}」吗？不会删除磁盘文件。`
-          : `确定从曲库移除选中的 ${tracks.length} 首吗？不会删除磁盘文件。`,
-      confirmText: '移除',
+          ? t('actions.removeFromLibraryMessageOne', { title: tracks[0]?.title ?? '' })
+          : t('actions.removeFromLibraryMessageMany', { count: tracks.length }),
+      confirmText: t('common.remove'),
       danger: true,
     })
     if (!confirmed) return
     await libraryStore.removeTracks(tracks.map((track) => track.id))
-    toastStore.success(`已移除 ${tracks.length} 首`)
+    toastStore.success(t('actions.removed', { count: tracks.length }))
   }
 
   /** 打开曲目右键菜单；tracks 为当前应作用的曲目集合（单选或多选） */
@@ -106,24 +107,24 @@ export function useTrackActions() {
     const allFavorited = tracks.every((track) => libraryStore.isFavorite(track.id))
     // 单曲：标题由菜单信息头承载（完整元数据 / 歌词 / 封面 / 路径），不再重复显示
     const isSingle = tracks.length === 1
-    const title = isSingle ? undefined : `已选 ${tracks.length} 首`
+    const title = isSingle ? undefined : t('actions.selectedCount', { count: tracks.length })
 
     const items: MenuItem[] = [
       {
         key: 'play',
-        label: '立即播放',
+        label: t('actions.playNow'),
         icon: 'play',
         onClick: () => playTracks(tracks, options),
       },
       {
         key: 'favorite',
-        label: allFavorited ? '取消收藏' : '收藏',
+        label: allFavorited ? t('player.unfavorite') : t('player.favorite'),
         icon: allFavorited ? 'heart-off' : 'heart',
         onClick: () => void toggleFavorite(tracks),
       },
       {
         key: 'add-playlist',
-        label: '添加到歌单',
+        label: t('actions.addToPlaylist'),
         icon: 'list-plus',
         children: buildAddToPlaylistItems(tracks),
       },
@@ -132,12 +133,12 @@ export function useTrackActions() {
     if (options.playlistId) {
       items.push({
         key: 'remove-from-playlist',
-        label: '从歌单移除',
+        label: t('actions.removeFromPlaylist'),
         icon: 'list-minus',
         onClick: () => {
           const playlistId = options.playlistId as string
           for (const id of ids) void playlistStore.removeTrack(playlistId, id)
-          toastStore.success(`已从当前歌单移除 ${tracks.length} 首`)
+          toastStore.success(t('actions.removedFromPlaylist', { count: tracks.length }))
         },
       })
     }
@@ -148,7 +149,7 @@ export function useTrackActions() {
       const track = tracks[0] as Track
       items.push({
         key: 'goto-album',
-        label: '转到专辑',
+        label: t('actions.gotoAlbum'),
         icon: 'disc',
         onClick: () => {
           if (!track.albumId) return
@@ -163,7 +164,7 @@ export function useTrackActions() {
       if (artist) {
         items.push({
           key: 'goto-artist',
-          label: '转到艺术家',
+          label: t('actions.gotoArtist'),
           icon: 'user',
           onClick: () => router.push(`/artists/${encodeURIComponent(artist)}`),
         })
@@ -172,7 +173,7 @@ export function useTrackActions() {
       if (labStore.isEnabled('enhanced-metadata')) {
         items.push({
           key: 'meta-identify',
-          label: '识别元数据',
+          label: t('actions.identifyMetadata'),
           icon: 'refresh',
           onClick: () => void identifyMetadata(track),
         })
@@ -182,7 +183,7 @@ export function useTrackActions() {
 
     items.push({
       key: 'remove-library',
-      label: tracks.length === 1 ? '从曲库移除' : `从曲库移除（${tracks.length} 首）`,
+      label: tracks.length === 1 ? t('actions.removeFromLibraryTitle') : t('actions.removeFromLibraryCount', { count: tracks.length }),
       icon: 'trash-2',
       danger: true,
       onClick: () => void removeFromLibrary(tracks),
@@ -195,21 +196,23 @@ export function useTrackActions() {
   async function identifyMetadata(track: Track): Promise<void> {
     const rec = await metaRetryStore.retry(track.id)
     if (!rec) {
-      toastStore.error('识别未完成：请确认当前运行在桌面端，且该曲目仍在曲库中')
+      toastStore.error(t('actions.identifyNotCompleted'))
       return
     }
     if (rec.status === 'ok') {
       const saved =
         rec.savedTo === 'tag'
-          ? '，已写入音频标签'
+          ? t('actions.identifyDoneTag', { detail: rec.detail })
           : rec.savedTo === 'sidecar'
-            ? '，已保存到附属文件'
+            ? t('actions.identifyDoneSidecar', { detail: rec.detail })
             : rec.savedTo === 'none'
-              ? `，保存失败${rec.saveDetail ? '：' + rec.saveDetail : ''}`
-              : ''
-      toastStore.success(`识别完成：${rec.detail}${saved}`)
-    } else if (rec.status === 'failed') toastStore.error(`未能识别：${rec.detail}`)
-    else toastStore.info(`识别完成：${rec.detail}`)
+              ? rec.saveDetail
+                ? t('actions.identifyDoneSaveFailedDetail', { detail: rec.detail, saveDetail: rec.saveDetail })
+                : t('actions.identifyDoneSaveFailed', { detail: rec.detail })
+              : t('actions.identifyDone', { detail: rec.detail })
+      toastStore.success(saved)
+    } else if (rec.status === 'failed') toastStore.error(t('actions.identifyFailed', { detail: rec.detail }))
+    else toastStore.info(t('actions.identifyDone', { detail: rec.detail }))
   }
 
   /** 批量收藏/取消收藏：以第一首当前状态为准统一取反 */
@@ -225,7 +228,7 @@ export function useTrackActions() {
 
   /** 在指定锚点（按钮）打开“添加到歌单”菜单（SelectionBar 使用） */
   function openAddToPlaylistMenu(event: MouseEvent, tracks: Track[]): void {
-    open(event, buildAddToPlaylistItems(tracks), `加入歌单（${tracks.length} 首）`)
+    open(event, buildAddToPlaylistItems(tracks), t('actions.addToPlaylistMenuTitle', { count: tracks.length }))
   }
 
   return {

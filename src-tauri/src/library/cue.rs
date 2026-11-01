@@ -242,6 +242,8 @@ fn parse_cue_inner(cue_path: &Path, probe_audio: bool) -> Vec<Track> {
             format: meta.map(|m| m.format.clone()).unwrap_or_default(),
             bitrate: meta.and_then(|m| m.bitrate),
             sample_rate: meta.and_then(|m| m.sample_rate),
+            codec: None,
+            codec_profile: None,
             has_cover: meta.map(|m| m.has_cover).unwrap_or(false),
             replaygain_db: meta.and_then(|m| m.replaygain_db),
             replaygain_peak: meta.and_then(|m| m.replaygain_peak),

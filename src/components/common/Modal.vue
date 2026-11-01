@@ -8,6 +8,7 @@
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import Icon from './Icon.vue'
+import { t } from '../../i18n'
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl'
 
@@ -113,7 +114,7 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
               v-if="showClose"
               type="button"
               class="modal__close"
-              aria-label="关闭对话框"
+              :aria-label="t('modal.closeLabel')"
               @click="emit('close')"
             >
               <Icon name="close" :size="16" />

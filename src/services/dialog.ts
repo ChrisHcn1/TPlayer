@@ -3,6 +3,7 @@
  * 浏览器环境没有原生目录选择器，返回 null，由调用方降级为文本输入。
  */
 import { isTauriRuntime } from './ipc'
+import { t } from '../i18n'
 
 /** 选择一张本地图片（实验室·窗口底纹「自定义壁纸」用）；取消或非 Tauri 环境返回 null */
 export async function pickImageFile(): Promise<string | null> {
@@ -11,7 +12,7 @@ export async function pickImageFile(): Promise<string | null> {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({
       multiple: false,
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+      filters: [{ name: t('dialog.filterImages'), extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
     })
     return typeof selected === 'string' ? selected : null
   } catch {
@@ -40,7 +41,7 @@ export async function pickAudioFiles(): Promise<string[] | null> {
       multiple: true,
       filters: [
         {
-          name: '音频 / 分轨源',
+          name: t('dialog.filterAudio'),
           extensions: [
             'mp3', 'flac', 'wav', 'ogg', 'aac', 'm4a', 'opus', 'wma', 'aif', 'aiff',
             'ape', 'wv', 'tta', 'tak', 'dsf', 'dff', 'dts', 'cue', 'iso',
@@ -56,3 +57,19 @@ export async function pickAudioFiles(): Promise<string[] | null> {
 }
 
 /** 选择单个 CUE / SACD ISO 分轨源文件（已合并进 pickAudioFiles 的统一过滤器） */
+
+/** 选择解码组件依赖包（zip）；取消或非 Tauri 环境返回 null */
+export async function pickDepsPackage(): Promise<string | null> {
+  if (!isTauriRuntime()) return null
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: t('dialog.filterDeps'), extensions: ['zip'] }],
+    })
+    return typeof selected === 'string' ? selected : null
+  } catch {
+    return null
+  }
+}

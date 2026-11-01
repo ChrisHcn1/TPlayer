@@ -69,6 +69,8 @@ fn placeholder(id: &str, path: &Path) -> Track {
         sacd_track_index: 0,
         sacd_area: None,
         sacd_dsd_rate: None,
+        codec: None,
+        codec_profile: None,
         metadata_pending: true,
         iso_placeholder: false,
     }

@@ -26,6 +26,7 @@ import { RouterLink, useRoute, type RouteMeta } from 'vue-router'
 import { router } from '../../router'
 import { useLayout } from '../../composables/useLayout'
 import { NAV_GROUPS, resolveGroupLabel, resolveNavLabel } from '../../i18n/nav'
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
 
 interface SideBarItem {
@@ -102,7 +103,7 @@ const collapseHint = computed(() =>
   <nav
     class="sidebar"
     :class="{ 'sidebar--collapsed': isSidebarCollapsed }"
-    aria-label="主导航"
+    :aria-label="t('sidebar.mainNav')"
   >
     <!--
       折叠把手：骑在侧栏与内容区的分隔线上（垂直居中的小圆钮），

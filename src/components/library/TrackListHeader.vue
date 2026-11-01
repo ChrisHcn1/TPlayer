@@ -4,6 +4,7 @@
  * 全选三态复选框；标题/艺术家/专辑/时长可排序。
  */
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 
 export type TrackSortField = 'title' | 'artist' | 'album' | 'duration'
 export type SortDirection = 'asc' | 'desc'
@@ -50,7 +51,7 @@ function sortIconFor(field: TrackSortField, sortField: TrackSortField | null, so
         }"
         role="checkbox"
         :aria-checked="allSelected ? 'true' : partial ? 'mixed' : 'false'"
-        :aria-label="allSelected ? '取消全选' : '全选'"
+        :aria-label="allSelected ? t('track.deselectAll') : t('track.selectAll')"
         :disabled="trackCount === 0"
         @click="emit('toggle-all')"
       >
@@ -61,17 +62,17 @@ function sortIconFor(field: TrackSortField, sortField: TrackSortField | null, so
     <div class="track-header__index">#</div>
 
     <button type="button" class="track-header__cell track-header__cell--title" @click="emit('sort', 'title')">
-      <span>标题</span>
+      <span>{{ t('track.title') }}</span>
       <Icon :name="sortIconFor('title', sortField, sortDir)" :size="13" />
     </button>
 
     <button v-if="showArtist" type="button" class="track-header__cell" @click="emit('sort', 'artist')">
-      <span>艺术家</span>
+      <span>{{ t('track.artist') }}</span>
       <Icon :name="sortIconFor('artist', sortField, sortDir)" :size="13" />
     </button>
 
     <button v-if="showAlbum" type="button" class="track-header__cell" @click="emit('sort', 'album')">
-      <span>专辑</span>
+      <span>{{ t('track.album') }}</span>
       <Icon :name="sortIconFor('album', sortField, sortDir)" :size="13" />
     </button>
 

@@ -3,8 +3,9 @@
  * 列表工具条（DESIGN §4.7）：高 --size-toolbar-h。
  * 左：大标题 + 副信息 + 主操作插槽；右：视图工具插槽 + 内联筛选框。
  */
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
+import { t } from '../../i18n'
 import SearchBox from '../common/SearchBox.vue'
 
 interface Props {
@@ -19,8 +20,12 @@ const props = withDefaults(defineProps<Props>(), {
   subtitle: '',
   keyword: '',
   showFilter: true,
-  filterPlaceholder: '筛选本列表',
+  filterPlaceholder: '',
 })
+
+const filterPlaceholderText = computed(
+  () => props.filterPlaceholder || t('list.filterPlaceholder'),
+)
 
 const emit = defineEmits<{
   (e: 'update:keyword', value: string): void
@@ -91,7 +96,7 @@ onBeforeUnmount(cancelTimer)
       <SearchBox
         v-if="showFilter"
         variant="inline"
-        :placeholder="filterPlaceholder"
+        :placeholder="filterPlaceholderText"
         :model-value="localKeyword"
         @update:model-value="onInput"
         @submit="onSubmit"

@@ -11,6 +11,7 @@
 import { computed } from 'vue'
 
 import { useUpdaterStore } from '../../stores/updater'
+import { t } from '../../i18n'
 import Modal from './Modal.vue'
 import BaseButton from './BaseButton.vue'
 import Icon from './Icon.vue'
@@ -22,7 +23,9 @@ const isProgress = computed(
   () => updater.phase === 'downloading' || updater.phase === 'installing' || updater.phase === 'error',
 )
 
-const dialogTitle = computed(() => (isConfirm.value ? '发现新版本' : '正在更新'))
+const dialogTitle = computed(() =>
+  isConfirm.value ? t('updateDialog.confirmTitle') : t('updateDialog.progressTitle'),
+)
 
 /** 下载百分比；服务端未返回总大小时为 null（退化为不定进度） */
 const percent = computed<number | null>(() => {
@@ -42,13 +45,13 @@ const sizeText = computed(() => {
 const progressHint = computed(() => {
   switch (updater.phase) {
     case 'installing':
-      return '正在安装并更新，应用即将重启…'
+      return t('updateDialog.installing')
     case 'error':
-      return `下载失败：${updater.error}`
+      return t('updateDialog.downloadFailed', { error: updater.error })
     default:
       return updater.retryAttempt > 0
-        ? `下载中断，正在重试（第 ${updater.retryAttempt} 次）…`
-        : '正在下载更新…'
+        ? t('updateDialog.retryInterrupted', { attempt: updater.retryAttempt })
+        : t('settings.downloading')
   }
 })
 </script>
@@ -70,7 +73,7 @@ const progressHint = computed(() => {
         <b>v{{ updater.update.version }}</b>
       </p>
       <pre v-if="updater.update.body" class="update-dialog__notes">{{ updater.update.body }}</pre>
-      <p v-else class="update-dialog__empty">本次更新未附带发布说明。</p>
+      <p v-else class="update-dialog__empty">{{ t('updateDialog.noNotes') }}</p>
     </div>
 
     <!-- 下载 / 安装 / 失败阶段 -->
@@ -93,18 +96,18 @@ const progressHint = computed(() => {
       </div>
 
       <div class="update-dialog__meta u-tabular">
-        <span>{{ percent === null ? '下载中' : `${percent}%` }}</span>
+        <span>{{ percent === null ? t('settings.downloadProgress') : `${percent}%` }}</span>
         <span>{{ sizeText }}</span>
       </div>
     </div>
 
     <template #footer>
       <div v-if="isConfirm" class="update-dialog__footer">
-        <BaseButton variant="ghost" size="sm" @click="updater.skipVersion()">跳过此版本</BaseButton>
-        <BaseButton variant="ghost" size="sm" @click="updater.later()">稍后提醒</BaseButton>
+        <BaseButton variant="ghost" size="sm" @click="updater.skipVersion()">{{ t('updateDialog.skip') }}</BaseButton>
+        <BaseButton variant="ghost" size="sm" @click="updater.later()">{{ t('updateDialog.later') }}</BaseButton>
         <BaseButton variant="primary" size="sm" @click="updater.confirmInstall()">
           <Icon name="download" :size="15" />
-          立即升级
+          {{ t('updateDialog.upgradeNow') }}
         </BaseButton>
       </div>
       <div v-else class="update-dialog__footer">
@@ -115,7 +118,7 @@ const progressHint = computed(() => {
           @click="updater.retry()"
         >
           <Icon name="refresh" :size="15" />
-          重试
+          {{ t('settings.retry') }}
         </BaseButton>
         <BaseButton
           v-else
@@ -124,7 +127,7 @@ const progressHint = computed(() => {
           :disabled="updater.phase === 'installing'"
           @click="updater.close()"
         >
-          后台继续
+          {{ t('updateDialog.continueBackground') }}
         </BaseButton>
       </div>
     </template>

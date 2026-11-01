@@ -8,7 +8,7 @@
 
 [package]
 name = "tplayer-next"
-version = "2.0.3"
+version = "2.0.4"
 description = "TPlayer Next —— 本地优先的桌面音乐播放器（Tauri 2 后端）"
 authors = ["TPlayer Next Contributors"]
 edition = "2021"
@@ -64,6 +64,9 @@ rayon = "1"
 encoding_rs = "0.8"
 # 在线歌词抓取（默认关闭，受设置开关控制）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# 解码组件依赖包（zip）解压：安装独立依赖包时需要
+# 版本与 tauri-plugin-updater 传递依赖的 zip 一致，避免重复编译两份 zip
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 # 实验室·窗口底纹：原生材质（Windows Mica/Acrylic、macOS Vibrancy）运行时切换。
 # 与 Tauri 自带 set_effects 互补——它能对「当前系统是否支持 Mica」返回 Err，
 # 从而实现 Win11→Mica、Win10→Acrylic 的真实降级链（set_effects 只取列表中首个变体）。

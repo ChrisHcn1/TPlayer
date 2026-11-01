@@ -26,6 +26,12 @@ pub struct Track {
     pub bitrate: Option<u32>,
     #[serde(rename = "sampleRate")]
     pub sample_rate: Option<u32>,
+    /// 音频编码名（ffprobe codec_name，如 flac/mp3/dts），用于 DTS 子类型识别与编码级分级
+    #[serde(rename = "codec", default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    /// 编码 profile（ffprobe profile，如 "DTS-HD MA" / "DTS-HD HRA" / "DTS"），区分 DTS 无损母带与有损核心
+    #[serde(rename = "codecProfile", default, skip_serializing_if = "Option::is_none")]
+    pub codec_profile: Option<String>,
     #[serde(rename = "hasCover")]
     pub has_cover: bool,
     /// ReplayGain 归一化增益（dB；NULL 表示尚无增益数据，播放时触发分析计算）

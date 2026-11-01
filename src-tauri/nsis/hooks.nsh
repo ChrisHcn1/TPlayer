@@ -75,6 +75,10 @@ tpn_scan_${UID}_done:
 ; ---------------------------------------------------------------------------
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "正在检测旧版本 TPlayer / TPlayerNext ..."
+  ; 先迁移旧版内置解码组件到公共依赖目录，再卸载旧版本：
+  ; 卸载会清空整个旧安装目录（%LOCALAPPDATA%\TPlayer\bin），
+  ; 不先迁移的话用户升级后就得重下数百 MB 的解码组件。
+  Call TPN_MigrateLegacyDeps
   Call TPN_CleanupOldVersions
   Pop $0
   ${If} $0 == "1"
@@ -431,5 +435,50 @@ Function TPN_CleanupShortcuts
   Delete "$DESKTOP\TPlayerNext.lnk"
   RMDir /r "$SMPROGRAMS\TPlayer"
   RMDir /r "$SMPROGRAMS\TPlayerNext"
+  Pop $R0
+FunctionEnd
+
+; ============================================================================
+; 解码组件（第三方依赖）迁移
+; ============================================================================
+; 背景：从本版本起，ffmpeg / ffprobe / sacd_extract 不再随主安装包分发，
+;       改为独立依赖包，安装在公共目录 %APPDATA%\com.tplayer\deps\packs\<版本>\。
+;
+; 升级场景的关键要求：**覆盖安装时保留已存在的第三方包不被删除**。
+;   - 旧版把三个工具装在安装目录（%LOCALAPPDATA%\TPlayer\bin）内，覆盖安装
+;     清理旧目录时会被一起删掉 —— 先复制到公共目录，避免用户重下数百 MB；
+;   - 公共目录位于安装目录之外，安装器的 RMDir /r 永远碰不到它，
+;     因此已安装的依赖包在后续任意次更新中都被完整保留、直接复用。
+;
+; 目标目录若已存在同名文件则跳过（不覆盖用户可能已升级过的版本）。
+; 注意：本文件需保存为 UTF-8 with BOM（含中文文案，makensis 依赖 BOM 识别编码）。
+
+!define TPN_DEPS_ROOT "$APPDATA\com.tplayer\deps\packs\legacy"
+!define TPN_DEPS_LEGACY_DIR "$LOCALAPPDATA\TPlayer\bin"
+
+; ---------------------------------------------------------------------------
+; 把旧安装目录里的三个工具复制到公共依赖目录（存在才复制，不覆盖）
+; ---------------------------------------------------------------------------
+Function TPN_MigrateLegacyDeps
+  Push $R0
+  Push $R1
+
+  ; 旧安装目录没有这三个文件 → 无需迁移（首次安装场景）
+  IfFileExists "${TPN_DEPS_LEGACY_DIR}\ffmpeg.exe" 0 tpn_mld_done
+
+  CreateDirectory "${TPN_DEPS_ROOT}"
+  ; 公共目录已有 → 不覆盖（用户可能已通过应用内安装拿到更新的版本）
+  IfFileExists "${TPN_DEPS_ROOT}\ffmpeg.exe" 0 tpn_mld_copy
+  DetailPrint "公共依赖目录已有解码组件，保留之（不迁移旧副本）。"
+  Goto tpn_mld_done
+
+tpn_mld_copy:
+  DetailPrint "正在迁移旧版内置解码组件到公共依赖目录 ..."
+  CopyFiles /SILENT "${TPN_DEPS_LEGACY_DIR}\ffmpeg.exe" "${TPN_DEPS_ROOT}\ffmpeg.exe"
+  CopyFiles /SILENT "${TPN_DEPS_LEGACY_DIR}\ffprobe.exe" "${TPN_DEPS_ROOT}\ffprobe.exe"
+  CopyFiles /SILENT "${TPN_DEPS_LEGACY_DIR}\sacd_extract.exe" "${TPN_DEPS_ROOT}\sacd_extract.exe"
+
+tpn_mld_done:
+  Pop $R1
   Pop $R0
 FunctionEnd

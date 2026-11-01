@@ -13,7 +13,13 @@
  *     "当前语言"的唯一来源是 settings store 的 locale（constants.LOCALE_STORAGE_KEY）。
  *  2. public/locales/*.json 是最终资源位：M3 接入 i18n 运行时后改由其驱动，
  *     本模块收敛为"键表 + 缺键兜底"，届时词条值不再在此维护（避免两处事实源）。
+ *
+ * 现状（M3 已落地）：resolveNavLabel / resolveGroupLabel 优先走运行时 t()（见 ./index），
+ * NAV_LABELS / NAV_GROUP_LABELS 仅作离线兜底——i18n 未就绪或资源缺失时仍展示中文，
+ * 不暴露原始键。词条权威来源为 public/locales/<code>.json。
  */
+
+import { hasMessage, t } from './index'
 
 /** 侧栏分组键与顺序（DESIGN §1.1：曲库组 → 工具组 → 底部固定组） */
 export const NAV_GROUPS = ['library', 'tools', 'bottom'] as const
@@ -63,9 +69,13 @@ const NAV_LABELS: Record<string, string> = {
 
 /**
  * 解析 titleKey → 展示文案。
- * 缺键时回落键尾段（如 nav.unknown → unknown），保证界面不直接暴露 nav.xxx 原始键（§6.2）。
+ * 优先走运行时 t()（按当前语言 + 默认语言兜底）；仅当 i18n 未就绪或资源缺失时，
+ * 才回落到本模块静态 NAV_LABELS（离线兜底，展示中文），绝不暴露 nav.xxx 原始键。
  */
 export function resolveNavLabel(titleKey: string): string {
+  if (hasMessage(titleKey)) {
+    return t(titleKey)
+  }
   const label = NAV_LABELS[titleKey]
   if (label !== undefined && label.length > 0) {
     return label
@@ -76,6 +86,10 @@ export function resolveNavLabel(titleKey: string): string {
 
 /** 解析分组 → 分组标题；bottom 组返回空串，由组件据此跳过标题渲染（§4.2） */
 export function resolveGroupLabel(group: string): string {
+  const key = `nav.group.${group}`
+  if (hasMessage(key)) {
+    return t(key)
+  }
   return isNavGroup(group) ? NAV_GROUP_LABELS[group] : ''
 }
 

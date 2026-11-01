@@ -31,6 +31,10 @@ export interface Track {
   bitrate: number | null
   /** 采样率（Hz） */
   sampleRate: number | null
+  /** 音频编码名（ffprobe codec_name，如 flac/mp3/dts） */
+  codec?: string | null
+  /** 编码 profile（ffprobe profile，如 "DTS-HD MA" / "DTS-HD HRA" / "DTS"） */
+  codecProfile?: string | null
   /** 内嵌封面是否可用 */
   hasCover: boolean
   /** 入库时间（Unix 秒） */

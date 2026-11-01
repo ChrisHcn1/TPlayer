@@ -578,6 +578,9 @@ impl PlayerHandle {
                 let _ = self.engine.stop();
                 self.snapshot.status = PlaybackStatus::Error;
                 self.snapshot.error = Some(e.to_string());
+                // 错误码随快照下发：前端据此判断是否弹出「安装解码组件」引导
+                // （如 DEPENDENCY_MISSING），而不是靠文案匹配。
+                self.snapshot.error_code = Some(e.code().to_string());
                 self.play_started_at = None;
                 self.is_paused = true;
                 if !quiet {

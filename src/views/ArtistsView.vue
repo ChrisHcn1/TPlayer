@@ -11,6 +11,7 @@ import type { Artist } from '../types'
 import ListToolbar from '../components/library/ListToolbar.vue'
 import MediaCard from '../components/library/MediaCard.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const router = useRouter()
 const libraryStore = useLibraryStore()
@@ -45,13 +46,17 @@ function onContextMenu(artist: Artist, event: MouseEvent): void {
 
 <template>
   <section class="view">
-    <ListToolbar title="艺术家" :subtitle="`${artists.length} 位`" v-model:keyword="keyword" />
+    <ListToolbar
+      :title="t('nav.artists')"
+      :subtitle="t('common.artistCount', { count: artists.length })"
+      v-model:keyword="keyword"
+    />
 
     <EmptyState
       v-if="artists.length === 0"
       icon="user"
-      title="暂无艺术家"
-      description="扫描曲库后，按艺术家标签聚合的结果会出现在这里"
+      :title="t('artists.emptyTitle')"
+      :description="t('artists.emptyDescription')"
     />
     <div v-else class="media-grid" role="list">
       <MediaCard
@@ -59,7 +64,7 @@ function onContextMenu(artist: Artist, event: MouseEvent): void {
         :key="artist.id"
         variant="artist"
         :title="artist.name"
-        :subtitle="`${artist.trackCount} 首 · ${artist.albumCount} 张专辑`"
+        :subtitle="t('common.artistMeta', { tracks: artist.trackCount, albums: artist.albumCount })"
         :cover-key="`artist:${artist.name}`"
         role="listitem"
         @open="open(artist)"

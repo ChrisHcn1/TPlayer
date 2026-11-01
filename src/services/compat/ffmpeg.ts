@@ -85,10 +85,8 @@ export async function ffmpegDecode(buffer: ArrayBuffer): Promise<ArrayBuffer | n
       'ffmpeg exec',
     )
     const data = (await ff.readFile('output.wav')) as Uint8Array
-    console.log('[compat-ffmpeg] decoded output bytes=', data.byteLength)
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
   } catch (err) {
-    console.log('[compat-ffmpeg] error', err)
     return null
   }
 }

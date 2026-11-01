@@ -44,13 +44,19 @@ $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $localKey = Join-Path $root 'src-tauri\.tauri-signing\TPlayerNext.key'
 
-# 前置检查：FFmpeg 运行时工具会随安装包分发（tauri.conf.json bundle.resources），
-# 缺失时打出来的包安装后无法播放 wma/ape/dsf/dff/dts 等格式；
-# sacd_extract.exe 负责 DST 压缩与 5.1 多声道 SACD 音轨的解码。
+# 前置检查：FFmpeg / FFprobe / SACD Extract 已改为**独立可选依赖**（不再随主安装包分发），
+# 主程序启动时按需引导用户从「设置 → 解码组件」安装。
+# 因此这里不再要求 bin\ 下必须有这三个文件；它们只用于：
+#   1) 构建独立依赖包（scripts/build-deps-pack.ps1）；
+#   2) MSIX 渠道仍需内置（Store 沙箱不允许运行时下载并执行外部二进制）。
+$msixBundlesDeps = $true
 foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe', 'sacd_extract.exe')) {
     $toolPath = Join-Path $root (Join-Path 'bin' $tool)
     if (-not (Test-Path $toolPath)) {
-        throw "缺少运行时依赖 $toolPath 。请把 $tool 放到仓库根 bin\ 目录后再打包。"
+        if ($Target -eq 'msix' -or $Target -eq 'all') {
+            throw "缺少 $toolPath 。MSIX 渠道需内置解码组件（Store 沙箱限制），请先补齐该文件。"
+        }
+        Write-Host "[build] 提示：bin\$tool 不存在。NSIS 主包不含解码组件（按需引导安装），可继续。" -ForegroundColor DarkGray
     }
 }
 

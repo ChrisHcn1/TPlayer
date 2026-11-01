@@ -1,5 +1,6 @@
 //! 播放模块：引擎、状态机、事件
 
+pub mod analyser;
 pub mod engine;
 pub mod handle;
 pub mod persist;

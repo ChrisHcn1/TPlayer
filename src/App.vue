@@ -23,6 +23,7 @@ import { useSettingsStore } from './stores/settings'
 import { usePlayerStore } from './stores/player'
 import { useLibraryStore } from './stores/library'
 import { useLabStore } from './stores/lab'
+import { useFloatingLyrics } from './lab/features/floating-lyrics'
 import { activateLabFeatures } from './lab/activate'
 import { backdropMode } from './lab/features/theme-colors'
 import { usePlaylistStore } from './stores/playlist'
@@ -30,6 +31,7 @@ import { useToastStore } from './stores/toast'
 import { useStatsStore } from './stores/stats'
 import { useConverterStore } from './stores/converter'
 import { useUpdaterStore } from './stores/updater'
+import { useDepsStore } from './stores/deps'
 import { useTheme } from './composables/useTheme'
 import { useLayout } from './composables/useLayout'
 import { useCommandPalette } from './composables/useCommandPalette'
@@ -52,12 +54,17 @@ import RightPanel from './components/layout/RightPanel.vue'
 import PlayerBar from './components/player/PlayerBar.vue'
 import DesktopLyricsBar from './components/player/DesktopLyricsBar.vue'
 import NowPlayingOverlay from './components/player/NowPlayingOverlay.vue'
+import FloatingLyricsOverlay from './components/player/FloatingLyricsOverlay.vue'
 import ToastContainer from './components/common/ToastContainer.vue'
 import DialogHost from './components/common/DialogHost.vue'
 import UpdateDialog from './components/common/UpdateDialog.vue'
+import DepsSetupDialog from './components/common/DepsSetupDialog.vue'
 import ContextMenuHost from './components/common/ContextMenuHost.vue'
 import CommandPalette from './components/common/CommandPalette.vue'
 import Icon from './components/common/Icon.vue'
+import { initI18n, t } from './i18n'
+
+const isTauri = isTauriRuntime()
 
 const settingsStore = useSettingsStore()
 const playerStore = usePlayerStore()
@@ -66,6 +73,7 @@ const playlistStore = usePlaylistStore()
 const toastStore = useToastStore()
 const converterStore = useConverterStore()
 const updaterStore = useUpdaterStore()
+const depsStore = useDepsStore()
 // applyTheme 为幂等操作：index.html 首屏脚本已按同一键写入 data-theme，
 // 这里再执行一次是为了把运行时响应式状态与 DOM 对齐。
 const { theme, applyTheme } = useTheme()
@@ -139,7 +147,7 @@ function setupDragImport(): void {
 async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
   const ids = await libraryStore.importDropped(paths)
   if (ids.length === 0) {
-    toastStore.info('拖入的内容中没有可识别的音频文件')
+    toastStore.info(t('app.dropNoAudio'))
     return
   }
   try {
@@ -150,7 +158,7 @@ async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
       playlist = playlistStore.playlists.find((p) => p.name === '拖放列表')
     }
     if (!playlist) {
-      toastStore.warning('创建播放列表失败')
+      toastStore.warning(t('app.createPlaylistFailed'))
       return
     }
     // 追加模式 + 全量去重：trackId 由后端按文件绝对路径哈希生成（唯一标识），
@@ -159,7 +167,9 @@ async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
     const newIds = ids.filter((id) => !existing.has(id))
     await playlistStore.addTracks(playlist.id, ids)
     if (newIds.length === 0) {
-      toastStore.info(`所选音频均已存在于「拖放列表」，已跳过 ${ids.length} 个重复文件`)
+      toastStore.info(
+        t('app.allDuplicates', { count: ids.length, name: '拖放列表' }),
+      )
       return
     }
     // 从首个新增曲目开始播放；队列上下文为去重合并后的完整列表
@@ -169,7 +179,9 @@ async function loadDroppedAsPlaylist(paths: string[]): Promise<void> {
       sourceId: playlist.id,
       trackIds: merged,
     })
-    toastStore.success(`已追加 ${newIds.length} 首到「拖放列表」并开始播放`)
+    toastStore.success(
+      t('app.appendedToDropList', { count: newIds.length, name: '拖放列表' }),
+    )
   } catch (cause) {
     toastStore.warning(normalizeError(cause).message)
   }
@@ -322,11 +334,20 @@ watch(
   },
 )
 
-/** 播放错误 → toast（store 已把异常收敛进 snapshot.error，不在此弹窗打断） */
+/**
+ * 播放错误 → toast（store 已把异常收敛进 snapshot.error，不在此弹窗打断）
+ *
+ * 例外：缺解码组件（DEPENDENCY_MISSING）时，除提示外还弹出「安装解码组件」
+ * 引导——这类错误可由用户一键解决，只给一条 toast 会被当成普通失败而错过。
+ */
 watch(
   () => [playerStore.snapshot.status, playerStore.snapshot.error] as const,
   ([status, error]) => {
-    if (status === 'error' && error) toastStore.error(`播放失败：${error}`)
+    if (status !== 'error' || !error) return
+    toastStore.error(t('app.playbackFailed', { error }))
+    if (playerStore.snapshot.errorCode === 'DEPENDENCY_MISSING') {
+      depsStore.openGuide()
+    }
   },
 )
 
@@ -340,11 +361,20 @@ onMounted(async () => {
   // 2) 设置：恢复非主题类偏好（语言、曲库目录、在线开关等）
   //    布局状态（§5.10）在 useLayout 模块首次加载时已读取并校验，此处不重复恢复
   await settingsStore.restore()
+  // 2.1) 国际化：应用用户在设置中实际选择的语言（main.ts 已预载默认语言兜底）
+  await initI18n()
   // 2.5) 实验室：加载实验功能开关，并激活「生效中」的功能（默认全关，零影响现有功能）
   await useLabStore().init()
   activateLabFeatures()
   // 3) 数据初始化：曲库 / 歌单 / 播放引擎（web 预览走 services/web 本地实现）
   await Promise.all([libraryStore.refresh(), playlistStore.refresh(), playerStore.init()])
+
+  // 3.1) 悬浮歌词：若实验室已启用，待数据/播放初始化完成后再弹出独立窗口。
+  //      窗口创建走异步命令（不阻塞主线程），且此刻曲库/歌单/引擎均已就绪，
+  //      避免启动阶段抢占导致 IPC 超时或界面卡顿。
+  if (useLabStore().isEnabled('floating-lyrics')) {
+    void useFloatingLyrics().open()
+  }
 
   // 3.4) 启动自动扫描（若用户开启「启动时自动扫描曲库」）：走「未变更则跳过」
   //      智能扫描——曲目无变化时瞬时复用曲库 DB（已含完整解析/解码信息），
@@ -406,7 +436,9 @@ onMounted(async () => {
   await updaterStore.init()
   // 4.1) 安装完成后首启：一次性提示「已是最新版本」，随后清除标记
   if (settingsStore.lastInstalledVersion) {
-    toastStore.success(`已是最新版本（v${settingsStore.lastInstalledVersion}）`)
+    toastStore.success(
+      t('app.upToDateVersion', { version: settingsStore.lastInstalledVersion }),
+    )
     void settingsStore.setLastInstalledVersion(null)
   }
   // 4.2) 每日首次后台静默检查：延迟 8s 不拖慢启动；仅发现新版本才弹确认框；
@@ -414,6 +446,12 @@ onMounted(async () => {
   window.setTimeout(() => {
     void updaterStore.runDailyCheck()
   }, 8000)
+
+  // 4.3) 解码组件检测：静默进行；仅在缺少必需组件且用户未忽略时弹引导。
+  //      已安装（含系统已提供）时不提示 —— 更新场景下直接复用现有依赖。
+  window.setTimeout(() => {
+    void depsStore.init()
+  }, 1500)
 })
 
 void router
@@ -482,9 +520,12 @@ void router
     <ToastContainer />
     <DialogHost />
     <UpdateDialog />
+    <DepsSetupDialog />
     <ContextMenuHost />
     <CommandPalette />
     <NowPlayingOverlay v-if="isNowPlayingOpen" />
+    <!-- 悬浮歌词：Tauri 环境用独立窗口（src/floating-lyrics），浏览器预览回退为应用内浮层 -->
+    <FloatingLyricsOverlay v-if="!isTauri" />
 
     <!-- 拖拽导入遮罩：文件/目录拖入窗口时覆盖全窗，松手即入库 -->
     <transition name="drag-overlay">
@@ -492,10 +533,10 @@ void router
         <div class="drag-overlay__card">
           <Icon name="file-audio" :size="40" />
           <p class="drag-overlay__title">
-            {{ isConverterPage ? '松开以添加到待转文件' : '松开以加载播放列表' }}
+            {{ isConverterPage ? t('app.dropAddToConverter') : t('app.dropLoadPlaylist') }}
           </p>
           <p class="drag-overlay__hint">
-            {{ isConverterPage ? '文件将加入「音频转换」待转列表，可随后选择格式并开始转换' : '支持音频文件与文件夹（含 NAS / 网盘），自动建列表并播放' }}
+            {{ isConverterPage ? t('app.dropConverterHint') : t('app.dropPlaylistHint') }}
           </p>
         </div>
       </div>

@@ -81,6 +81,9 @@ pub struct PlaybackSnapshot {
     pub mode: PlayMode,
     /// 播放错误信息
     pub error: Option<String>,
+    /// 播放错误码（供前端按码分支处理，如 DEPENDENCY_MISSING 触发安装引导）
+    #[serde(rename = "errorCode", default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl Default for PlaybackSnapshot {
@@ -95,6 +98,7 @@ impl Default for PlaybackSnapshot {
             rate: 1.0,
             mode: PlayMode::Order,
             error: None,
+            error_code: None,
         }
     }
 }

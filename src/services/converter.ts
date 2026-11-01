@@ -15,6 +15,7 @@ import type {
   ConverterService,
 } from '../types'
 import { callCommand, isTauriRuntime } from './ipc'
+import { t } from '../i18n'
 
 const tauriConverter: ConverterService = {
   async start(tasks: ConvertTaskStart[], options: ConvertOptions): Promise<void> {
@@ -67,16 +68,16 @@ class WebConverter implements ConverterService {
   }
 
   async start(tasks: ConvertTaskStart[]): Promise<void> {
-    if (tasks.length === 0) throw new Error('没有待转换的文件')
-    if (this.timer !== null) throw new Error('已有转换任务在进行中')
+    if (tasks.length === 0) throw new Error(t('converterService.emptyFiles'))
+    if (this.timer !== null) throw new Error(t('converterService.alreadyRunning'))
     // 浏览器预览：模拟后端 expand_input 的展开（.cue/.iso → 多条分轨，其余 → 单文件）
     const work: ConvertTaskStart[] = []
-    for (const t of tasks) {
-      const ext = t.path.split('.').pop()?.toLowerCase()
+    for (const task of tasks) {
+      const ext = task.path.split('.').pop()?.toLowerCase()
       if (ext === 'cue' || ext === 'iso') {
-        for (let i = 0; i < 3; i++) work.push({ id: `${t.id}#${i}`, path: `${t.path}#${i}` })
+        for (let i = 0; i < 3; i++) work.push({ id: `${task.id}#${i}`, path: `${task.path}#${i}` })
       } else {
-        work.push(t)
+        work.push(task)
       }
     }
     this.queue = work

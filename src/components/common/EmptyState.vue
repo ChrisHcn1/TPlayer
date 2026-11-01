@@ -3,7 +3,10 @@
  * 空状态占位组件（通用）
  * 统一各页面的“无数据”表现，避免每个视图各写一套。
  */
+import { computed } from 'vue'
+
 import Icon from './Icon.vue'
+import { t } from '../../i18n'
 
 interface Props {
   /** 主文案 */
@@ -14,17 +17,19 @@ interface Props {
   icon?: string
 }
 
-withDefaults(defineProps<Props>(), {
-  title: '暂无内容',
+const props = withDefaults(defineProps<Props>(), {
+  title: '',
   description: '',
   icon: 'inbox',
 })
+
+const titleText = computed(() => props.title || t('emptyState.defaultTitle'))
 </script>
 
 <template>
   <div class="empty-state">
     <Icon class="empty-state__icon" :name="icon" :size="32" />
-    <p class="empty-state__title">{{ title }}</p>
+    <p class="empty-state__title">{{ titleText }}</p>
     <p v-if="description" class="empty-state__description">{{ description }}</p>
     <div v-if="$slots.default" class="empty-state__action">
       <slot />

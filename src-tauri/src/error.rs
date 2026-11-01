@@ -41,6 +41,13 @@ pub enum AppError {
     #[error("转换错误：{0}")]
     Converter(String),
 
+    /// 缺少解码组件（FFmpeg / FFprobe / SACD Extract）
+    ///
+    /// 独立错误码 `DEPENDENCY_MISSING`，前端据此弹出「安装解码组件」引导
+    /// （而非普通 toast），让用户能一键补齐依赖。
+    #[error("缺少解码组件：{0}")]
+    DependencyMissing(String),
+
     #[error("I/O 错误：{0}")]
     Io(#[from] std::io::Error),
 }
@@ -63,6 +70,7 @@ impl AppError {
             Self::OnlineDisabled(_) => "ONLINE_DISABLED",
             Self::Config(_) => "CONFIG_ERROR",
             Self::Converter(_) => "CONVERTER_ERROR",
+            Self::DependencyMissing(_) => "DEPENDENCY_MISSING",
             Self::Io(_) => "IO_ERROR",
         }
     }

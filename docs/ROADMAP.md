@@ -1,7 +1,7 @@
 # TPlayer 路线图
 
 > 记录里程碑回顾、当前状态与后续待办。进度台账见 [`PROJECT-STATUS.md`](./PROJECT-STATUS.md)，架构见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
-> 最后更新：2026-10-14
+> 最后更新：2026-10-31
 
 ## 1. 里程碑回顾
 
@@ -12,6 +12,7 @@
 | M2 | Rust 后端落地 | ✅ | 40 条命令、rodio+symphonia 引擎、lofty 曲库扫描、lyrics parser、updater、security 白名单 |
 | M3 | 功能闭环 | 🟡 | 歌词/封面真实来源链、断点续播、无损解码修复、系统托盘、交叉淡化沉浸视图、转换器接后端、拖拽导入 |
 | M4 | 性能与发布闭环 | ✅ | SQLite 曲库持久化、封面性能优化、虚拟滚动、应用内自动升级、程序化打包、皮肤色分层、启动续播 |
+| M5 | 依赖独立化与跨平台收尾 | 🔶 | 解码组件（ffmpeg/ffprobe/sacd_extract）改为独立可选依赖、随 2.0.4 主程序一同发布；公共目录/更新复用/首启引导；macOS 编译修复与 CI 跨平台验证（见 `PROJECT-STATUS.md` §9） |
 
 ## 2. M3 当前状态（2026-10-14）
 

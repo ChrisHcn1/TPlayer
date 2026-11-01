@@ -50,6 +50,8 @@ export interface PlaybackSnapshot {
   mode: PlayMode
   /** 播放错误信息 */
   error: string | null
+  /** 播放错误码（如 DEPENDENCY_MISSING）；前端据此按码分支处理 */
+  errorCode?: string | null
 }
 
 /** 播放上下文：决定"下一首"的语义 */

@@ -33,6 +33,8 @@ export interface PersistedSettings {
   replaygain: { enabled: boolean; targetLufs: number }
   watch: { enabled: boolean }
   quitOnClose: boolean
+  /** 是否在曲目列表显示音质等级徽章（HQ/SQ/HR/Hi-Res/DSD）；关闭则隐藏 */
+  showAudioQuality: boolean
   /** 自动更新相关状态（每日节流 / 跳过版本 / 安装记录） */
   updater: {
     autoCheck: boolean
@@ -56,6 +58,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const watch = ref({ enabled: true })
   // 关闭窗口时是否直接退出（默认 false = 隐藏到托盘驻留）
   const quitOnClose = ref(false)
+  // 是否在曲目列表显示音质等级徽章（默认开启）
+  const showAudioQuality = ref(true)
   // 自动更新相关状态（每日节流 / 跳过版本 / 安装记录）
   const updaterAutoCheck = ref(true)
   const lastUpdateCheckMs = ref(0)
@@ -73,6 +77,7 @@ export const useSettingsStore = defineStore('settings', () => {
       replaygain: { ...replaygain.value },
       watch: { ...watch.value },
       quitOnClose: quitOnClose.value,
+      showAudioQuality: showAudioQuality.value,
       updater: {
         autoCheck: updaterAutoCheck.value,
         lastCheckMs: lastUpdateCheckMs.value,
@@ -131,6 +136,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     if (typeof persisted.quitOnClose === 'boolean') {
       quitOnClose.value = persisted.quitOnClose
+    }
+    if (typeof persisted.showAudioQuality === 'boolean') {
+      showAudioQuality.value = persisted.showAudioQuality
     }
     // 自动更新状态：旧配置可能缺 updater 段，缺省回落默认（开启 / 从未检查 / 无跳过）
     const updater = persisted.updater
@@ -256,6 +264,12 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
+  /** 设置是否在曲目列表显示音质等级徽章 */
+  async function setShowAudioQuality(next: boolean): Promise<void> {
+    showAudioQuality.value = next
+    persist()
+  }
+
   /** 设置是否开启启动期自动检查更新 */
   async function setUpdaterAutoCheck(next: boolean): Promise<void> {
     updaterAutoCheck.value = next
@@ -311,6 +325,7 @@ export const useSettingsStore = defineStore('settings', () => {
     replaygain,
     watch,
     quitOnClose,
+    showAudioQuality,
     updaterAutoCheck,
     lastUpdateCheckMs,
     skippedUpdateVersion,
@@ -328,6 +343,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setReplaygainEnabled,
     setWatchEnabled,
     setQuitOnClose,
+    setShowAudioQuality,
     setUpdaterAutoCheck,
     markUpdateChecked,
     setSkippedUpdateVersion,

@@ -16,6 +16,7 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const libraryStore = useLibraryStore()
 const { playTracks } = useTrackActions()
@@ -49,15 +50,15 @@ function playAll(): void {
 <template>
   <section class="view">
     <ListToolbar
-      title="全部歌曲"
-      :subtitle="`${displayedTracks.length} 首`"
+      :title="t('nav.songs')"
+      :subtitle="t('common.trackCount', { count: displayedTracks.length })"
       v-model:keyword="keyword"
-      filter-placeholder="筛选标题 / 艺术家 / 专辑"
+      :filter-placeholder="t('songs.filterPlaceholder')"
     >
       <template #actions>
         <BaseButton size="sm" variant="primary" :disabled="displayedTracks.length === 0" @click="playAll">
           <Icon name="play" :size="14" />
-          播放全部
+          {{ t('common.playAll') }}
         </BaseButton>
       </template>
     </ListToolbar>
@@ -65,15 +66,15 @@ function playAll(): void {
     <EmptyState
       v-if="libraryStore.isEmpty"
       icon="music-off"
-      title="曲库还是空的"
-      description="在设置中添加音乐目录后点击“重新扫描”，曲目会出现在这里"
+      :title="t('songs.emptyTitle')"
+      :description="t('songs.emptyDescription')"
     />
     <template v-else>
       <TrackList
         :tracks="displayedTracks"
         source="library"
         v-model:selected-ids="selectedIds"
-        empty-title="没有匹配的曲目"
+        :empty-title="t('common.noMatch')"
       />
       <SelectionBar
         :count="count"

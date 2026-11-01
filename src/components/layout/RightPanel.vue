@@ -47,7 +47,7 @@ const currentTabLabel = computed(() => {
 </script>
 
 <template>
-  <aside class="right-panel" aria-label="歌词与队列">
+  <aside class="right-panel" :aria-label="resolveNavLabel('nav.panel-label')">
     <!-- 页签条（§4.10：高 --size-header-h，右侧为关闭按钮） -->
     <div class="right-panel__tabs" role="tablist" :aria-label="resolveNavLabel('nav.panel-label')">
       <button

@@ -503,6 +503,28 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
         }
     }
 
+    // 编码 / 子类型探测：DTS 家族必须靠 ffprobe 区分 Core / HD HRA / HD MA；
+    // 其余 lofty 未给出码率 / 采样率的格式（tta/tak/dts 等）也在此用 ffprobe 补充，
+    // 以便前端按采样率 / 编码准确分级。工具缺失或解析失败则保持 lofty 结果（可能为空）。
+    let (mut bitrate, mut sample_rate) = (bitrate, sample_rate);
+    let mut codec: Option<String> = None;
+    let mut codec_profile: Option<String> = None;
+    let need_probe = matches!(format.as_str(), "dts" | "dtshd")
+        || bitrate.is_none()
+        || sample_rate.is_none();
+    if need_probe {
+        if let Some(info) = crate::player::engine::probe_audio_codec(path) {
+            if bitrate.is_none() {
+                bitrate = info.bitrate;
+            }
+            if sample_rate.is_none() {
+                sample_rate = info.sample_rate;
+            }
+            codec = Some(info.codec_name);
+            codec_profile = info.profile;
+        }
+    }
+
     // 实验室·元数据增强：本地拆分出候选的曲目进入在线校验队列
     // （由扫描/导入完成后 drain，后台批量裁决后回写——见 verify 模块）
     if let Some(parsed) = pending_parsed {
@@ -534,6 +556,8 @@ pub(crate) fn parse_track(path: &Path) -> Option<Track> {
         format,
         bitrate,
         sample_rate,
+        codec,
+        codec_profile,
         has_cover,
         replaygain_db,
         replaygain_peak,
@@ -1120,6 +1144,8 @@ pub(crate) fn placeholder_track(path: &Path, is_iso: bool) -> Option<Track> {
         format,
         bitrate: None,
         sample_rate: None,
+        codec: None,
+        codec_profile: None,
         has_cover: false,
         replaygain_db: None,
         replaygain_peak: None,

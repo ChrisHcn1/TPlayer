@@ -12,6 +12,7 @@ import { converterService } from '../services/converter'
 import { isTauriRuntime } from '../services/ipc'
 import type { ConvertEvent, ConvertFormat, ConvertOptions, ConvertTaskStart } from '../types'
 import { useToastStore } from './toast'
+import { t } from '../i18n'
 
 /** 待转文件条目 */
 export interface ConvertFile {
@@ -157,16 +158,20 @@ export const useConverterStore = defineStore('converter', () => {
           for (const task of tasks.value) {
             if (task.status === 'pending') {
               task.status = 'cancelled'
-              task.message = '已取消'
+              task.message = t('converter.cancelled')
             }
           }
-          toast.info(event.payload.completed > 0 ? `转换已取消，完成 ${event.payload.completed} 个` : '转换已取消')
+          toast.info(
+            event.payload.completed > 0
+              ? t('converter.cancelInfoWithCount', { count: event.payload.completed })
+              : t('converter.cancelInfo'),
+          )
           return
         }
         if (event.payload.failed > 0) {
-          toast.warning(`转换结束：成功 ${event.payload.completed} 个，失败 ${event.payload.failed} 个`)
+          toast.warning(t('converter.finishedWithFailures', { completed: event.payload.completed, failed: event.payload.failed }))
         } else {
-          toast.success(`全部转换完成，共 ${event.payload.completed} 个文件`)
+          toast.success(t('converter.allDone', { count: event.payload.completed }))
         }
         return
       }
@@ -187,7 +192,7 @@ export const useConverterStore = defineStore('converter', () => {
       )
       // 探测确认不存在的文件直接拒绝
       const missing = probes.filter((p) => !p.exists)
-      if (missing.length > 0) toast.warning(`已跳过 ${missing.length} 个不存在的文件`)
+      if (missing.length > 0) toast.warning(t('converter.skippedMissing', { count: missing.length }))
     }
 
     let added = 0
@@ -202,7 +207,7 @@ export const useConverterStore = defineStore('converter', () => {
       })
       added += 1
     }
-    if (added > 0) toast.success(`已添加 ${added} 个待转文件`)
+    if (added > 0) toast.success(t('converter.addedFiles', { count: added }))
   }
 
   /** 浏览器 mock：按文件名添加（无真实路径） */
@@ -231,9 +236,9 @@ export const useConverterStore = defineStore('converter', () => {
    * 回填，从而彻底消除「已结束项目未清除时，第二次转换名称未更新但实际文件已变更」的脱节。
    */
   async function start(): Promise<void> {
-    if (files.value.length === 0) throw new Error('请先添加待转文件')
-    if (running.value) throw new Error('转换进行中，请等待当前任务完成')
-    if (isTauri && !settings.value.outputDir.trim()) throw new Error('请先选择输出目录')
+    if (files.value.length === 0) throw new Error(t('converter.errorNoFiles'))
+    if (running.value) throw new Error(t('converter.busy'))
+    if (isTauri && !settings.value.outputDir.trim()) throw new Error(t('converter.noOutputDir'))
 
     ensureSubscribed()
     // 清空队列：名称与文件状态始终由后端真实输出文件名驱动

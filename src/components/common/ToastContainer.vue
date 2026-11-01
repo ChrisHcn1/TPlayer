@@ -7,6 +7,7 @@ import { onBeforeUnmount, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import { useToastStore, type ToastVariant } from '../../stores/toast'
+import { t } from '../../i18n'
 import Icon from './Icon.vue'
 
 const toastStore = useToastStore()
@@ -95,7 +96,7 @@ function runAction(id: number): void {
         <button
           type="button"
           class="toast__close"
-          aria-label="关闭通知"
+          :aria-label="t('toast.closeLabel')"
           @click="toastStore.dismiss(item.id)"
         >
           <Icon name="close" :size="14" />
