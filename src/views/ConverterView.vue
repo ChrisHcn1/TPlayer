@@ -12,7 +12,9 @@ import { storeToRefs } from 'pinia'
 
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
+import { t } from '../i18n'
 import { pickAudioFiles, pickDirectory } from '../services/dialog'
+import { normalizeError } from '../services/ipc'
 import { useConverterStore } from '../stores/converter'
 import { useToastStore } from '../stores/toast'
 import type { ConvertFormat } from '../types'
@@ -44,15 +46,15 @@ const lossyFormat = computed(
 const taskStatusText = (task: (typeof tasks.value)[number]): string => {
   switch (task.status) {
     case 'pending':
-      return '等待中'
+      return t('converter.pending')
     case 'running':
-      return `转换中 ${task.progress}%`
+      return t('converter.running', { progress: task.progress })
     case 'done':
-      return '已完成'
+      return t('converter.done')
     case 'failed':
-      return `失败：${task.message ?? '未知错误'}`
+      return t('converter.failed', { message: task.message ?? t('converter.unknownError') })
     case 'cancelled':
-      return '已取消'
+      return t('converter.cancelled')
   }
 }
 
@@ -95,15 +97,22 @@ function fileKind(file: { name: string }): FileKind {
 }
 function fileKindLabel(file: { name: string }): string {
   const kind = fileKind(file)
-  return kind === 'cue' ? 'CUE' : kind === 'sacd' ? 'SACD' : '音频'
+  return kind === 'cue' ? 'CUE' : kind === 'sacd' ? 'SACD' : t('converter.kindAudio')
 }
 
 async function startConvert(): Promise<void> {
   try {
     await converterStore.start()
-    toastStore.info(`开始转换 ${files.value.length} 个文件（${formatLabel(settings.value.format)}）`)
+    toastStore.info(
+      t('converter.startToast', {
+        count: files.value.length,
+        format: formatLabel(settings.value.format),
+      }),
+    )
   } catch (error) {
-    toastStore.warning(error instanceof Error ? error.message : '启动转换失败')
+    // 必须用 normalizeError：后端错误经 IPC 传回的是普通对象而非 Error 实例，
+    // 直接 `instanceof Error` 判断会丢掉文案（如「缺少解码组件：…」）。
+    toastStore.warning(normalizeError(error).message || t('converter.startFailed'))
   }
 }
 
@@ -120,16 +129,16 @@ onMounted(() => {
 <template>
   <section class="converter">
     <header class="converter__header">
-      <h1 class="converter__title">音频转换</h1>
+      <h1 class="converter__title">{{ t('converter.title') }}</h1>
       <p class="converter__subtitle">
-        {{ isTauri ? '基于 FFmpeg 的本地批量转码，输出目录在曲库监控范围内时会自动入库。' : '浏览器预览为本地模拟任务，真实转换将在 Tauri 桌面端执行。' }}
+        {{ isTauri ? t('converter.subtitleTauri') : t('converter.subtitleBrowser') }}
       </p>
     </header>
 
     <div class="converter__grid">
       <!-- 待转文件 -->
       <section class="card">
-        <h2 class="card__title">待转文件</h2>
+        <h2 class="card__title">{{ t('converter.pendingFiles') }}</h2>
         <div
           class="dropzone"
           :class="{ 'dropzone--over': dragOver }"
@@ -142,8 +151,8 @@ onMounted(() => {
           @drop.prevent="onDrop"
         >
           <Icon name="folder-plus" :size="26" />
-          <p class="dropzone__text">拖入音频文件，或点击选择</p>
-          <p class="dropzone__hint">支持 MP3 / FLAC / WAV / AAC / APE / DSD 等；也可放入 .cue / .iso 自动按分轨解析</p>
+          <p class="dropzone__text">{{ t('converter.dropText') }}</p>
+          <p class="dropzone__hint">{{ t('converter.dropHint') }}</p>
           <input
             v-if="!isTauri"
             class="dropzone__input"
@@ -166,7 +175,7 @@ onMounted(() => {
             <button
               type="button"
               class="file-list__remove"
-              aria-label="移除"
+              :aria-label="t('common.remove')"
               :disabled="running"
               @click="converterStore.removeFile(file.id)"
             >
@@ -174,21 +183,21 @@ onMounted(() => {
             </button>
           </li>
         </ul>
-        <p v-else class="card__hint">尚未添加文件</p>
+        <p v-else class="card__hint">{{ t('converter.noFiles') }}</p>
 
         <div v-if="files.length > 0" class="card__footer">
           <BaseButton variant="ghost" size="sm" :disabled="running" @click="converterStore.clearFiles">
-            清空列表
+            {{ t('converter.clearList') }}
           </BaseButton>
         </div>
       </section>
 
       <!-- 输出设置 -->
       <section class="card">
-        <h2 class="card__title">输出设置</h2>
+        <h2 class="card__title">{{ t('converter.outputSettings') }}</h2>
 
         <label class="field">
-          <span class="field__label">输出格式</span>
+          <span class="field__label">{{ t('converter.outputFormat') }}</span>
           <select
             class="field__control"
             :value="settings.format"
@@ -199,7 +208,7 @@ onMounted(() => {
         </label>
 
         <label class="field">
-          <span class="field__label">采样率</span>
+          <span class="field__label">{{ t('converter.sampleRate') }}</span>
           <select
             class="field__control"
             :value="settings.sampleRate"
@@ -210,7 +219,7 @@ onMounted(() => {
         </label>
 
         <label class="field">
-          <span class="field__label">位深</span>
+          <span class="field__label">{{ t('converter.bitDepth') }}</span>
           <select
             class="field__control"
             :disabled="lossyFormat"
@@ -222,19 +231,19 @@ onMounted(() => {
         </label>
 
         <div class="field">
-          <span class="field__label">输出目录</span>
+          <span class="field__label">{{ t('converter.outputDir') }}</span>
           <div class="field__row">
             <input
               class="field__control"
               type="text"
-              placeholder="选择输出目录"
+              :placeholder="t('converter.outputDirPlaceholder')"
               :value="settings.outputDir"
               :disabled="isTauri"
               @input="converterStore.updateSettings({ outputDir: ($event.target as HTMLInputElement).value })"
             />
             <BaseButton variant="ghost" size="sm" @click="onPickOutputDir">
               <Icon name="folder" :size="14" />
-              浏览
+              {{ t('converter.browse') }}
             </BaseButton>
           </div>
         </div>
@@ -242,11 +251,11 @@ onMounted(() => {
         <div class="card__footer card__footer--end">
           <BaseButton v-if="running" variant="ghost" size="md" @click="converterStore.cancel">
             <Icon name="x" :size="16" />
-            取消转换
+            {{ t('converter.cancelConvert') }}
           </BaseButton>
           <BaseButton variant="primary" size="md" :disabled="running" @click="startConvert">
             <Icon name="swap" :size="16" />
-            开始转换
+            {{ t('converter.startConvert') }}
           </BaseButton>
         </div>
       </section>
@@ -254,7 +263,7 @@ onMounted(() => {
       <!-- 任务队列 -->
       <section class="card card--wide">
         <div class="card__head">
-          <h2 class="card__title">任务队列</h2>
+          <h2 class="card__title">{{ t('converter.queue') }}</h2>
           <BaseButton
             v-if="finishedCount > 0"
             variant="ghost"
@@ -263,7 +272,7 @@ onMounted(() => {
             @click="converterStore.clearFinished"
           >
             <Icon name="trash-2" :size="14" />
-            清除已结束
+            {{ t('converter.clearFinished') }}
           </BaseButton>
         </div>
 
@@ -294,7 +303,7 @@ onMounted(() => {
             </div>
           </li>
         </ul>
-        <p v-else class="card__hint">添加文件并点击「开始转换」后，任务将显示在这里。</p>
+        <p v-else class="card__hint">{{ t('converter.queueEmpty') }}</p>
       </section>
     </div>
   </section>

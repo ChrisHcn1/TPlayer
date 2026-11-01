@@ -154,7 +154,12 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  async function init(): Promise<void> {
+  /**
+   * 初始化播放 store。
+   * @param opts.skipBackendInit 跳过后端 `player_init`（该命令在存在 track_id 时会续播/恢复，
+   *        重复调用会意外解除暂停）。独立悬浮歌词窗口等第二前端用它只订阅事件 + 拉快照，避免影响主播放。
+   */
+  async function init(opts?: { skipBackendInit?: boolean }): Promise<void> {
     if (initialized.value) return
     await execute(async () => {
       // 先订阅再初始化：避免引擎就绪后的首个事件丢失（如恢复上次播放）
@@ -162,8 +167,8 @@ export const usePlayerStore = defineStore('player', () => {
       // 注册 compat-play 接管监听：Rust 在「续播 / 连播 / 手动点歌」命中需 core 解码的曲目
       // （DTS/DSD/APE 等）时 stage_compat 占位（同步队列/快照）后发此事件，
       // 前端走 playCompat 静默接管（core 就绪后自动切播）。必须先于 playerService.init() 注册，
-      // 以捕获启动续播场景（仅 Tauri 运行时有效）。
-      if (isTauriRuntime()) {
+      // 以捕获启动续播场景（主窗口专用；独立悬浮窗口不注册，避免重复接管）。
+      if (!opts?.skipBackendInit && isTauriRuntime()) {
         compatUnsub = await listen<{ trackId: string; context: PlayContext }>(
           'compat-play',
           (e) => {
@@ -171,9 +176,12 @@ export const usePlayerStore = defineStore('player', () => {
           },
         )
       }
-      // 断点续播：后端恢复的上次播放上下文（队列显示据此还原）
-      const restoredContext = await playerService.init()
-      if (restoredContext) currentContext.value = restoredContext
+      // 断点续播：后端恢复的上次播放上下文（队列显示据此还原）。
+      // 仅主窗口走完整后端初始化；悬浮窗口等第二前端跳过，避免意外续播。
+      if (!opts?.skipBackendInit) {
+        const restoredContext = await playerService.init()
+        if (restoredContext) currentContext.value = restoredContext
+      }
       applySnapshot(await playerService.snapshot())
       sleepTimer.value = await playerService.sleepTimerStatus()
       initialized.value = true

@@ -29,6 +29,7 @@ import { useCommandPalette } from '../../composables/useCommandPalette'
 import { useTheme } from '../../composables/useTheme'
 import { router } from '../../router'
 import { resolveNavLabel } from '../../i18n/nav'
+import { t } from '../../i18n'
 import { isTauriRuntime } from '../../services/ipc'
 import { windowService } from '../../services/window'
 import { useLibraryStore } from '../../stores/library'
@@ -53,7 +54,7 @@ const { backfillLabel } = storeToRefs(libraryStore)
  *  主界面只保留这一枚主题图标（原 SideBar 也有一枚，已去重）。 */
 const themeIcon = computed(() => (theme.value === 'dark' ? 'moon' : 'sun'))
 const themeLabel = computed(() =>
-  theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
+  theme.value === 'dark' ? t('settings.themeToLight') : t('settings.themeToDark'),
 )
 
 /** 窗口控制是否渲染：非 Tauri 环境（浏览器调试）不渲染，避免出现无响应按钮（§4.3） */
@@ -109,14 +110,14 @@ function handleDragDoubleClick(event: MouseEvent) {
     <div
       class="title-bar__center u-no-drag"
       role="button"
-      aria-label="全局搜索（Ctrl K）"
-      title="全局搜索（Ctrl K）"
+      :aria-label="t('player.globalSearchHint')"
+      :title="t('player.globalSearchHint')"
       @click="openCommandPalette"
       @focusin="openCommandPalette"
     >
       <SearchBox
         variant="titlebar"
-        placeholder="搜索曲目 / 专辑 / 歌手"
+        :placeholder="t('player.searchPlaceholder')"
         @submit="handleSearchQuery"
       />
       <span class="title-bar__shortcut" aria-hidden="true">Ctrl K</span>
@@ -143,8 +144,8 @@ function handleDragDoubleClick(event: MouseEvent) {
         <button
           type="button"
           class="title-bar__btn title-bar__btn--window"
-          aria-label="最小化"
-          title="最小化"
+          :aria-label="t('player.minimize')"
+          :title="t('player.minimize')"
           @click="windowService.minimize()"
         >
           <Icon name="minus" :size="16" />
@@ -152,8 +153,8 @@ function handleDragDoubleClick(event: MouseEvent) {
         <button
           type="button"
           class="title-bar__btn title-bar__btn--window"
-          aria-label="最大化"
-          title="最大化"
+          :aria-label="t('player.maximize')"
+          :title="t('player.maximize')"
           @click="windowService.toggleMaximize()"
         >
           <Icon name="square" :size="14" />
@@ -161,8 +162,8 @@ function handleDragDoubleClick(event: MouseEvent) {
         <button
           type="button"
           class="title-bar__btn title-bar__btn--window title-bar__btn--close"
-          aria-label="关闭"
-          title="关闭"
+          :aria-label="t('player.close')"
+          :title="t('player.close')"
           @click="windowService.close()"
         >
           <Icon name="close" :size="16" />

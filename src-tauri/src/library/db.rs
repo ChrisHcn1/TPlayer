@@ -327,6 +327,15 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
         conn.execute_batch("ALTER TABLE tracks ADD COLUMN iso_placeholder INTEGER NOT NULL DEFAULT 0")
             .map_err(|e| AppError::Library(format!("迁移 schema v6 失败（iso_placeholder）: {e}")))?;
     }
+    // —— 编码 / 子类型（DTS Core / HD HRA / HD MA 识别用）——
+    if !has_column("codec") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN codec TEXT")
+            .map_err(|e| AppError::Library(format!("迁移 schema 失败（codec）: {e}")))?;
+    }
+    if !has_column("codec_profile") {
+        conn.execute_batch("ALTER TABLE tracks ADD COLUMN codec_profile TEXT")
+            .map_err(|e| AppError::Library(format!("迁移 schema 失败（codec_profile）: {e}")))?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_tracks_metadata_pending ON tracks(metadata_pending)",
     )
@@ -374,6 +383,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     format       TEXT NOT NULL,
     bitrate      INTEGER,
     sample_rate  INTEGER,
+    codec        TEXT,
+    codec_profile TEXT,
     has_cover    INTEGER NOT NULL DEFAULT 0,
     added_at     INTEGER NOT NULL,
     modified_at  INTEGER NOT NULL,

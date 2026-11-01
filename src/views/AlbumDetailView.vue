@@ -17,12 +17,13 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 function formatTotal(seconds: number): string {
   const minutes = Math.round(seconds / 60)
   return minutes >= 60
-    ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
-    : `${minutes} 分钟`
+    ? t('albumDetail.hoursMinutes', { hours: Math.floor(minutes / 60), minutes: minutes % 60 })
+    : t('albumDetail.minutes', { minutes })
 }
 
 const route = useRoute()
@@ -64,14 +65,14 @@ async function shuffleAll(): Promise<void> {
         :cover-url="coverUrl"
         :title="album.name"
         :subtitle="album.artists.join(' / ')"
-        :meta="`${album.year ?? '未知年份'} · ${tracks.length} 首 · ${formatTotal(tracks.reduce((sum, t) => sum + t.duration, 0))}`"
+        :meta="`${album.year ?? t('albumDetail.unknownYear')} · ${t('common.trackCount', { count: tracks.length })} · ${formatTotal(tracks.reduce((sum, t) => sum + t.duration, 0))}`"
       >
         <template #actions>
           <BaseButton size="md" variant="primary" @click="playAll">
             <Icon name="play" :size="15" />
-            播放
+            {{ t('common.play') }}
           </BaseButton>
-          <BaseButton size="md" variant="subtle" title="随机播放整张专辑" @click="shuffleAll">
+          <BaseButton size="md" variant="subtle" :title="t('albumDetail.shuffleTitle')" @click="shuffleAll">
             <Icon name="shuffle" :size="15" />
           </BaseButton>
         </template>
@@ -83,7 +84,7 @@ async function shuffleAll(): Promise<void> {
         :source-id="albumId"
         :show-artist="false"
         v-model:selected-ids="selectedIds"
-        empty-title="专辑暂无曲目"
+        :empty-title="t('albumDetail.emptyTracks')"
       />
       <SelectionBar
         :count="count"
@@ -96,10 +97,15 @@ async function shuffleAll(): Promise<void> {
       />
     </template>
 
-    <EmptyState v-else icon="disc" title="专辑不存在" description="它可能已被移除，请返回专辑列表">
+    <EmptyState
+      v-else
+      icon="disc"
+      :title="t('albumDetail.notFound')"
+      :description="t('albumDetail.notFoundDescription')"
+    >
       <BaseButton size="sm" variant="subtle" @click="router.push('/albums')">
         <Icon name="back" :size="14" />
-        返回专辑
+        {{ t('albumDetail.backToAlbums') }}
       </BaseButton>
     </EmptyState>
   </section>

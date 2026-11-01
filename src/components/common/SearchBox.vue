@@ -10,6 +10,10 @@
  *   inline   —— 视图工具条内使用（§2.4）：高 --size-control-h、圆角 --radius-md、宽 260px。
  * 尺寸差异只由 variant 决定，调用方不再传尺寸或内联样式。
  */
+import { computed } from 'vue'
+
+import { t } from '../../i18n'
+
 interface Props {
   modelValue?: string
   placeholder?: string
@@ -18,9 +22,11 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   modelValue: '',
-  placeholder: '搜索曲目 / 专辑 / 歌手',
+  placeholder: '',
   variant: 'inline',
 })
+
+const placeholderText = computed(() => props.placeholder || t('searchBox.placeholder'))
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -47,7 +53,7 @@ function onSubmit() {
     :class="`search-box--${variant}`"
     type="search"
     :value="modelValue"
-    :placeholder="placeholder"
+    :placeholder="placeholderText"
     @input="onInput"
     @keydown.enter="onSubmit"
   />

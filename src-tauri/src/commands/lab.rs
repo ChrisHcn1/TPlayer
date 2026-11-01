@@ -53,6 +53,11 @@ pub fn lab_set_feature(
             });
         }
     }
+    // 音频可视化：播放链分析器的原子开关。开启即翻转，无需重建播放链；关闭即零成本
+    // pass-through，对主程序输出零影响。
+    if id == "audio-visualizer" {
+        crate::player::engine::AUDIO_VISUALIZER.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
     Ok(())
 }
 

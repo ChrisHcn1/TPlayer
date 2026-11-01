@@ -17,6 +17,7 @@ import { defineStore } from 'pinia'
 import { updateService, type Update, type UpdateProgress } from '../services/update'
 import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
+import { t } from '../i18n'
 
 /** 交互阶段 */
 export type UpdatePhase =
@@ -84,7 +85,7 @@ export const useUpdaterStore = defineStore('updater', () => {
   /** 设置页手动检查：忽略节流，始终提示结果（含「已是最新版本」） */
   async function manualCheck(): Promise<void> {
     if (!available.value) {
-      toast.warning('当前版本不支持应用内升级（Store 版或浏览器预览）')
+      toast.warning(t('updater.unsupported'))
       return
     }
     await performCheck({ markChecked: false, silentIfUpToDate: false })
@@ -104,7 +105,7 @@ export const useUpdaterStore = defineStore('updater', () => {
       if (opts.markChecked) await settings.markUpdateChecked()
       update.value = result
       if (!result) {
-        if (!opts.silentIfUpToDate) toast.success('已是最新版本')
+        if (!opts.silentIfUpToDate) toast.success(t('settings.upToDate'))
         phase.value = 'idle'
         return
       }
@@ -118,7 +119,7 @@ export const useUpdaterStore = defineStore('updater', () => {
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)
       phase.value = 'error'
-      if (!opts.silentIfUpToDate) toast.error(`检查更新失败：${error.value}`)
+      if (!opts.silentIfUpToDate) toast.error(t('settings.checkFailedWith', { error: error.value }))
     } finally {
       checking.value = false
     }
@@ -150,7 +151,7 @@ export const useUpdaterStore = defineStore('updater', () => {
       phase.value = 'idle'
       update.value = null
       dialogOpen.value = false
-      toast.success('更新已完成')
+      toast.success(t('updater.updateComplete'))
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)
       phase.value = 'error'

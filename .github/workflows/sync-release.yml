@@ -3,11 +3,12 @@ name: Sync Release to Site
 # =============================================================================
 # 把 GitHub Release 的版本信息同步成网站可消费的 JSON 快照（site/releases.json）。
 #
-# 触发方式（三条，全部自动，无需人工干预）：
+# 触发方式（四条，全部自动，无需人工干预）：
 #   1. release: published  —— 发版自动触发（主路径）
-#   2. schedule            —— 每日 03:23 UTC 兜底巡检（防止漏触发 /
-#                             Release 被事后编辑 / 草稿迟发）
-#   3. workflow_dispatch    —— 手动补跑（Actions 页面点一下）
+#   2. workflow_run        —— Release 工作流跑完即触发（兜底：GitHub 偶发不派发
+#                            release 事件时仍能同步，保证不漏更新）
+#   3. schedule            —— 每日 03:23 UTC 巡检（防止 Release 被事后编辑 / 草稿迟发）
+#   4. workflow_dispatch    —— 手动补跑（Actions 页面点一下）
 #
 # 产出如何到达网站：
 #   - 快照提交进仓库后，jsDelivr 等 GitHub CDN 会自动同步（约 1 分钟），
@@ -22,6 +23,9 @@ name: Sync Release to Site
 on:
   release:
     types: [published]
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:

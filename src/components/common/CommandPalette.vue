@@ -9,6 +9,7 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 
 import { useCommandPalette } from '../../composables/useCommandPalette'
+import { t } from '../../i18n'
 import { useTheme } from '../../composables/useTheme'
 import { useLibraryStore, matchTrackKeyword } from '../../stores/library'
 import { usePlaylistStore } from '../../stores/playlist'
@@ -53,10 +54,10 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
   if (matchedTracks.length > 0) {
     const matchedIds = matchedTracks.map((track) => track.id)
     result.push({
-      title: '曲目',
+      title: t('palette.groupTracks'),
       entries: matchedTracks.map((track: Track) => ({
         key: `track-${track.id}`,
-        group: '曲目',
+        group: t('palette.groupTracks'),
         label: track.title,
         hint: `${track.artists.join(' / ')} · ${track.album}`,
         icon: 'music-note',
@@ -77,7 +78,7 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
     if (key && !includes(`${album.name} ${album.artists.join(' ')}`, key)) return
     albumEntries.push({
       key: `${base}-${album.id}`,
-      group: '专辑',
+      group: t('palette.groupAlbums'),
       label: album.name,
       hint: album.artists.join(' / '),
       icon,
@@ -91,7 +92,8 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
   albums.value.slice(0, 4).forEach((album) => pushAlbum(album, 'album', 'disc'))
   cueAlbums.value.slice(0, 3).forEach((album) => pushAlbum(album, 'cue', 'layers'))
   sacdAlbums.value.slice(0, 3).forEach((album) => pushAlbum(album, 'sacd', 'disc'))
-  if (albumEntries.length > 0) result.push({ title: '专辑', entries: albumEntries.slice(0, 6) })
+  if (albumEntries.length > 0)
+    result.push({ title: t('palette.groupAlbums'), entries: albumEntries.slice(0, 6) })
 
   // ---- 艺术家 ----
   const matchedArtists = (key
@@ -100,12 +102,12 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
   ).slice(0, 4)
   if (matchedArtists.length > 0) {
     result.push({
-      title: '艺术家',
+      title: t('palette.groupArtists'),
       entries: matchedArtists.map((artist: Artist) => ({
         key: `artist-${artist.name}`,
-        group: '艺术家',
+        group: t('palette.groupArtists'),
         label: artist.name,
-        hint: `${artist.trackCount ?? 0} 首`,
+        hint: t('palette.trackCount', { count: artist.trackCount ?? 0 }),
         icon: 'user',
         run: () => router.push(`/artists/${encodeURIComponent(artist.name)}`),
       })),
@@ -119,12 +121,12 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
   ).slice(0, 4)
   if (matchedPlaylists.length > 0) {
     result.push({
-      title: '歌单',
+      title: t('palette.groupPlaylists'),
       entries: matchedPlaylists.map((playlist: Playlist) => ({
         key: `playlist-${playlist.id}`,
-        group: '歌单',
+        group: t('palette.groupPlaylists'),
         label: playlist.name,
-        hint: `${playlist.trackIds.length} 首`,
+        hint: t('palette.trackCount', { count: playlist.trackIds.length }),
         icon: 'list-music',
         run: () => router.push(`/playlists/${playlist.id}`),
       })),
@@ -133,21 +135,21 @@ const groups = computed<{ title: string; entries: PaletteEntry[] }[]>(() => {
 
   // ---- 快捷操作（无关键词时展示常用项；有关键词时按名称过滤） ----
   const actions: PaletteEntry[] = [
-    { key: 'go-songs', group: '操作', label: '前往：歌曲', hint: '', icon: 'music-note', run: () => router.push('/songs') },
-    { key: 'go-recent', group: '操作', label: '前往：最近播放', hint: '', icon: 'clock', run: () => router.push('/recent') },
-    { key: 'go-favorites', group: '操作', label: '前往：我的收藏', hint: '', icon: 'heart', run: () => router.push('/favorites') },
-    { key: 'go-converter', group: '操作', label: '前往：格式转换', hint: '', icon: 'swap', run: () => router.push('/converter') },
-    { key: 'go-settings', group: '操作', label: '前往：设置', hint: '', icon: 'settings', run: () => router.push('/settings') },
+    { key: 'go-songs', group: t('palette.groupActions'), label: t('palette.goSongs'), hint: '', icon: 'music-note', run: () => router.push('/songs') },
+    { key: 'go-recent', group: t('palette.groupActions'), label: t('palette.goRecent'), hint: '', icon: 'clock', run: () => router.push('/recent') },
+    { key: 'go-favorites', group: t('palette.groupActions'), label: t('palette.goFavorites'), hint: '', icon: 'heart', run: () => router.push('/favorites') },
+    { key: 'go-converter', group: t('palette.groupActions'), label: t('palette.goConverter'), hint: '', icon: 'swap', run: () => router.push('/converter') },
+    { key: 'go-settings', group: t('palette.groupActions'), label: t('palette.goSettings'), hint: '', icon: 'settings', run: () => router.push('/settings') },
     {
       key: 'toggle-theme',
-      group: '操作',
-      label: theme.value === 'dark' ? '切换到浅色主题' : '切换到深色主题',
+      group: t('palette.groupActions'),
+      label: theme.value === 'dark' ? t('settings.themeToLight') : t('settings.themeToDark'),
       hint: '',
       icon: theme.value === 'dark' ? 'sun' : 'moon',
       run: () => toggleTheme(),
     },
   ].filter((entry) => !key || includes(entry.label, key))
-  if (actions.length > 0) result.push({ title: '快捷操作', entries: actions })
+  if (actions.length > 0) result.push({ title: t('palette.groupQuickActions'), entries: actions })
 
   return result
 })
@@ -209,7 +211,7 @@ function globalIndex(groupIndex: number, entryIndex: number): number {
   <Teleport to="body">
     <Transition name="palette">
       <div v-if="isOpen" class="palette-overlay" @mousedown.self="close">
-        <div class="palette" role="dialog" aria-modal="true" aria-label="全局搜索">
+        <div class="palette" role="dialog" aria-modal="true" :aria-label="t('palette.dialogLabel')">
           <div class="palette__input-row">
             <Icon name="search" :size="18" class="palette__input-icon" />
             <input
@@ -217,7 +219,7 @@ function globalIndex(groupIndex: number, entryIndex: number): number {
               v-model="query"
               class="palette__input"
               type="text"
-              placeholder="搜索曲目、专辑、艺术家、歌单…"
+              :placeholder="t('palette.placeholder')"
               @keydown="onKeydown"
             />
             <kbd class="palette__kbd">Esc</kbd>
@@ -246,7 +248,7 @@ function globalIndex(groupIndex: number, entryIndex: number): number {
             </template>
             <div v-else class="palette__empty">
               <Icon name="search" :size="20" />
-              <p>无匹配结果，按 Enter 查看搜索页</p>
+              <p>{{ t('palette.noResults') }}</p>
             </div>
           </div>
         </div>

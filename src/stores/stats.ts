@@ -17,6 +17,7 @@ import { defineStore } from 'pinia'
 import { STATS_STORAGE_KEY } from '../constants'
 import { usePlayerStore } from './player'
 import { useLibraryStore } from './library'
+import { t } from '../i18n'
 import type {
   ShareCardData,
   StatsSnapshot,
@@ -119,7 +120,7 @@ export const useStatsStore = defineStore('stats', () => {
         const track = library.getTrack(s.trackId)
         return {
           trackId: s.trackId,
-          title: track?.title ?? '未知曲目',
+          title: track?.title ?? t('stats.unknownTrack'),
           artists: track?.artists ?? [],
           playCount: s.playCount,
           totalMs: s.totalMs,
@@ -134,7 +135,7 @@ export const useStatsStore = defineStore('stats', () => {
     for (const s of Object.values(snapshot.value.tracks)) {
       if (s.playCount <= 0) continue
       const track = library.getTrack(s.trackId)
-      const names = track && track.artists.length > 0 ? track.artists : ['未知艺术家']
+      const names = track && track.artists.length > 0 ? track.artists : [t('stats.unknownArtist')]
       for (const name of names) {
         const entry = map.get(name) ?? { name, playCount: 0, totalMs: 0 }
         entry.playCount += s.playCount
@@ -242,10 +243,10 @@ export const useStatsStore = defineStore('stats', () => {
   }
 
   /** 构建分享卡片渲染数据（视图与导出共用同一数据源） */
-  function buildShareCardData(title = '我的收听报告'): ShareCardData {
+  function buildShareCardData(title = t('stats.reportTitle')): ShareCardData {
     return {
       title,
-      periodText: '自启用统计以来',
+      periodText: t('stats.periodSince'),
       totalMs: totalPlayMs.value,
       trackCount: playedTrackCount.value,
       playCount: totalPlayCount.value,

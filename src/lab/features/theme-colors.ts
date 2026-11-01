@@ -29,15 +29,15 @@ const ACCENT_KEY = 'tplayer.lab.theme.accent'
 const DEFAULT_ACCENT = '#7a95ff'
 
 /** 强调色预设 */
-export const ACCENT_PRESETS: { name: string; value: string }[] = [
-  { name: '蓝', value: '#7a95ff' },
-  { name: '靛', value: '#6366f1' },
-  { name: '紫', value: '#a78bfa' },
-  { name: '青', value: '#22d3ee' },
-  { name: '绿', value: '#34d399' },
-  { name: '橙', value: '#fb923c' },
-  { name: '红', value: '#f87171' },
-  { name: '粉', value: '#f472b6' },
+export const ACCENT_PRESETS: { nameKey: string; value: string }[] = [
+  { nameKey: 'lab.preset.accent.blue', value: '#7a95ff' },
+  { nameKey: 'lab.preset.accent.indigo', value: '#6366f1' },
+  { nameKey: 'lab.preset.accent.purple', value: '#a78bfa' },
+  { nameKey: 'lab.preset.accent.cyan', value: '#22d3ee' },
+  { nameKey: 'lab.preset.accent.green', value: '#34d399' },
+  { nameKey: 'lab.preset.accent.orange', value: '#fb923c' },
+  { nameKey: 'lab.preset.accent.red', value: '#f87171' },
+  { nameKey: 'lab.preset.accent.pink', value: '#f472b6' },
 ]
 
 /** 受覆盖的主题变量（清除时逐一 removeProperty 回落默认） */
@@ -254,37 +254,37 @@ const GRADIENT_KEY = 'tplayer.lab.backdrop.gradient'
  * 因此明暗主题切换时自动跟随（亮色更亮、暗色更暗），无需维护两套。 */
 export interface GradientPreset {
   id: string
-  name: string
+  nameKey: string
   css: string
 }
 export const GRADIENT_PRESETS: GradientPreset[] = [
   {
     id: 'aurora',
-    name: '极光',
+    nameKey: 'lab.preset.gradient.aurora',
     css:
       'linear-gradient(135deg, color-mix(in srgb, var(--color-brand) 42%, var(--color-bg-base)), color-mix(in srgb, var(--color-brand) 14%, var(--color-bg-base)))',
   },
   {
     id: 'twilight',
-    name: '暮光',
+    nameKey: 'lab.preset.gradient.twilight',
     css:
       'linear-gradient(150deg, color-mix(in srgb, #818cf8 46%, var(--color-bg-base)), color-mix(in srgb, #c084fc 16%, var(--color-bg-base)))',
   },
   {
     id: 'warm',
-    name: '暖阳',
+    nameKey: 'lab.preset.gradient.warm',
     css:
       'linear-gradient(150deg, color-mix(in srgb, #fb923c 46%, var(--color-bg-base)), color-mix(in srgb, #f472b6 16%, var(--color-bg-base)))',
   },
   {
     id: 'ocean',
-    name: '海洋',
+    nameKey: 'lab.preset.gradient.ocean',
     css:
       'linear-gradient(150deg, color-mix(in srgb, #22d3ee 46%, var(--color-bg-base)), color-mix(in srgb, #6366f1 16%, var(--color-bg-base)))',
   },
   {
     id: 'rose',
-    name: '玫瑰',
+    nameKey: 'lab.preset.gradient.rose',
     css:
       'linear-gradient(150deg, color-mix(in srgb, #f472b6 46%, var(--color-bg-base)), color-mix(in srgb, #fb7185 16%, var(--color-bg-base)))',
   },
@@ -327,31 +327,31 @@ const TEXTURE_KEY = 'tplayer.lab.backdrop.texture'
  * 依次为 网格 / 斜纹 / 圆点 / 噪点；明暗主题下自动跟随次要文本色。 */
 export interface TexturePreset {
   id: string
-  name: string
+  nameKey: string
   css: string
 }
 export const TEXTURE_PRESETS: TexturePreset[] = [
   {
     id: 'grid',
-    name: '网格',
+    nameKey: 'lab.preset.texture.grid',
     css:
       'repeating-linear-gradient(0deg, color-mix(in srgb, var(--color-text-secondary) 20%, transparent) 0 1px, transparent 1px 20px), repeating-linear-gradient(90deg, color-mix(in srgb, var(--color-text-secondary) 20%, transparent) 0 1px, transparent 1px 20px)',
   },
   {
     id: 'diagonal',
-    name: '斜纹',
+    nameKey: 'lab.preset.texture.diagonal',
     css:
       'repeating-linear-gradient(45deg, color-mix(in srgb, var(--color-text-secondary) 20%, transparent) 0 7px, transparent 7px 16px)',
   },
   {
     id: 'dots',
-    name: '圆点',
+    nameKey: 'lab.preset.texture.dots',
     css:
       'radial-gradient(color-mix(in srgb, var(--color-text-secondary) 34%, transparent) 2.2px, transparent 2.6px) 0 0 / 16px 16px',
   },
   {
     id: 'noise',
-    name: '噪点',
+    nameKey: 'lab.preset.texture.noise',
     css:
       "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.3'/%3E%3C/svg%3E\")",
   },

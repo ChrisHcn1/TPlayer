@@ -1,0 +1,175 @@
+name: Release Deps Pack (standby)
+
+# =============================================================================
+# 【备用通道】独立发布解码组件依赖包（ffmpeg / ffprobe / sacd_extract）
+#
+# ⚠️ 重要：自 2.0.4 起，依赖包 **不再** 通过本工作流首发。首发依赖包随
+# 主程序 Release 一同发布（见 release.yml 的 release-windows 两步：先构建、
+# 后作为同一 Release 附件上传），以保证「依赖包与主程序同步打包、同步发布」。
+#
+# 本工作流仅保留为 **未来应急通道**：当仅需升级 ffmpeg 等解码组件
+# （例如安全补丁、版本追新）而 **不打算发新的主程序版本** 时，才推送
+# deps-v* tag（如 deps-v1.0.1）走本流程，发一个独立的 deps Release，
+# 并把新包地址写回内置清单（deps-manifest.json）供应用发现并提示更新。
+#
+# 日常发版（v2.0.4 / v2.0.5 …）请勿触发本工作流，避免与主 Release 的依赖包
+# 产生重复或版本错位。
+#
+# 背景（仍成立）：
+#   - 主程序（NSIS）不再分发这三个二进制，安装包从 ~470MB 降到 ~20MB；
+#   - 依赖包安装到公共目录（应用数据目录外的 deps/packs/<版本>），
+#     主程序覆盖安装 / 卸载都不会删除它，直接复用；
+#   - MSIX 渠道仍内置（Store 沙箱不允许运行时下载并执行包外二进制）。
+#
+# 触发：推送 deps-v 开头的 tag（如 deps-v1.0.1）；或 Actions 页面手动触发。
+#
+# 产物：
+#   tplayer-deps-<平台>-<版本>.zip   三个工具 + deps.json（逐文件 SHA256 清单）
+#   作为独立 Release（tag = deps-v<版本>）的资产发布，应用按内置清单里的
+#   url 下载并强制校验。
+# =============================================================================
+
+on:
+  push:
+    tags:
+      - 'deps-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-deps-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-deps:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-latest
+            ext: exe
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            ext: ''
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true  # bin/ 下的工具为 LFS 对象
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve pack version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#deps-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build deps pack (Windows)
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/build-deps-pack.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Build deps pack (Linux)
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          stage="$(mktemp -d)"
+          out="src-tauri/target/deps"
+          mkdir -p "$out"
+          for tool in ffmpeg ffprobe sacd_extract; do
+            src="bin/${tool}"
+            [ -f "$src" ]; { echo "缺少 $src"; exit 1; }
+            cp "$src" "$stage/${tool}"
+          done
+          # deps.json：逐文件 SHA256 + 大小（与 Windows 侧同格式）
+          python3 - "$stage" "$version" <<'PY'
+          import hashlib, json, os, sys
+          stage, version = sys.argv[1], sys.argv[2]
+          files = {}
+          for name in sorted(os.listdir(stage)):
+              path = os.path.join(stage, name)
+              data = open(path, 'rb').read()
+              files[name] = {
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'size': len(data),
+              }
+          manifest = {'packVersion': version, 'files': files}
+          with open(os.path.join(stage, 'deps.json'), 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, indent=2)
+          PY
+          (cd "$stage"; zip -q -r "$GITHUB_WORKSPACE/$out/tplayer-deps-linux-x86_64-$version.zip" .)
+          rm -rf "$stage"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-${{ matrix.platform }}-${{ steps.ver.outputs.version }}
+          path: src-tauri/target/deps/tplayer-deps-${{ matrix.platform }}-${{ steps.ver.outputs.version }}.zip
+          if-no-files-found: error
+
+  publish-deps:
+    needs: build-deps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deps-*
+          merge-multiple: true
+
+      - name: Publish deps Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: deps-${{ github.ref_name#deps-v }}
+          release_name: 'TPlayer deps ${{ github.ref_name#deps-v }}'
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync manifest URL into repo
+        # 把新依赖包的下载地址写回内置清单（src-tauri/deps-manifest.json），
+        # 应用下次启动即可发现新版本并提示更新。
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#deps-v}"
+          python3 - "$version" <<'PY'
+          import json, os, sys
+          version = sys.argv[1]
+          path = 'src-tauri/deps-manifest.json'
+          with open(path, encoding='utf-8-sig') as f:
+              manifest = json.load(f)
+          for pack in manifest['packs']:
+              if pack['platform'] == 'windows-x86_64':
+                  pack['url'] = (
+                      f'https://github.com/{os.environ["GITHUB_REPOSITORY"]}'
+                      f'/releases/download/deps-v{version}'
+                      f'/tplayer-deps-windows-x86_64-{version}.zip'
+                  )
+          with open(path, 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+              f.write('\n')
+          PY
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Commit manifest update
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add src-tauri/deps-manifest.json
+          git diff --staged --quiet; git commit -m 'chore(deps): 更新依赖包下载地址'
+          git push

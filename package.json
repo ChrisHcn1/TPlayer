@@ -1,7 +1,7 @@
 {
   "name": "tplayer-next",
   "private": true,
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "TPlayer - redesigned desktop music player (Tauri 2 + Vue 3 + TypeScript)",
   "license": "ISC",
   "type": "module",

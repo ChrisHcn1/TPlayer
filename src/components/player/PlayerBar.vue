@@ -13,20 +13,27 @@ import { useRouter } from 'vue-router'
 
 import { usePlayerStore } from '../../stores/player'
 import { useLibraryStore } from '../../stores/library'
+import { useLabStore } from '../../stores/lab'
+import { useSettingsStore } from '../../stores/settings'
+import AudioVisualizer from '../../lab/AudioVisualizer.vue'
+import AudioQualityBadge from '../common/AudioQualityBadge.vue'
+import { classifyQuality, type AudioQualityLevel } from '../../services/audio-quality'
 import { useLayout } from '../../composables/useLayout'
 import { useTrackCover } from '../../composables/useTrackCover'
 import { useContextMenu, type MenuItem } from '../../composables/useContextMenu'
 import type { PlayMode } from '../../types'
 import ProgressBar from './ProgressBar.vue'
 import VolumeControl from './VolumeControl.vue'
+import EqPanel from './EqPanel.vue'
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 import defaultCover from '../../assets/default-cover.svg'
 
-const MODE_META: Record<PlayMode, { icon: string; label: string }> = {
-  order: { icon: 'list-order', label: '顺序播放' },
-  'repeat-all': { icon: 'repeat', label: '列表循环' },
-  'repeat-one': { icon: 'repeat-one', label: '单曲循环' },
-  shuffle: { icon: 'shuffle', label: '随机播放' },
+const MODE_META: Record<PlayMode, { icon: string; labelKey: string }> = {
+  order: { icon: 'list-order', labelKey: 'player.modeOrder' },
+  'repeat-all': { icon: 'repeat', labelKey: 'player.modeRepeatAll' },
+  'repeat-one': { icon: 'repeat-one', labelKey: 'player.modeRepeatOne' },
+  shuffle: { icon: 'shuffle', labelKey: 'player.modeShuffle' },
 }
 
 const MODE_ORDER: PlayMode[] = ['order', 'repeat-all', 'repeat-one', 'shuffle']
@@ -34,6 +41,7 @@ const MODE_ORDER: PlayMode[] = ['order', 'repeat-all', 'repeat-one', 'shuffle']
 const router = useRouter()
 const playerStore = usePlayerStore()
 const libraryStore = useLibraryStore()
+const lab = useLabStore()
 const {
   panelTab,
   isPanelOpen,
@@ -46,15 +54,28 @@ const { openAt } = useContextMenu()
 const { snapshot, sleepTimer } = storeToRefs(playerStore)
 const { coverUrl } = useTrackCover(() => snapshot.value.trackId)
 
+/** 均衡器面板开关（正式版特性，常驻可用） */
+const eqOpen = ref(false)
+
 const track = computed(() => libraryStore.getTrack(snapshot.value.trackId))
 const hasTrack = computed(() => Boolean(track.value))
+const settingsStore = useSettingsStore()
+/** 当前曲目音质等级（受全局「显示音质标识」开关控制；标准/未识别不显示，与列表徽章共用同一开关） */
+const quality = computed<AudioQualityLevel | null>(() => {
+  if (!settingsStore.showAudioQuality || !track.value) return null
+  const q = classifyQuality(track.value)
+  return q && q !== 'standard' ? q : null
+})
 const isPlaying = computed(() => snapshot.value.status === 'playing')
+/** 实验室·音频可视化是否开启（仅开启时挂载画布，关闭即卸载并停止渲染） */
+const showViz = computed(() => lab.isEnabled('audio-visualizer'))
 const isLoading = computed(() => snapshot.value.status === 'loading')
 const isFavorite = computed(() =>
   snapshot.value.trackId ? libraryStore.isFavorite(snapshot.value.trackId) : false,
 )
 
 const modeMeta = computed(() => MODE_META[snapshot.value.mode] ?? MODE_META.order)
+const modeLabel = computed(() => t(modeMeta.value.labelKey))
 
 /** 睡眠定时器预设（分钟） */
 const SLEEP_PRESETS = [15, 30, 45, 60, 90]
@@ -80,37 +101,37 @@ const sleepRemainingMs = computed(() => {
 })
 
 const sleepLabel = computed(() => {
-  if (!sleepTimer.value.active) return '睡眠定时器'
-  if (sleepTimer.value.waitTrackEnd) return '播完当前曲目后停止'
+  if (!sleepTimer.value.active) return t('player.sleepTimer')
+  if (sleepTimer.value.waitTrackEnd) return t('player.sleepAfterTrack')
   const remain = sleepRemainingMs.value ?? 0
   const minutes = Math.floor(remain / 60000)
   const seconds = Math.floor((remain % 60000) / 1000)
   return minutes > 0
-    ? `剩余 ${minutes}:${String(seconds).padStart(2, '0')} 后暂停`
-    : `剩余 ${seconds} 秒后暂停`
+    ? t('player.sleepRemaining', { minutes, seconds: String(seconds).padStart(2, '0') })
+    : t('player.sleepRemainingSec', { seconds })
 })
 
 function openSleepMenu(event: MouseEvent): void {
   const items: MenuItem[] = [
     ...SLEEP_PRESETS.map((minutes) => ({
       key: `sleep-${minutes}`,
-      label: `${minutes} 分钟后暂停`,
+      label: t('player.sleepPreset', { minutes }),
       onClick: () => void playerStore.setSleepTimer(minutes * 60_000, false),
     })),
     {
       key: 'sleep-track-end',
-      label: '播完当前曲目后停止',
+      label: t('player.sleepAfterTrack'),
       onClick: () => void playerStore.setSleepTimer(0, true),
     },
   ]
   if (sleepTimer.value.active) {
     items.push({
       key: 'sleep-cancel',
-      label: '取消定时',
+      label: t('player.cancelTimer'),
       onClick: () => void playerStore.cancelSleepTimer(),
     })
   }
-  openAt(event.clientX, event.clientY, items, '睡眠定时器')
+  openAt(event.clientX, event.clientY, items, t('player.sleepTimer'))
 }
 
 /** 格式化倍速：1 → "1.0x"，0.75 → "0.75x"，2 → "2.0x" */
@@ -125,7 +146,7 @@ function openRateMenu(event: MouseEvent): void {
     icon: Math.abs(snapshot.value.rate - rate) < 0.001 ? 'check' : undefined,
     onClick: () => void playerStore.setRate(rate),
   }))
-  openAt(event.clientX, event.clientY, items, '播放速度')
+  openAt(event.clientX, event.clientY, items, t('player.playbackRate'))
 }
 
 function onSeek(positionMs: number): void {
@@ -144,11 +165,11 @@ async function toggleFavorite(): Promise<void> {
 function openModeMenu(event: MouseEvent): void {
   const items: MenuItem[] = MODE_ORDER.map((mode) => ({
     key: mode,
-    label: MODE_META[mode].label,
+    label: t(MODE_META[mode].labelKey),
     icon: snapshot.value.mode === mode ? 'check' : MODE_META[mode].icon,
     onClick: () => void playerStore.setMode(mode),
   }))
-  openAt(event.clientX, event.clientY, items, '播放模式')
+  openAt(event.clientX, event.clientY, items, t('player.playMode'))
 }
 
 function openAlbum(): void {
@@ -167,13 +188,15 @@ function openArtist(): void {
 
 <template>
   <div class="player-bar">
+    <!-- 实验室·音频可视化：仅开启时显示一条频谱条 -->
+    <AudioVisualizer v-if="showViz" />
     <!-- 左：当前曲目 -->
     <div class="now-playing">
       <button
         type="button"
         class="now-playing__cover"
-        title="放大封面 / 歌词"
-        aria-label="放大封面并查看歌词"
+        :title="t('player.enlargeCoverLyrics')"
+        :aria-label="t('player.enlargeCoverLyricsAria')"
         :disabled="!hasTrack"
         @click="openNowPlaying"
       >
@@ -188,16 +211,18 @@ function openArtist(): void {
         <Icon v-else name="music-note" :size="20" />
       </button>
       <div class="now-playing__text">
-        <p
-          v-if="track"
-          class="now-playing__title"
-          :class="{ 'now-playing__title--active': true }"
-          title="打开专辑"
-          @click="openAlbum"
-        >
-          {{ track.title }}
-        </p>
-        <p v-else class="now-playing__title now-playing__title--idle">未在播放</p>
+        <div v-if="track" class="now-playing__title-row">
+          <p
+            class="now-playing__title"
+            :class="{ 'now-playing__title--active': true }"
+            :title="t('player.openAlbum')"
+            @click="openAlbum"
+          >
+            {{ track.title }}
+          </p>
+          <AudioQualityBadge v-if="quality" :level="quality" class="now-playing__quality" />
+        </div>
+        <p v-else class="now-playing__title now-playing__title--idle">{{ t('player.idle') }}</p>
         <p v-if="track" class="now-playing__artist" @click="openArtist">
           {{ track.artists.join(' / ') }}
         </p>
@@ -207,8 +232,8 @@ function openArtist(): void {
         type="button"
         class="now-playing__favorite"
         :class="{ 'now-playing__favorite--on': isFavorite }"
-        :aria-label="isFavorite ? '取消收藏' : '收藏'"
-        :title="isFavorite ? '取消收藏（F）' : '收藏（F）'"
+        :aria-label="isFavorite ? t('player.unfavorite') : t('player.favorite')"
+        :title="isFavorite ? t('player.unfavoriteHint') : t('player.favoriteHint')"
         @click="toggleFavorite"
       >
         <Icon :name="isFavorite ? 'heart-filled' : 'heart'" :size="18" />
@@ -221,8 +246,8 @@ function openArtist(): void {
         <button
           type="button"
           class="transport__mode"
-          :aria-label="modeMeta.label"
-          :title="modeMeta.label"
+          :aria-label="modeLabel"
+          :title="modeLabel"
           @click="openModeMenu($event)"
         >
           <Icon :name="modeMeta.icon" :size="17" />
@@ -230,8 +255,8 @@ function openArtist(): void {
         <button
           type="button"
           class="transport__skip"
-          aria-label="上一首"
-          title="上一首"
+          :aria-label="t('common.previous')"
+          :title="t('common.previous')"
           :disabled="!hasTrack"
           @click="playerStore.previous()"
         >
@@ -240,7 +265,7 @@ function openArtist(): void {
         <button
           type="button"
           class="transport__play"
-          :aria-label="isPlaying ? '暂停' : '播放'"
+          :aria-label="isPlaying ? t('common.pause') : t('common.play')"
           :disabled="!hasTrack && !isLoading"
           @click="onToggle"
         >
@@ -250,8 +275,8 @@ function openArtist(): void {
         <button
           type="button"
           class="transport__skip"
-          aria-label="下一首"
-          title="下一首"
+          :aria-label="t('common.next')"
+          :title="t('common.next')"
           :disabled="!hasTrack"
           @click="playerStore.next()"
         >
@@ -274,8 +299,8 @@ function openArtist(): void {
         type="button"
         class="side-btn"
         :class="{ 'side-btn--active': isDesktopLyricsVisible }"
-        aria-label="实时歌词条"
-        :title="isDesktopLyricsVisible ? '收起列表上方实时歌词' : '在列表上方显示实时歌词'"
+        :aria-label="t('player.desktopLyrics')"
+        :title="isDesktopLyricsVisible ? t('player.desktopLyricsHide') : t('player.desktopLyricsShow')"
         @click="toggleDesktopLyrics"
       >
         <Icon name="captions" :size="18" />
@@ -284,8 +309,8 @@ function openArtist(): void {
         type="button"
         class="side-btn"
         :class="{ 'side-btn--active': isPanelOpen && panelTab === 'lyrics' }"
-        aria-label="歌词面板"
-        title="歌词面板（Ctrl+U）"
+        :aria-label="t('player.lyricsPanel')"
+        :title="t('player.lyricsPanelHint')"
         @click="togglePanelTab('lyrics')"
       >
         <Icon name="lyrics" :size="18" />
@@ -294,8 +319,8 @@ function openArtist(): void {
         type="button"
         class="side-btn"
         :class="{ 'side-btn--active': isPanelOpen && panelTab === 'queue' }"
-        aria-label="播放队列"
-        title="队列（Ctrl+Shift+U）"
+        :aria-label="t('player.queuePanel')"
+        :title="t('player.queuePanelHint')"
         @click="togglePanelTab('queue')"
       >
         <Icon name="queue" :size="18" />
@@ -304,7 +329,7 @@ function openArtist(): void {
         type="button"
         class="side-btn"
         :class="{ 'side-btn--active': sleepTimer.active }"
-        aria-label="睡眠定时器"
+        :aria-label="t('player.sleepTimer')"
         :title="sleepLabel"
         @click="openSleepMenu($event)"
       >
@@ -314,14 +339,26 @@ function openArtist(): void {
         type="button"
         class="side-btn side-btn--rate"
         :class="{ 'side-btn--active': Math.abs(snapshot.rate - 1) > 0.001 }"
-        aria-label="播放速度"
-        :title="`播放速度 ${formatRate(snapshot.rate)}`"
+        :aria-label="t('player.playbackRate')"
+        :title="`${t('player.playbackRate')} ${formatRate(snapshot.rate)}`"
         @click="openRateMenu($event)"
       >
         <span class="side-btn__rate-label">{{ formatRate(snapshot.rate) }}</span>
       </button>
+      <button
+        type="button"
+        class="side-btn"
+        :class="{ 'side-btn--active': eqOpen }"
+        :aria-label="t('player.eqNonVolume')"
+        :title="t('player.eqHintNonVolume')"
+        @click="eqOpen = true"
+      >
+        <Icon name="equalizer" :size="18" />
+      </button>
       <VolumeControl />
     </div>
+
+    <EqPanel :open="eqOpen" @close="eqOpen = false" />
   </div>
 </template>
 
@@ -392,6 +429,8 @@ function openArtist(): void {
 
 .now-playing__title {
   margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
@@ -399,6 +438,17 @@ function openArtist(): void {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.now-playing__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.now-playing__quality {
+  flex: 0 0 auto;
 }
 
 .now-playing__title--active {

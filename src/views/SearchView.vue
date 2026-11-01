@@ -13,6 +13,7 @@ import ListToolbar from '../components/library/ListToolbar.vue'
 import TrackList from '../components/library/TrackList.vue'
 import SelectionBar from '../components/library/SelectionBar.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const route = useRoute()
 const router = useRouter()
@@ -50,23 +51,27 @@ const { selectedIds, count, allFavorited, clear, play, favorite, remove, addToPl
 <template>
   <section class="view">
     <ListToolbar
-      title="搜索结果"
-      :subtitle="keyword.trim() ? `“${keyword.trim()}” · ${displayedTracks.length} 首` : '输入关键词开始搜索'"
+      :title="t('search.title')"
+      :subtitle="
+        keyword.trim()
+          ? t('search.resultSubtitle', { keyword: keyword.trim(), count: displayedTracks.length })
+          : t('search.promptSubtitle')
+      "
       v-model:keyword="keyword"
-      filter-placeholder="搜索标题 / 艺术家 / 专辑"
+      :filter-placeholder="t('search.filterPlaceholder')"
     />
 
     <EmptyState
       v-if="!keyword.trim()"
       icon="search"
-      title="搜索曲库"
-      description="在上方输入曲目、艺术家或专辑名称；也可以随时按 Ctrl+K 全局直达"
+      :title="t('search.emptyTitle')"
+      :description="t('search.emptyDescription')"
     />
     <EmptyState
       v-else-if="displayedTracks.length === 0"
       icon="search"
-      title="没有匹配的曲目"
-      description="换个关键词试试，或在命令浮层（Ctrl+K）中查看专辑与艺术家"
+      :title="t('common.noMatch')"
+      :description="t('search.noMatchDescription')"
     />
     <template v-else>
       <TrackList

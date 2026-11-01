@@ -1,0 +1,74 @@
+name: CI Build
+
+# =============================================================================
+# 跨平台编译验证：只验证「能不能编译过」，不产出安装包、不碰 Release。
+#
+# 目的：
+#   - macOS / Linux 的编译失败往往在真正发版（tag push）时才暴露，
+#     那时 Release 已经是公开状态，补救成本高；
+#   - 本工作流在 main 分支每次推送后跑一遍，提前把跨平台编译问题拦在发版之前。
+#
+# 与 Release 的关系：
+#   - Release（tag push）仍然负责出包 + 签名 + 上传；
+#   - 本工作流用 `tauri build --no-bundle`，只做编译，不签名、不上传、不建 Release。
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+          - os: ubuntu-latest
+            label: Linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true  # bin/*.exe（ffmpeg/ffprobe/sacd_extract）为 LFS 对象
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libasound2-dev：rodio/cpal 的 ALSA 后端需要 alsa-sys crate
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev patchelf file
+
+      - name: Build app (no bundle)
+        run: npm run tauri build -- --no-bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

@@ -283,13 +283,14 @@ pub async fn player_set_rate(app: AppHandle, rate: f32) -> AppResult<()> {
     .map_err(|e| AppError::Player(format!("设置倍速任务执行失败: {e}")))?
 }
 
-/// 设置实验室均衡器配置（频段增益 + 总开关）；写入 config.json 持久化，
+/// 设置均衡器配置（频段增益 + 总开关 + 输出增益）；写入 config.json 持久化，
 /// 并立即下发引擎线程生效（下一首起沿用新配置）。
 #[tauri::command]
 pub async fn player_set_eq(
     app: AppHandle,
     enabled: bool,
     bands: Vec<crate::player::engine::EqBand>,
+    output_gain_db: f32,
 ) -> AppResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>().inner();
@@ -297,9 +298,14 @@ pub async fn player_set_eq(
             let mut config = state.config.lock().unwrap();
             config.eq.enabled = enabled;
             config.eq.bands = bands.clone();
+            config.eq.output_gain_db = output_gain_db;
             config.save(&state.config_path)?;
         }
-        state.player.lock().unwrap().set_eq(EqConfig { enabled, bands });
+        state.player.lock().unwrap().set_eq(EqConfig {
+            enabled,
+            bands,
+            output_gain_db,
+        });
         Ok(())
     })
     .await

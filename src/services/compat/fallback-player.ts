@@ -7,6 +7,7 @@
  * 且兜底场景中原生通道已停止，不存在双声道冲突。
  */
 import type { PlaybackEvent, PlaybackStatus } from '../../types'
+import { t } from '../../i18n'
 
 export class FallbackPlayer {
   private audio: HTMLAudioElement | null = null
@@ -100,13 +101,13 @@ export class FallbackPlayer {
     audio.addEventListener('error', () => {
       if (!isCurrent()) return
       this.status = 'error'
-      this.emit({ type: 'error', payload: { message: '兜底播放通道异常', trackId } })
+      this.emit({ type: 'error', payload: { message: t('compat.channelError'), trackId } })
     })
 
     this.emit({ type: 'track', payload: { trackId, durationMs } })
     void audio.play().catch(() => {
       this.status = 'error'
-      this.emit({ type: 'error', payload: { message: '兜底播放启动失败', trackId } })
+      this.emit({ type: 'error', payload: { message: t('compat.startFailed'), trackId } })
     })
   }
 

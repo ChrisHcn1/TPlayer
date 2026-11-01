@@ -17,8 +17,8 @@ import { normalizeError } from '../services/ipc'
 
 export interface LabFeatureView {
   id: string
-  name: string
-  description: string
+  nameKey: string
+  descriptionKey: string
   /** 是否开启（默认 false） */
   enabled: boolean
 }
@@ -38,8 +38,8 @@ export const useLabStore = defineStore('lab', () => {
   const features = computed<LabFeatureView[]>(() =>
     LAB_FEATURES.map((def) => ({
       id: def.id,
-      name: def.name,
-      description: def.description,
+      nameKey: def.nameKey,
+      descriptionKey: def.descriptionKey,
       enabled: state.value.features[def.id] ?? def.defaultEnabled,
     })),
   )

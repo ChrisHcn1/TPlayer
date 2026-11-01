@@ -104,6 +104,12 @@ foreach ($tool in @('ffmpeg.exe', 'ffprobe.exe', 'sacd_extract.exe')) {
 }
 
 # ------------------------------------------------------------------ payload --
+# 注意渠道差异：
+#   - NSIS 主包**不再内置**解码组件（ffmpeg/ffprobe/sacd_extract），
+#     改为独立可选依赖，首次运行由应用引导用户安装到公共目录；
+#   - MSIX 仍**必须内置**：Microsoft Store 沙箱不允许运行时下载并执行
+#     包外二进制（包外 exe 无法在包身份下启动），故 Store 渠道保留内置副本。
+#     运行时查找顺序「公共依赖目录 → 安装目录 → 系统路径」会自动命中包内副本。
 Write-Host '[msix] Preparing payload...'
 if (Test-Path $payloadDir) { Remove-Item $payloadDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null

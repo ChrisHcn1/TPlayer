@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TPlayer 悬浮歌词</title>
+    <style>
+      /* 独立透明窗口：body 必须透明，才能露出桌面；窗口置顶 + 无边框由 Rust 端设置 */
+      html,
+      body,
+      #app {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/floating-lyrics/main.ts"></script>
+  </body>
+</html>

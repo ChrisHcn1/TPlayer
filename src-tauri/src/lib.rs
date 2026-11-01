@@ -15,12 +15,14 @@ pub mod config;
 pub mod util;
 pub mod converter;
 pub mod cover;
+pub mod deps;
 pub mod error;
 pub mod library;
 pub mod lyrics;
 pub mod player;
 pub mod replaygain;
 pub mod security;
+pub mod tools;
 pub mod website;
 #[cfg(windows)]
 pub mod smtc;
@@ -50,6 +52,8 @@ pub struct AppState {
     pub watch: watch::WatchManager,
     /// 音频转换器状态（running/cancel 原子标志）
     pub converter: converter::ConverterState,
+    /// 解码组件安装互斥标志（同一时刻只允许一个安装任务）
+    pub deps_installing: Arc<std::sync::atomic::AtomicBool>,
     /// AppHandle（用于事件推送，命令层也可直接从参数获取）
     pub app: AppHandle,
 }
@@ -96,6 +100,8 @@ pub fn run() {
             // 首次启动自动把旧 library.json 导入 SQLite 并备份为 library.json.bak
             let library = LibraryStore::open(library_path.clone(), legacy_library_path)?;
 
+            // 注入全局 AppHandle，供实验室音频可视化等播放链事件发射使用（仅启动期一次）
+            crate::player::engine::ENGINE_APP.get_or_init(|| app.handle().clone());
             // 启动引擎线程，返回可发送命令的句柄
             let engine_handle = player::spawn_engine();
 
@@ -133,6 +139,11 @@ pub fn run() {
                 config.lab.is_enabled("enhanced-metadata"),
                 std::sync::atomic::Ordering::SeqCst,
             );
+            // 从配置下发生实验室·音频可视化开关（零成本原子读，供播放链分析器使用）
+            crate::player::engine::AUDIO_VISUALIZER.store(
+                config.lab.is_enabled("audio-visualizer"),
+                std::sync::atomic::Ordering::SeqCst,
+            );
 
             let state = AppState {
                 player: player_handle.clone(),
@@ -144,6 +155,7 @@ pub fn run() {
                 lyrics_offsets_path,
                 watch: watch::WatchManager::new(),
                 converter: converter::ConverterState::new(),
+                deps_installing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 app: app_handle.clone(),
             };
 
@@ -528,6 +540,16 @@ pub fn run() {
             commands::converter::converter_probe_files,
             // 自动更新：本机构建是否支持应用内更新（非 MSIX / 非 Store 版）
             updater_available,
+            // 解码组件（FFmpeg / FFprobe / SACD Extract）管理
+            commands::deps::deps_status,
+            commands::deps::deps_install,
+            commands::deps::deps_install_local,
+            commands::deps::deps_open_folder,
+            commands::deps::deps_remove,
+            // 实验室·悬浮歌词：独立窗口（脱离主窗口）
+            commands::floating_lyrics::floating_lyrics_open,
+            commands::floating_lyrics::floating_lyrics_close,
+            commands::floating_lyrics::floating_lyrics_is_open,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

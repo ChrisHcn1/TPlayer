@@ -12,6 +12,7 @@
 import { computed, ref, withDefaults, defineProps } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { t } from '../i18n'
 import { useStatsStore } from '../stores/stats'
 import { useToastStore } from '../stores/toast'
 import { exportShareCardPng, formatDuration } from '../services/shareCard'
@@ -69,11 +70,13 @@ async function onExport(): Promise<void> {
   try {
     const result = await exportShareCardPng(statsStore.buildShareCardData())
     if (result.ok && result.path) {
-      toastStore.success(`分享卡片已导出：${result.path}`)
+      toastStore.success(t('stats.exportDone', { path: result.path }))
     } else if (result.ok) {
-      toastStore.info('分享卡片已开始下载（浏览器预览环境）')
+      toastStore.info(t('stats.exportDownloadStarted'))
     } else if (!result.cancelled) {
-      toastStore.error(result.path ? `导出失败：${result.path}` : '导出失败，请重试')
+      toastStore.error(
+        result.path ? t('stats.exportFailedWith', { path: result.path }) : t('stats.exportFailed'),
+      )
     }
   } finally {
     exporting.value = false
@@ -85,8 +88,8 @@ async function onExport(): Promise<void> {
   <section class="view" :class="{ 'view--embedded': embedded }">
     <div v-if="!embedded" class="view__header">
       <div class="view__heading">
-        <h1 class="view__title">收听报告</h1>
-        <p class="view__subtitle">本地播放统计：次数 / 时长 / 榜单 / 时段，仅存于本机，不上传</p>
+        <h1 class="view__title">{{ t('stats.title') }}</h1>
+        <p class="view__subtitle">{{ t('stats.subtitle') }}</p>
       </div>
       <div class="view__actions">
         <BaseButton
@@ -96,11 +99,11 @@ async function onExport(): Promise<void> {
           @click="onExport"
         >
           <Icon name="download" :size="14" />
-          {{ exporting ? '导出中…' : '导出分享卡片' }}
+          {{ exporting ? t('stats.exporting') : t('stats.exportShareCard') }}
         </BaseButton>
         <BaseButton size="sm" @click="router.push('/settings')">
           <Icon name="back" :size="14" />
-          返回设置
+          {{ t('stats.backToSettings') }}
         </BaseButton>
       </div>
     </div>
@@ -108,57 +111,57 @@ async function onExport(): Promise<void> {
     <EmptyState
       v-if="!hasStats"
       icon="clock"
-      title="还没有收听数据"
-      description="播放过曲目后，这里会统计播放次数、累计时长与收听榜单"
+      :title="t('stats.emptyTitle')"
+      :description="t('stats.emptyDesc')"
     />
 
     <template v-else>
       <div class="stats-grid">
         <div class="stat-card stat-card--accent">
           <div class="stat-card__value">{{ formatDuration(totalPlayMs) }}</div>
-          <div class="stat-card__label">累计播放时长</div>
+          <div class="stat-card__label">{{ t('stats.totalDuration') }}</div>
         </div>
         <div class="stat-card">
           <div class="stat-card__value">{{ playedTrackCount }}</div>
-          <div class="stat-card__label">播放曲目数</div>
+          <div class="stat-card__label">{{ t('stats.playedTracks') }}</div>
         </div>
         <div class="stat-card">
           <div class="stat-card__value">{{ totalPlayCount }}</div>
-          <div class="stat-card__label">累计播放次数</div>
+          <div class="stat-card__label">{{ t('stats.totalPlayCount') }}</div>
         </div>
         <div class="stat-card">
           <div class="stat-card__value stat-card__value--sm">{{ formatLastPlayed(lastPlayedAt) }}</div>
-          <div class="stat-card__label">最近播放</div>
+          <div class="stat-card__label">{{ t('nav.recent') }}</div>
         </div>
       </div>
 
       <div class="stats-cols">
         <section class="panel">
-          <h2 class="panel__title">TOP 曲目</h2>
+          <h2 class="panel__title">{{ t('stats.topTracks') }}</h2>
           <ol class="rank-list">
             <li v-for="(item, index) in topTracks" :key="item.trackId" class="rank-row">
               <span class="rank-badge">{{ index + 1 }}</span>
               <div class="rank-row__main">
                 <div class="rank-row__title">{{ item.title }}</div>
                 <div class="rank-row__meta">
-                  {{ item.artists.length > 0 ? item.artists.join(' / ') : '未知艺术家' }}
+                  {{ item.artists.length > 0 ? item.artists.join(' / ') : t('stats.unknownArtist') }}
                 </div>
               </div>
-              <span class="rank-row__count">{{ item.playCount }} 次 · {{ formatDuration(item.totalMs) }}</span>
+              <span class="rank-row__count">{{ t('stats.playsWithDuration', { count: item.playCount, duration: formatDuration(item.totalMs) }) }}</span>
             </li>
           </ol>
         </section>
 
         <section class="panel">
-          <h2 class="panel__title">TOP 艺术家</h2>
+          <h2 class="panel__title">{{ t('stats.topArtists') }}</h2>
           <ol class="rank-list">
             <li v-for="(item, index) in topArtists" :key="item.name" class="rank-row">
               <span class="rank-badge">{{ index + 1 }}</span>
               <div class="rank-row__main">
                 <div class="rank-row__title">{{ item.name }}</div>
-                <div class="rank-row__meta">按曲目播放量聚合</div>
+                <div class="rank-row__meta">{{ t('stats.artistsAggregate') }}</div>
               </div>
-              <span class="rank-row__count">{{ item.playCount }} 次</span>
+              <span class="rank-row__count">{{ t('stats.plays', { count: item.playCount }) }}</span>
             </li>
           </ol>
         </section>
@@ -166,17 +169,17 @@ async function onExport(): Promise<void> {
 
       <section class="panel">
         <h2 class="panel__title">
-          最常听时段
-          <span class="panel__hint">{{ peakHour }} 点（{{ peakHour }}:00 - {{ peakHour + 1 }}:00）</span>
+          {{ t('stats.peakHours') }}
+          <span class="panel__hint">{{ t('stats.peakHint', { hour: peakHour, next: peakHour + 1 }) }}</span>
         </h2>
-        <div class="hour-chart" role="img" :aria-label="`24 小时收听分布，峰值 ${peakHour} 点`">
+        <div class="hour-chart" role="img" :aria-label="t('stats.chartAria', { hour: peakHour })">
           <div
             v-for="bar in hourBars"
             :key="bar.hour"
             class="hour-chart__bar"
             :class="{ 'hour-chart__bar--peak': bar.isPeak, 'hour-chart__bar--empty': bar.count === 0 }"
             :style="bar.count > 0 ? { height: `${bar.pct}%` } : undefined"
-            :title="`${bar.hour} 点：${bar.count} 次`"
+            :title="t('stats.barTip', { hour: bar.hour, count: bar.count })"
           />
         </div>
       </section>
@@ -230,6 +233,7 @@ async function onExport(): Promise<void> {
 }
 
 .stat-card {
+  min-width: 0;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
@@ -241,7 +245,9 @@ async function onExport(): Promise<void> {
   font-weight: var(--font-weight-bold);
   line-height: var(--line-height-2xl);
   color: var(--color-text-primary);
-  white-space: nowrap;
+  /* 时长 / 日期等带单位或空格的数值在窄卡片内换行，避免溢出被相邻卡片遮盖 */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .stat-card__value--sm {

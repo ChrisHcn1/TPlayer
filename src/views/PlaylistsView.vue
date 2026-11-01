@@ -17,6 +17,7 @@ import MediaCard from '../components/library/MediaCard.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const router = useRouter()
 const playlistStore = usePlaylistStore()
@@ -39,13 +40,13 @@ async function createPlaylist(): Promise<void> {
   creating.value = true
   try {
     const name = await dialogStore.prompt({
-      title: '新建歌单',
-      placeholder: '歌单名称',
-      validate: (value) => (value.trim().length === 0 ? '请输入歌单名称' : null),
+      title: t('playlists.create'),
+      placeholder: t('playlists.namePlaceholder'),
+      validate: (value) => (value.trim().length === 0 ? t('playlists.nameRequired') : null),
     })
     if (!name) return
     await playlistStore.create(name)
-    toastStore.success(`歌单「${name}」已创建`)
+    toastStore.success(t('playlists.created', { name }))
   } finally {
     creating.value = false
   }
@@ -58,7 +59,7 @@ function open(playlist: Playlist): void {
 function play(playlist: Playlist): void {
   const tracks = tracksOf(playlist)
   if (tracks.length === 0) {
-    toastStore.warning('歌单还是空的')
+    toastStore.warning(t('common.playlistEmpty'))
     return
   }
   playTracks(tracks, {
@@ -68,39 +69,39 @@ function play(playlist: Playlist): void {
 
 async function rename(playlist: Playlist): Promise<void> {
   const name = await dialogStore.prompt({
-    title: '重命名歌单',
+    title: t('playlists.rename'),
     initialValue: playlist.name,
-    placeholder: '歌单名称',
-    validate: (value) => (value.trim().length === 0 ? '请输入歌单名称' : null),
+    placeholder: t('playlists.namePlaceholder'),
+    validate: (value) => (value.trim().length === 0 ? t('playlists.nameRequired') : null),
   })
   if (!name || name === playlist.name) return
   await playlistStore.rename(playlist.id, name)
-  toastStore.success('歌单已重命名')
+  toastStore.success(t('playlists.renamed'))
 }
 
 async function remove(playlist: Playlist): Promise<void> {
   const confirmed = await dialogStore.confirm({
-    title: '删除歌单',
-    message: `确定删除歌单「${playlist.name}」吗？歌单内曲目不会从曲库移除。`,
-    confirmText: '删除',
+    title: t('playlists.delete'),
+    message: t('playlists.deleteMessage', { name: playlist.name }),
+    confirmText: t('common.delete'),
     danger: true,
   })
   if (!confirmed) return
   await playlistStore.remove(playlist.id)
-  toastStore.success('歌单已删除')
+  toastStore.success(t('playlists.deleted'))
 }
 
 function onContextMenu(playlist: Playlist, event: MouseEvent): void {
   const items: MenuItem[] = [
-    { key: 'play', label: '播放歌单', icon: 'play', onClick: () => play(playlist) },
+    { key: 'play', label: t('playlists.play'), icon: 'play', onClick: () => play(playlist) },
   ]
   if (!playlist.isSystem) {
     items.push(
-      { key: 'rename', label: '重命名…', icon: 'edit', onClick: () => void rename(playlist) },
+      { key: 'rename', label: t('playlists.renameMenu'), icon: 'edit', onClick: () => void rename(playlist) },
       { divider: true, key: 'd1' },
       {
         key: 'delete',
-        label: '删除歌单',
+        label: t('playlists.delete'),
         icon: 'trash-2',
         danger: true,
         onClick: () => void remove(playlist),
@@ -113,11 +114,15 @@ function onContextMenu(playlist: Playlist, event: MouseEvent): void {
 
 <template>
   <section class="view">
-    <ListToolbar title="歌单" :subtitle="`${playlistStore.playlists.length} 个`" :show-filter="false">
+    <ListToolbar
+      :title="t('nav.playlists')"
+      :subtitle="t('common.playlistCount', { count: playlistStore.playlists.length })"
+      :show-filter="false"
+    >
       <template #actions>
         <BaseButton size="sm" variant="primary" @click="createPlaylist">
           <Icon name="plus" :size="14" />
-          新建歌单
+          {{ t('playlists.create') }}
         </BaseButton>
       </template>
     </ListToolbar>
@@ -125,8 +130,8 @@ function onContextMenu(playlist: Playlist, event: MouseEvent): void {
     <EmptyState
       v-if="playlistStore.playlists.length === 0"
       icon="list-music"
-      title="还没有歌单"
-      description="点击“新建歌单”，或在曲目右键菜单中把歌曲加入歌单"
+      :title="t('playlists.emptyTitle')"
+      :description="t('playlists.emptyDescription')"
     />
     <div v-else class="media-grid" role="list">
       <MediaCard
@@ -134,8 +139,8 @@ function onContextMenu(playlist: Playlist, event: MouseEvent): void {
         :key="playlist.id"
         variant="playlist"
         :title="playlist.name"
-        :subtitle="`${playlist.trackIds.length} 首`"
-        :badge="playlist.isSystem ? '系统' : ''"
+        :subtitle="t('common.trackCount', { count: playlist.trackIds.length })"
+        :badge="playlist.isSystem ? t('playlists.systemBadge') : ''"
         role="listitem"
         @open="open(playlist)"
         @play="play(playlist)"

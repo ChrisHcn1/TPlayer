@@ -18,6 +18,7 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,14 +58,14 @@ async function shuffleAll(): Promise<void> {
         icon="user"
         :cover-url="coverUrl"
         :title="artist.name"
-        :meta="`${artist.trackCount} 首 · ${artist.albumCount} 张专辑`"
+        :meta="t('common.artistMeta', { tracks: artist.trackCount, albums: artist.albumCount })"
       >
         <template #actions>
           <BaseButton size="md" variant="primary" @click="playAll">
             <Icon name="play" :size="15" />
-            播放
+            {{ t('common.play') }}
           </BaseButton>
-          <BaseButton size="md" variant="subtle" title="随机播放" @click="shuffleAll">
+          <BaseButton size="md" variant="subtle" :title="t('common.shuffle')" @click="shuffleAll">
             <Icon name="shuffle" :size="15" />
           </BaseButton>
         </template>
@@ -75,7 +76,7 @@ async function shuffleAll(): Promise<void> {
         source="artist"
         :source-id="artistName"
         v-model:selected-ids="selectedIds"
-        empty-title="艺术家暂无曲目"
+        :empty-title="t('artistDetail.emptyTracks')"
       />
       <SelectionBar
         :count="count"
@@ -88,10 +89,15 @@ async function shuffleAll(): Promise<void> {
       />
     </template>
 
-    <EmptyState v-else icon="user" title="艺术家不存在" description="请返回艺术家列表重新选择">
+    <EmptyState
+      v-else
+      icon="user"
+      :title="t('artistDetail.notFound')"
+      :description="t('artistDetail.notFoundDescription')"
+    >
       <BaseButton size="sm" variant="subtle" @click="router.push('/artists')">
         <Icon name="back" :size="14" />
-        返回艺术家
+        {{ t('artistDetail.backToArtists') }}
       </BaseButton>
     </EmptyState>
   </section>

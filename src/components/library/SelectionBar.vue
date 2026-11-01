@@ -3,6 +3,9 @@
  * 多选操作浮条（DESIGN §4.8）：列表底部 sticky 浮出；
  * Esc / 取消清空选择（由父级或 TrackList 处理 Esc），count=0 时父级不渲染。
  */
+import { computed } from 'vue'
+
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
 
 interface Props {
@@ -15,11 +18,15 @@ interface Props {
   removeTitle?: string
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   allFavorited: false,
   showRemove: true,
-  removeTitle: '从曲库移除',
+  removeTitle: '',
 })
+
+const removeTitleText = computed(
+  () => props.removeTitle || t('selection.removeFromLibrary'),
+)
 
 const emit = defineEmits<{
   (e: 'play'): void
@@ -32,35 +39,35 @@ const emit = defineEmits<{
 
 <template>
   <Transition name="selection">
-    <div v-if="count > 0" class="selection-bar" role="toolbar" :aria-label="`已选 ${count} 首`">
-      <span class="selection-bar__count u-tabular">已选 {{ count }} 首</span>
+    <div v-if="count > 0" class="selection-bar" role="toolbar" :aria-label="t('selection.selected', { count })">
+      <span class="selection-bar__count u-tabular">{{ t('selection.selected', { count }) }}</span>
 
-      <button type="button" class="selection-bar__btn selection-bar__btn--brand" title="播放所选" @click="emit('play')">
+      <button type="button" class="selection-bar__btn selection-bar__btn--brand" :title="t('selection.playSelected')" @click="emit('play')">
         <Icon name="play" :size="15" />
-        <span>播放</span>
+        <span>{{ t('common.play') }}</span>
       </button>
 
       <button
         type="button"
         class="selection-bar__btn"
-        title="加入歌单"
+        :title="t('selection.addToPlaylist')"
         @click="emit('add-playlist', $event)"
       >
         <Icon name="list-plus" :size="15" />
-        <span>加入歌单</span>
+        <span>{{ t('selection.addToPlaylist') }}</span>
       </button>
 
-      <button type="button" class="selection-bar__btn" :title="allFavorited ? '取消收藏' : '收藏'" @click="emit('favorite')">
+      <button type="button" class="selection-bar__btn" :title="allFavorited ? t('player.unfavorite') : t('player.favorite')" @click="emit('favorite')">
         <Icon :name="allFavorited ? 'heart-off' : 'heart'" :size="15" />
       </button>
 
-      <button v-if="showRemove" type="button" class="selection-bar__btn selection-bar__btn--danger" :title="removeTitle" @click="emit('remove')">
+      <button v-if="showRemove" type="button" class="selection-bar__btn selection-bar__btn--danger" :title="removeTitleText" @click="emit('remove')">
         <Icon name="trash-2" :size="15" />
       </button>
 
       <span class="selection-bar__divider" aria-hidden="true"></span>
 
-      <button type="button" class="selection-bar__btn selection-bar__btn--ghost" title="取消选择（Esc）" @click="emit('clear')">
+      <button type="button" class="selection-bar__btn selection-bar__btn--ghost" :title="t('selection.clearHint')" @click="emit('clear')">
         <Icon name="close" :size="15" />
       </button>
     </div>

@@ -17,6 +17,7 @@ import { listen } from '@tauri-apps/api/event'
 import { libraryService } from '../services/library'
 import { isTauriRuntime, normalizeError } from '../services/ipc'
 import { useToastStore } from './toast'
+import { t } from '../i18n'
 import type { Album, Artist, LibraryStats, RecentEntry, ScanProgress, Track } from '../types'
 
 function createIdleScanProgress(): ScanProgress {
@@ -188,7 +189,7 @@ export const useLibraryStore = defineStore('library', () => {
   const backfillLabel = computed(() => {
     if (!isBackfilling.value) return ''
     const { processed, total } = scanProgress.value
-    return total > 0 ? `后台解析 ${processed}/${total}` : `后台解析 ${processed}`
+    return total > 0 ? t('library.backfillProgress', { processed, total }) : t('library.backfillProgressUnknownTotal', { processed })
   })
 
   /** id → 曲目 的索引，供各视图 O(1) 取当前播放 / 歌单曲目 */
@@ -502,8 +503,8 @@ export const useLibraryStore = defineStore('library', () => {
     const pending = ids.filter((id) => {
       if (seen.has(id)) return false
       seen.add(id)
-      const t = getTrack(id)
-      return !!t && t.metadataPending && !t.isCue
+      const track = getTrack(id)
+      return !!track && track.metadataPending && !track.isCue
     })
     if (pending.length === 0) return
     try {

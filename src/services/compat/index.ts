@@ -32,6 +32,7 @@ import { Telemetry } from './telemetry'
 import { FallbackPlayer } from './fallback-player'
 import { detectFormat, isNativePlayable } from './magic'
 import { useToastStore } from '../../stores/toast'
+import { t } from '../../i18n'
 import type { CompatConfig, DecodeResponse, TrackMeta } from './types'
 
 /** 主线程诊断日志：同时 console 输出并派发到 window 事件，供屏幕内调试浮层（CompatDebug）显示，不依赖 F12/devtools */
@@ -156,7 +157,7 @@ export class CompatPlayer implements IPlayer {
       if (pa) {
         this.dispatch({
           type: 'error',
-          payload: { message: '解码组件加载失败，无法播放该曲目', trackId: pa.trackId },
+          payload: { message: t('compat.depsLoadFailed'), trackId: pa.trackId },
         })
       }
     }
@@ -291,7 +292,7 @@ export class CompatPlayer implements IPlayer {
     if (!this.ffmpegReady) {
       this.warmup()
       this.pendingAuto = { trackId, meta }
-      useToastStore().info('该曲目需加载解码组件，正在后台准备，稍后自动播放')
+      useToastStore().info(t('compat.needsDeps'))
       compatLog('[compat] 需要 core 未就绪，自动播待命（就绪后切）', trackId)
       return
     }
@@ -308,7 +309,7 @@ export class CompatPlayer implements IPlayer {
       // 且会再次触发 stage_compat → compat-play 接管回环
       this.dispatch({
         type: 'error',
-        payload: { message: '兜底解码失败，无法播放该曲目', trackId },
+        payload: { message: t('compat.fallbackFailed'), trackId },
       })
     }
   }

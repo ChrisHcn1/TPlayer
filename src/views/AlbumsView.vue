@@ -11,6 +11,7 @@ import type { Album } from '../types'
 import ListToolbar from '../components/library/ListToolbar.vue'
 import MediaCard from '../components/library/MediaCard.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const router = useRouter()
 const libraryStore = useLibraryStore()
@@ -50,13 +51,17 @@ function onContextMenu(album: Album, event: MouseEvent): void {
 
 <template>
   <section class="view">
-    <ListToolbar title="专辑" :subtitle="`${albums.length} 张`" v-model:keyword="keyword" />
+    <ListToolbar
+      :title="t('nav.albums')"
+      :subtitle="t('common.albumCount', { count: albums.length })"
+      v-model:keyword="keyword"
+    />
 
     <EmptyState
       v-if="albums.length === 0"
       icon="disc"
-      title="暂无专辑"
-      description="扫描曲库后，按专辑标签聚合的唱片会出现在这里"
+      :title="t('albums.emptyTitle')"
+      :description="t('albums.emptyDescription')"
     />
     <div v-else class="media-grid" role="list">
       <MediaCard

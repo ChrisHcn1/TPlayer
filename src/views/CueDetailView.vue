@@ -20,6 +20,7 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const route = useRoute()
 const router = useRouter()
@@ -59,8 +60,11 @@ const multichCount = computed(
   () => tracks.value.filter(isMultichTrack).length,
 )
 const heroMeta = computed(() => {
-  if (!isSacd.value || !hasMultich.value) return `${tracks.value.length} 个分轨`
-  return `${displayTracks.value.length} 个分轨 · ${areaTab.value === 'multich' ? '5.1 环绕' : '立体声'}`
+  if (!isSacd.value || !hasMultich.value) return t('cueDetail.trackCount', { count: tracks.value.length })
+  return t('cueDetail.trackCountArea', {
+    count: displayTracks.value.length,
+    area: areaTab.value === 'multich' ? t('cueDetail.multichannel') : t('cueDetail.stereo'),
+  })
 })
 
 const buildContext = (): PlayContext => ({
@@ -96,12 +100,12 @@ async function shuffleAll(): Promise<void> {
         <template #actions>
           <BaseButton size="md" variant="primary" @click="playAll">
             <Icon name="play" :size="15" />
-            播放整盘
+            {{ t('cueDetail.playAll') }}
           </BaseButton>
-          <BaseButton size="md" variant="subtle" title="随机播放" @click="shuffleAll">
+          <BaseButton size="md" variant="subtle" :title="t('common.shuffle')" @click="shuffleAll">
             <Icon name="shuffle" :size="15" />
           </BaseButton>
-          <div v-if="hasMultich" class="area-switch" role="tablist" aria-label="音轨版本">
+          <div v-if="hasMultich" class="area-switch" role="tablist" :aria-label="t('cueDetail.areaLabel')">
             <button
               type="button"
               role="tab"
@@ -109,7 +113,7 @@ async function shuffleAll(): Promise<void> {
               :class="{ active: areaTab === 'stereo' }"
               @click="areaTab = 'stereo'"
             >
-              立体声
+              {{ t('cueDetail.stereo') }}
             </button>
             <button
               type="button"
@@ -118,7 +122,7 @@ async function shuffleAll(): Promise<void> {
               :class="{ active: areaTab === 'multich' }"
               @click="areaTab = 'multich'"
             >
-              5.1 环绕
+              {{ t('cueDetail.multichannel') }}
               <span class="area-switch__count">{{ multichCount }}</span>
             </button>
           </div>
@@ -130,7 +134,7 @@ async function shuffleAll(): Promise<void> {
         source="album"
         :source-id="cueId"
         v-model:selected-ids="selectedIds"
-        empty-title="整盘暂无分轨"
+        :empty-title="t('cueDetail.emptyTracks')"
       />
       <SelectionBar
         :count="count"
@@ -143,10 +147,15 @@ async function shuffleAll(): Promise<void> {
       />
     </template>
 
-    <EmptyState v-else :icon="heroIcon" title="分轨专辑不存在" description="它可能已被移除，请返回分轨列表">
+    <EmptyState
+      v-else
+      :icon="heroIcon"
+      :title="t('cueDetail.notFound')"
+      :description="t('cueDetail.notFoundDescription')"
+    >
       <BaseButton size="sm" variant="subtle" @click="router.push('/cue')">
         <Icon name="back" :size="14" />
-        返回分轨专辑
+        {{ t('cueDetail.backToCue') }}
       </BaseButton>
     </EmptyState>
   </section>

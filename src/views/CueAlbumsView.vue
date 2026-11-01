@@ -14,6 +14,7 @@ import type { Album } from '../types'
 import ListToolbar from '../components/library/ListToolbar.vue'
 import MediaCard from '../components/library/MediaCard.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const router = useRouter()
 const libraryStore = useLibraryStore()
@@ -60,13 +61,17 @@ function onContextMenu(album: Album, event: MouseEvent): void {
 
 <template>
   <section class="view">
-    <ListToolbar title="分轨专辑" :subtitle="`${albums.length} 张`" v-model:keyword="keyword" />
+    <ListToolbar
+      :title="t('nav.cue')"
+      :subtitle="t('common.albumCount', { count: albums.length })"
+      v-model:keyword="keyword"
+    />
 
     <EmptyState
       v-if="albums.length === 0"
       icon="layers"
-      title="暂无分轨专辑"
-      description="带 CUE 索引的整盘音频或 SACD ISO 会被解析为多轨专辑，出现在这里"
+      :title="t('cueAlbums.emptyTitle')"
+      :description="t('cueAlbums.emptyDescription')"
     />
     <div v-else class="media-grid" role="list">
       <MediaCard

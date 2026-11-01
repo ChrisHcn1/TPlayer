@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TPlayer",
   "mainBinaryName": "TPlayer",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "identifier": "com.tplayer",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -25,7 +25,7 @@
         "center": true,
         "decorations": false,
         "transparent": true,
-        "devtools": true
+        "devtools": false
       }
     ],
     "macOSPrivateApi": true,
@@ -53,11 +53,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../bin/ffmpeg.exe": "bin/ffmpeg.exe",
-      "../bin/ffprobe.exe": "bin/ffprobe.exe",
-      "../bin/sacd_extract.exe": "bin/sacd_extract.exe"
-    },
+    "resources": {},
     "fileAssociations": [
       {
         "ext": ["mp3", "flac", "wav", "aac", "ogg", "oga", "opus", "m4a", "wma", "aif", "aiff", "ape", "wv", "tta", "tak", "dsf", "dff", "dts"],

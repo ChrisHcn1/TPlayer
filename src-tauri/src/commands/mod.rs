@@ -10,6 +10,8 @@
 pub mod app;
 pub mod compat_fs;
 pub mod converter;
+pub mod deps;
+pub mod floating_lyrics;
 pub mod lab;
 pub mod library;
 pub mod lyrics;

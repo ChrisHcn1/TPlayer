@@ -13,6 +13,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch
 import { RecycleScroller } from 'vue-virtual-scroller'
 
 import type { PlayContext, Track } from '../../types'
+import { t } from '../../i18n'
 import { usePlayerStore } from '../../stores/player'
 import { useLibraryStore } from '../../stores/library'
 import { useTrackActions } from '../../composables/useTrackActions'
@@ -42,9 +43,11 @@ const props = withDefaults(defineProps<Props>(), {
   showAlbum: true,
   sortable: true,
   selectedIds: () => [],
-  emptyTitle: '暂无曲目',
+  emptyTitle: '',
   emptyDescription: '',
 })
+
+const emptyTitleText = computed(() => props.emptyTitle || t('list.emptyTracks'))
 
 const emit = defineEmits<{
   (e: 'update:selectedIds', ids: string[]): void
@@ -434,7 +437,7 @@ function onKeydown(event: KeyboardEvent): void {
 
     <EmptyState
       v-else
-      :title="emptyTitle"
+      :title="emptyTitleText"
       :description="emptyDescription"
     />
   </div>

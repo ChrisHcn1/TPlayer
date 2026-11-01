@@ -262,6 +262,54 @@ npm run typecheck  # 仅类型检查
 
 ---
 
+## 9. 2.0.4 发版范围（依赖管理专项 + 收尾修复）
+
+> 最后更新：2026-10-31
+> 本版本把「解码组件（ffmpeg/ffprobe/sacd_extract）独立可选依赖」方案**随主程序一同发布**，并补齐 2.0.3 遗留的跨平台编译修复。
+> 核心原则：**依赖包与主程序同步打包、同步测试、同步发布，不单独拆分发布、不遗漏**。
+
+### 9.1 版本范围（明确包含在 2.0.4）
+
+| 类别 | 内容 | 落地位置 |
+|---|---|---|
+| 依赖检测 | `tools.rs` 统一外部工具定位（公共目录→安装目录→系统路径→PATH，带来源标注）；`deps.rs` 依赖状态/安装/校验领域层 | `src-tauri/src/tools.rs` · `src-tauri/src/deps.rs` |
+| 安装/更新分支 | 公共目录 `%APPDATA%\com.tplayer\deps\packs\<版本>`（安装目录之外→覆盖安装/卸载不删、更新自动复用）；原子安装+逐文件 SHA256 校验+防 Zip Slip；更新复用/首次引导/缺失拦截/离线手动放置/下载失败分类恢复 | `src-tauri/src/deps.rs` |
+| 用户引导 | 首启引导弹窗 `DepsSetupDialog.vue`；设置→更新页「解码组件」卡片；`App.vue` 捕获 `DEPENDENCY_MISSING` 直接弹安装引导；修掉转换页 `instanceof Error` 文案丢失 | `src/components/common/DepsSetupDialog.vue` · `src/views/SettingsView.vue` · `src/App.vue` · `src/views/ConverterView.vue` |
+| 主包瘦身 | NSIS 不再随包分发三二进制（~470MB→~20MB）；`build-win.ps1` 移除强依赖、`build-deps-pack.ps1` 新增依赖包打包；`hooks.nsh` 增加旧版 `$INSTDIR\bin` 迁移到公共目录的钩子 | `tauri.conf.json` · `scripts/build-win.ps1` · `scripts/build-deps-pack.ps1` · `src-tauri/nsis/hooks.nsh` |
+| 跨平台修复（2.0.3 遗留） | `is_network_path` 按平台分块（Linux/Windows/macOS），修 macOS 编译失败（`E0425`） | `src-tauri/src/commands/library.rs` |
+| CI 收尾（2.0.3 遗留） | `sync-release.yml` 增加 `workflow_run` 兜底触发器；新增 `ci-build.yml` 跨平台编译验证 | `.github/workflows/sync-release.yml` · `.github/workflows/ci-build.yml` |
+| 文档/合规 | `DEPENDENCIES.yml` 第三方二进制改为「独立可选依赖」说明；本文件 2.0.4 范围 | `DEPENDENCIES.yml` · 本文件 |
+
+### 9.2 发布机制（与主程序同步，避免拆分）
+
+- **依赖包随主 Release 一同发布**：`release.yml` 的 `release-windows` 新增两步——先 `build-deps-pack.ps1` 构建 `tplayer-deps-windows-x86_64-<packVersion>.zip`（脚本会把该 zip 的 sha256/size 写回 `deps-manifest.json`，随后 `tauri-action` 把清单编译进应用，保证校验一致），再 `softprops/action-gh-release` 把该 zip 作为 **同一 v2.0.4 Release 的附件**上传。
+- **`deps-manifest.json` 下载地址指向 v2.0.4 主 Release 资产**（不再是独立的 `deps-v1.0.0` tag），从 URL 层面消除「主程序与依赖包分开发布」的可能。
+- **`release-deps.yml` 降级为备用通道**：仅在未来「仅升级 ffmpeg、不发主程序版本」时推送 `deps-v*` tag 才走，不参与 2.0.4 首发。
+- **版本号三处已对齐 2.0.4**：`tauri.conf.json` / `Cargo.toml` / `package.json`。
+- **测试门禁同步覆盖**：`cargo test`（含 `deps::` 13 例 + 真实依赖包端到端校验）、前端 `vitest`（含 `stores/deps.test.ts` 11 例）、`vue-tsc` 类型检查、`ci-build.yml` 跨平台编译验证。
+
+### 9.3 2.0.4 发版检查清单（逐条勾选，避免遗漏）
+
+1. [ ] 本地 `cargo test --lib` 全绿（含 `deps::` 模块用例）
+2. [ ] 本地 `npx vitest run` 全绿（含 `stores/deps.test.ts`）
+3. [ ] 本地 `npx vue-tsc --noEmit` 零错误
+4. [ ] 本地 `npm run build` 成功（前端产物）
+5. [ ] 版本号三处均为 `2.0.4`（tauri.conf.json / Cargo.toml / package.json）
+6. [ ] `deps-manifest.json` 的 `packVersion` 与 `windows-x86_64` 的 `sha256/size/url` 为本地 `build-deps-pack.ps1` 实际产出值（URL 指向 `v2.0.4`）
+7. [ ] 本地实跑 `scripts/build-deps-pack.ps1`，确认产出 zip 与清单 hash 一致
+8. [ ] 本地实装依赖包到公共目录，确认 `deps_status` 检测为 `installed`（来源 `Deps`），且「更新场景复用」路径可走通
+9. [ ] 确认本次改动（依赖管理 + 跨平台修复 + CI）已提交并推送到 `main`
+10. [ ] 推送 `v2.0.4` tag → CI 跑 `release.yml`：三平台构建 + **依赖包作为 v2.0.4 附件上传**
+11. [ ] 发布后复核 v2.0.4 Release 资产含：`*_x64-setup.exe`、**`tplayer-deps-windows-x86_64-1.0.0.zip`**、MSIX（如构建）、latest.json
+12. [ ] 确认 `sync-release.yml` 已把 v2.0.4 同步进 `site/releases.json`（网站「版本动态」可见）
+13. [ ] 网站（tplayer.gleckes.cn）已重新部署含「版本动态」区块的 `website/index.html`
+14. [ ] 用一个**未装过依赖**的干净环境实测：首启弹引导→安装→播放 ape/dsf/wma 等需依赖的格式成功
+15. [ ] **切勿**误触发 `release-deps.yml`（2.0.4 不走独立 deps-v tag）
+
+> 注意：2.0.4 仅发布 Windows（NSIS/MSIX）。`deps-manifest.json` 中其余平台（aarch64/macos/linux）条目 `sha256/size` 仍为 `null`，仅当对应平台正式发布时才补齐其依赖包并填实。
+
+---
+
 ## 8. 文件索引（按需查阅，勿全量遍历）
 
 ```

@@ -9,6 +9,8 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 
+import { t } from '../i18n'
+
 export interface ConfirmOptions {
   title: string
   message?: string
@@ -70,8 +72,8 @@ export const useDialogStore = defineStore('dialog', () => {
       kind: 'confirm',
       title: options.title,
       message: options.message ?? '',
-      confirmText: options.confirmText ?? '确定',
-      cancelText: options.cancelText ?? '取消',
+      confirmText: options.confirmText ?? t('common.confirm'),
+      cancelText: options.cancelText ?? t('common.cancel'),
       danger: options.danger ?? false,
       placeholder: '',
       value: '',
@@ -88,8 +90,8 @@ export const useDialogStore = defineStore('dialog', () => {
       kind: 'prompt',
       title: options.title,
       message: options.message ?? '',
-      confirmText: options.confirmText ?? '确定',
-      cancelText: options.cancelText ?? '取消',
+      confirmText: options.confirmText ?? t('common.confirm'),
+      cancelText: options.cancelText ?? t('common.cancel'),
       danger: false,
       placeholder: options.placeholder ?? '',
       value: options.initialValue ?? '',

@@ -20,6 +20,7 @@ import type {
   SleepTimerState,
 } from '../../types'
 import { createIdleSnapshot } from '../player'
+import { t } from '../../i18n'
 import { getTrackById } from './dataset'
 
 const TICK_MS = 250
@@ -203,9 +204,9 @@ export class WebPlayer implements IPlayer {
   }
 
   async removeFromQueue(index: number): Promise<void> {
-    if (!this.context) throw new Error('没有可操作的播放队列')
+    if (!this.context) throw new Error(t('webPlayer.noQueue'))
     const ids = this.context.trackIds
-    if (index < 0 || index >= ids.length) throw new Error(`队列下标越界: ${index}`)
+    if (index < 0 || index >= ids.length) throw new Error(t('webPlayer.queueIndex', { index }))
     ids.splice(index, 1)
     // 修正当前曲目下标：移除当前曲之前的项则前移；移除当前曲本身不打断播放
     if (index < this.index && this.index > 0) this.index -= 1

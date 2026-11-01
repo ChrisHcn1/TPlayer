@@ -26,6 +26,18 @@ permissions:
 #   - macOS / Linux 仅构建并上传各自安装包（不写 latest.json，避免竞态）
 #   - macOS 默认构建 Apple Silicon（macos-latest = arm64）
 #   - Linux 用 scripts/build-deb.sh 原生 dpkg 打包（bin/linux 不在仓库 → 依赖系统 ffmpeg）
+#
+# 关于解码组件（ffmpeg / ffprobe / sacd_extract）——【随 2.0.4 主程序一同发布】
+#   - 已从主安装包剥离，改为独立可选依赖。为「与主程序同步打包、避免拆分发布」，
+#     自 2.0.4 起，依赖包 **作为主 Release 的附件**随 v2.0.4 一同发布（见下方
+#     release-windows 的「Build deps pack」+「Upload deps pack」两步），
+#     不再单独发 deps-v* tag。
+#   - 主包不再分发这三个二进制 → Windows 安装包从 ~470MB 降到 ~20MB；
+#   - 依赖包安装到公共目录（应用数据目录之外的 deps/packs/<版本>），
+#     主程序覆盖安装 / 卸载都不会删除它，更新场景自动复用，无需重下；
+#   - MSIX 渠道仍内置（Store 沙箱不允许运行时下载并执行包外二进制）；
+#   - 未来若仅需升级 ffmpeg（不改主程序），才走 release-deps.yml 发 deps-v* tag；
+#     该通道仅作备用，不参与 2.0.4 首发。
 # =============================================================================
 jobs:
   # ---- 先建草稿 Release，三个平台 job 独立上传 artifact 到同一 tag ----
@@ -73,6 +85,16 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      # ---- 构建解码组件依赖包（先于应用构建，使二进制嵌入正确的 sha256/size）----
+      # 依赖包作为主 Release 附件随 2.0.4 一同发布，不单独发 deps-v tag。
+      # 产物：src-tauri/target/deps/tplayer-deps-windows-x86_64-<packVersion>.zip
+      #   脚本末尾会把该 zip 的 sha256/size 写回 deps-manifest.json，
+      #   紧接着的 tauri-action 即把此清单编译进应用，保证「下载后整体校验」一致。
+      - name: Build deps pack (bundled with this release)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/build-deps-pack.ps1
+
       - name: Build and publish Tauri app (Windows)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -91,6 +113,16 @@ jobs:
             - Linux (Debian/Ubuntu)：`sudo apt install ./tplayer_*_amd64.deb`。
           releaseDraft: true
           prerelease: false
+
+      # ---- 把依赖包作为同一 Release 的附件上传（与 Windows 安装包一同发布）----
+      # draft: true 保持草稿态，待 macOS / Linux job 完成后由它们翻转发布，
+      # 避免提前发布导致其它平台资产尚未上传。
+      - name: Upload deps pack to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: src-tauri/target/deps/tplayer-deps-windows-x86_64-*.zip
 
   # ---- macOS：.app + .dmg（独立运行，不依赖 Windows）----
   release-macos:

@@ -15,7 +15,20 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     target: 'es2021',
+    // 生产构建：强制压缩（esbuild 最小化处理），关闭 sourcemap 以避免暴露源码与调试信息
+    minify: 'esbuild',
     sourcemap: false,
+    // 强制剔除生产包中的 console / debugger 调用，关闭调试日志输出
+    esbuild: {
+      drop: ['console', 'debugger'],
+    },
+    // 多入口：主窗口 + 悬浮歌词独立窗口（各自加载独立 HTML 与精简引导）
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        floating: fileURLToPath(new URL('./floating-lyrics.html', import.meta.url)),
+      },
+    },
   },
   server: {
     port: 3101,

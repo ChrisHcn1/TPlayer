@@ -12,6 +12,7 @@ import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../../stores/player'
 import { libraryService } from '../../services/library'
 import type { TrackInfo } from '../../types'
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
 import defaultCover from '../../assets/default-cover.svg'
 
@@ -84,26 +85,26 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
     <!-- 加载中 -->
     <div v-if="loading" class="track-info__state">
       <Icon name="loader" :size="22" spin />
-      <p>曲目信息加载中…</p>
+      <p>{{ t('info.loading') }}</p>
     </div>
 
     <!-- 无曲目 -->
     <div v-else-if="!trackId" class="track-info__state">
       <Icon name="music-off" :size="26" />
-      <p>播放曲目后显示详情</p>
+      <p>{{ t('info.playToShow') }}</p>
     </div>
 
     <!-- 加载失败 -->
     <div v-else-if="errorMsg" class="track-info__state">
       <Icon name="alert-triangle" :size="26" />
-      <p>曲目信息加载失败</p>
+      <p>{{ t('info.loadFailed') }}</p>
       <p class="track-info__hint">{{ errorMsg }}</p>
     </div>
 
     <!-- 曲目不存在于曲库 -->
     <div v-else-if="!info" class="track-info__state">
       <Icon name="file-question" :size="26" />
-      <p>曲目未找到</p>
+      <p>{{ t('info.notFound') }}</p>
     </div>
 
     <!-- 正常渲染 -->
@@ -128,56 +129,56 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
 
       <!-- 技术参数 -->
       <section class="track-info__section">
-        <h3 class="track-info__section-title">音频</h3>
+        <h3 class="track-info__section-title">{{ t('info.audio') }}</h3>
         <dl class="track-info__grid">
           <div class="track-info__cell">
-            <dt>格式</dt>
+            <dt>{{ t('info.format') }}</dt>
             <dd>{{ info.format.toUpperCase() || '—' }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>时长</dt>
+            <dt>{{ t('info.duration') }}</dt>
             <dd>{{ formatDuration(info.duration) }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>采样率</dt>
+            <dt>{{ t('info.sampleRate') }}</dt>
             <dd>{{ formatSampleRate(info.sampleRate) }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>比特率</dt>
+            <dt>{{ t('info.bitrate') }}</dt>
             <dd>{{ formatBitrate(info.bitrate) }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>位深</dt>
+            <dt>{{ t('info.bitDepth') }}</dt>
             <dd>{{ safeFormat(info.bitDepth, (n) => `${n} bit`) }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>声道</dt>
-            <dd>{{ safeFormat(info.channels, (n) => (n === 1 ? '单声道' : n === 2 ? '立体声' : `${n} 声道`)) }}</dd>
+            <dt>{{ t('info.channelsLabel') }}</dt>
+            <dd>{{ safeFormat(info.channels, (n) => (n === 1 ? t('info.mono') : n === 2 ? t('info.stereo') : t('info.channels', { count: n }))) }}</dd>
           </div>
         </dl>
       </section>
 
       <!-- 存储信息 -->
       <section class="track-info__section">
-        <h3 class="track-info__section-title">文件</h3>
+        <h3 class="track-info__section-title">{{ t('info.file') }}</h3>
         <dl class="track-info__grid">
           <div class="track-info__cell track-info__cell--full">
-            <dt>路径</dt>
+            <dt>{{ t('info.path') }}</dt>
             <dd class="track-info__path" :title="info.filePath">{{ info.filePath }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>大小</dt>
+            <dt>{{ t('info.size') }}</dt>
             <dd>{{ formatSize(info.fileSize) }}</dd>
           </div>
           <div class="track-info__cell">
-            <dt>音轨</dt>
+            <dt>{{ t('info.trackNumber') }}</dt>
             <dd>{{ safeFormat(info.trackNumber, (n) => String(n)) }}</dd>
           </div>
           <div v-if="info.replaygainDb !== null || info.replaygainPeak !== null" class="track-info__cell track-info__cell--full">
             <dt>ReplayGain</dt>
             <dd class="track-info__rg">
-              <template v-if="info.replaygainDb !== null">增益 {{ info.replaygainDb.toFixed(2) }} dB</template>
-              <template v-if="info.replaygainPeak !== null">峰值 {{ info.replaygainPeak.toFixed(6) }}</template>
+              <template v-if="info.replaygainDb !== null">{{ t('info.gain') }} {{ info.replaygainDb.toFixed(2) }} dB</template>
+              <template v-if="info.replaygainPeak !== null">{{ t('info.peak') }} {{ info.replaygainPeak.toFixed(6) }}</template>
             </dd>
           </div>
         </dl>
@@ -185,7 +186,7 @@ function safeFormat<T>(value: T | null | undefined, fn: (v: T) => string, fallba
 
       <!-- 内嵌歌词 -->
       <section v-if="info.embeddedLyrics" class="track-info__section">
-        <h3 class="track-info__section-title">内嵌歌词</h3>
+        <h3 class="track-info__section-title">{{ t('info.embeddedLyrics') }}</h3>
         <pre class="track-info__lyrics">{{ info.embeddedLyrics }}</pre>
       </section>
     </template>

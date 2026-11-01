@@ -14,6 +14,7 @@ import SelectionBar from '../components/library/SelectionBar.vue'
 import BaseButton from '../components/common/BaseButton.vue'
 import Icon from '../components/common/Icon.vue'
 import EmptyState from '../components/common/EmptyState.vue'
+import { t } from '../i18n'
 
 const libraryStore = useLibraryStore()
 const { playTracks, toggleFavorite } = useTrackActions()
@@ -50,15 +51,15 @@ function playAll(): void {
 <template>
   <section class="view">
     <ListToolbar
-      title="我的收藏"
-      :subtitle="`${displayedTracks.length} 首`"
+      :title="t('favorites.title')"
+      :subtitle="t('common.trackCount', { count: displayedTracks.length })"
       v-model:keyword="keyword"
-      filter-placeholder="筛选已收藏曲目"
+      :filter-placeholder="t('favorites.filterPlaceholder')"
     >
       <template #actions>
         <BaseButton size="sm" variant="primary" :disabled="displayedTracks.length === 0" @click="playAll">
           <Icon name="play" :size="14" />
-          播放全部
+          {{ t('common.playAll') }}
         </BaseButton>
       </template>
     </ListToolbar>
@@ -66,20 +67,20 @@ function playAll(): void {
     <EmptyState
       v-if="displayedTracks.length === 0"
       icon="heart"
-      title="还没有收藏"
-      description="点击曲目旁的心形或使用右键菜单，把喜欢的歌收进来"
+      :title="t('favorites.emptyTitle')"
+      :description="t('favorites.emptyDescription')"
     />
     <template v-else>
       <TrackList
         :tracks="displayedTracks"
         source="library"
         v-model:selected-ids="selectedIds"
-        empty-title="没有匹配的曲目"
+        :empty-title="t('common.noMatch')"
       />
       <SelectionBar
         :count="count"
         :all-favorited="allFavorited"
-        remove-title="取消收藏"
+        :remove-title="t('common.unfavorite')"
         @play="play"
         @add-playlist="addToPlaylist"
         @favorite="favorite"

@@ -517,18 +517,44 @@ node_dev_dependencies:
     review_status: approved
 
 # =============================================================================
-# 随包分发二进制（Bundled Binaries）
-# 需随安装包附带许可证文本与源码获取方式
+# 第三方二进制（外部依赖，独立可选分发）
+#
+# ffmpeg / ffprobe / sacd_extract 自本版本起**不再随主安装包分发**，
+# 改为独立可选依赖包：
+#   - 打包：scripts/build-deps-pack.ps1 → tplayer-deps-<平台>-<版本>.zip，
+#     以独立 Release（tag = deps-v<版本>）发布，版本与主程序解耦；
+#   - 安装：应用内「设置 → 解码组件」按需下载安装到公共目录
+#     （应用数据目录下的 deps/packs/<版本>），逐文件 SHA256 强制校验；
+#   - 复用：公共目录位于安装目录之外 → 主程序覆盖安装 / 卸载均不删除，
+#     更新场景下检测到即直接复用，无需重复下载；
+#   - MSIX（Store）渠道例外：Store 沙箱不允许运行时下载并执行包外二进制，
+#     该渠道仍内置副本（运行时查找顺序「公共目录 → 安装目录 → 系统路径」
+#     会自动命中包内副本）。
+#
+# 许可证要求不变：独立进程调用，非静态链接；分发时需附带许可证全文
+# 与对应源码获取方式。
 # =============================================================================
-bundled_binaries:
+optional_binaries:
   - name: ffmpeg
     version: "6.x"
     license: "LGPL-2.1"
     source: "https://ffmpeg.org/download.html"
     purpose: "非原生格式音频解码子进程（后端调用）"
-    notes: "独立进程调用，非静态链接。随包分发需附带 LGPL-2.1 全文与对应源码获取方式（官网链接或随包压缩包）"
-    sha256: "PLACEHOLDER - 发布前填入实际文件哈希"
-    reviewed_at: "2026-10-29"
+    notes: "独立进程调用，非静态链接。分发依赖包时需附带 LGPL-2.1 全文与对应源码获取方式（官网链接或随包压缩包）"
+    distribution: "独立依赖包（deps-v* Release）；MSIX 渠道仍内置"
+    sha256: "由 scripts/build-deps-pack.ps1 构建时写入包内 deps.json 清单"
+    reviewed_at: "2026-10-31"
+    review_status: approved
+
+  - name: ffprobe
+    version: "6.x"
+    license: "LGPL-2.1"
+    source: "https://ffmpeg.org/download.html"
+    purpose: "音频时长 / 采样率 / 声道数探测子进程"
+    notes: "独立进程调用，非静态链接。分发依赖包时需附带 LGPL-2.1 全文与对应源码获取方式"
+    distribution: "独立依赖包（deps-v* Release）；MSIX 渠道仍内置"
+    sha256: "由 scripts/build-deps-pack.ps1 构建时写入包内 deps.json 清单"
+    reviewed_at: "2026-10-31"
     review_status: approved
 
   - name: sacd_extract
@@ -536,9 +562,10 @@ bundled_binaries:
     license: "GPL-3.0"
     source: "https://github.com/sacd-ripper/sacd-ripper"
     purpose: "SACD DST 压缩区与多声道区外部解码"
-    notes: "独立进程调用，非链接。随包分发需附带 GPL-3.0 全文与完整对应源码（或书面提供要约），并注明是否修改"
-    sha256: "PLACEHOLDER - 发布前填入实际文件哈希"
-    reviewed_at: "2026-10-29"
+    notes: "独立进程调用，非链接。分发依赖包时需附带 GPL-3.0 全文与完整对应源码（或书面提供要约），并注明是否修改"
+    distribution: "独立依赖包（deps-v* Release）；MSIX 渠道仍内置"
+    sha256: "由 scripts/build-deps-pack.ps1 构建时写入包内 deps.json 清单"
+    reviewed_at: "2026-10-31"
     review_status: approved
 
 # =============================================================================
@@ -574,7 +601,7 @@ third_party_code:
 # 许可证汇总统计
 # =============================================================================
 license_summary:
-  approved_count: 33
+  approved_count: 34
   pending_count: 0
   rejected_count: 0
   unknown_count: 0
@@ -582,4 +609,4 @@ license_summary:
     - sacd_extract (GPL-3.0)
     - ffmpeg (LGPL-2.1, weak copyleft)
   commercial_restriction: []
-  notes: "所有直接依赖均为宽松许可或弱 copyleft，无强 copyleft 进入应用源码链路；随包二进制 ffmpeg/sacd_extract 为独立进程调用，不强制应用开源"
+  notes: "所有直接依赖均为宽松许可或弱 copyleft，无强 copyleft 进入应用源码链路；ffmpeg/ffprobe/sacd_extract 为独立进程调用，不强制应用开源。三者自本版本起改为独立可选依赖包（deps-v* Release），分发时仍需附带许可证全文与源码获取方式"

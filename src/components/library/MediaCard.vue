@@ -6,6 +6,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 
 import Icon from '../common/Icon.vue'
+import { t } from '../../i18n'
 import { loadCover } from '../../composables/useTrackCover'
 
 type CardVariant = 'album' | 'artist' | 'playlist' | 'cue' | 'sacd'
@@ -123,7 +124,7 @@ watch(
       <button
         type="button"
         class="media-card__play"
-        :aria-label="`播放 ${title}`"
+        :aria-label="t('card.play', { title })"
         @click.stop="emit('play')"
       >
         <Icon name="play" :size="18" />

@@ -9,9 +9,13 @@
 import { computed, onMounted } from 'vue'
 
 import type { Track } from '../../types'
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
+import AudioQualityBadge from '../common/AudioQualityBadge.vue'
+import { classifyQuality, QUALITY_LEVELS } from '../../services/audio-quality'
 import { useLyricsMetadata } from '../../lab/features/lyrics-metadata'
 import { useMetaRetryStore } from '../../stores/metaRetry'
+import { useSettingsStore } from '../../stores/settings'
 
 interface Props {
   track: Track
@@ -47,7 +51,11 @@ const retryRecord = computed(() => metaRetry.recordOf(props.track.id))
 const retryStatusText = computed(() => {
   const rec = retryRecord.value
   if (!rec) return ''
-  return rec.status === 'ok' ? '已识别' : rec.status === 'failed' ? '识别失败' : '无需变更'
+  return rec.status === 'ok'
+    ? t('track.retryOk')
+    : rec.status === 'failed'
+      ? t('track.retryFailed')
+      : t('track.retryUnchanged')
 })
 /** 标记文案：状态 + 识别时间（HH:MM），完整时间与详情见悬停提示 */
 const retryBadgeText = computed(() => {
@@ -59,11 +67,27 @@ const retryBadgeText = computed(() => {
 const retryBadgeTitle = computed(() => {
   const rec = retryRecord.value
   if (!rec) return ''
-  return `识别于 ${rec.at}\n状态：${retryStatusText.value}\n${rec.detail}`
+  return t('track.retryBadgeTitle', {
+    time: rec.at,
+    status: retryStatusText.value,
+    detail: rec.detail,
+  })
 })
 onMounted(() => {
   void metaRetry.ensureLoaded()
 })
+
+// 音质分级标识：依据格式 / 比特率 / 采样率 / SACD-DSD 归类；标准音质不展示。
+// 受全局「显示音质标识」开关控制，关闭后隐藏（状态已持久化）。
+const settingsStore = useSettingsStore()
+const quality = computed(() => {
+  if (!settingsStore.showAudioQuality) return null
+  const q = classifyQuality(props.track)
+  return q && q !== 'standard' ? q : null
+})
+const qualityTitle = computed(() =>
+  quality.value ? t(QUALITY_LEVELS[quality.value].descKey) : '',
+)
 
 const durationText = computed(() => {
   const totalSeconds = Math.round(props.track.duration)
@@ -100,7 +124,7 @@ function onCheckboxClick(event: MouseEvent): void {
         :class="{ 'track-row__checkbox--checked': selected }"
         role="checkbox"
         :aria-checked="selected"
-        :aria-label="selected ? '取消选择' : '选择'"
+        :aria-label="selected ? t('track.deselect') : t('track.select')"
         :tabindex="selected ? 0 : -1"
         @click.stop="onCheckboxClick($event)"
       >
@@ -120,6 +144,7 @@ function onCheckboxClick(event: MouseEvent): void {
       <span class="track-row__title-text" :class="{ 'track-row__title-text--current': isCurrent }">
         {{ track.title }}
       </span>
+      <AudioQualityBadge v-if="quality" :level="quality" :title="qualityTitle" class="track-row__quality" />
       <span
         v-if="retryRecord"
         class="track-row__retry-badge"
@@ -143,7 +168,7 @@ function onCheckboxClick(event: MouseEvent): void {
       <button
         type="button"
         class="track-row__more"
-        aria-label="更多操作"
+        :aria-label="t('track.moreActions')"
         @click.stop="emit('context-menu', track, $event)"
       >
         <Icon name="more-horizontal" :size="16" />
@@ -316,8 +341,10 @@ function onCheckboxClick(event: MouseEvent): void {
 .track-row__title {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: var(--space-2);
   min-width: 0;
+  padding-right: var(--space-2);
 }
 
 .track-row__title-text,
@@ -330,11 +357,15 @@ function onCheckboxClick(event: MouseEvent): void {
 }
 
 .track-row__title-text {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
-  padding-right: var(--space-2);
   font-size: var(--font-size-sm);
   color: var(--color-text-primary);
+}
+
+/* 音质标识紧贴标题，随标题长短自适应，不再被拉伸到列右缘 */
+.track-row__quality {
+  align-self: center;
 }
 
 /* 单曲识别标记（悬停查看识别时间 / 状态 / 变更详情） */

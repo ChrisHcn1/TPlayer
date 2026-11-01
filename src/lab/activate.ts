@@ -7,22 +7,23 @@
  * 新增实验功能时，在此按 `lab.isEnabled('<id>')` 接入其激活逻辑（各功能本体在
  * `src/lab/features/<id>.ts` 中隔离实现）。
  */
-import { useLabStore } from '../stores/lab'
-import { useEqualizer } from './features/equalizer'
 import { useCustomWallpaper, useThemeColors } from './features/theme-colors'
+import { useFloatingLyrics } from './features/floating-lyrics'
 
 export function activateLabFeatures(): void {
-  const lab = useLabStore()
-
   // 皮肤配色（强调色 + 窗口底纹）：已实现，挂反应式（内部再按开关判断是否应用）
   useThemeColors()
 
   // 自定义壁纸（含每日 Bing）：独立实验室功能，按开关门控激活（开启即加载图片）
   useCustomWallpaper()
 
-  // 均衡器：已实现（10 段峰值滤波）。开启时读取一次后端已保存的曲线用于面板回显；
-  // 关闭时不加载，滑块状态也不再下发。
-  if (lab.isEnabled('equalizer')) useEqualizer()
+  // 音频可视化：纯 UI 驱动——画布组件（AudioVisualizer.vue）按 lab.isEnabled 挂载于
+  // 播放条，订阅后端 audio-analyser 事件渲染；后端分析器由 lab_set_feature 的原子开关
+  // 即时启停，无需在此挂载反应式钩子。
+
+  // 悬浮歌词：仅在功能开启时注册；自动弹窗由 App.vue 在数据/播放初始化完成后再触发
+  // （避免启动阶段与曲库/歌单/引擎初始化抢占，且窗口创建为异步命令，不阻塞主线程）。
+  useFloatingLyrics()
 
   // 元数据增强：后端扫描期原子开关，在 `lab_set_feature` 中实时同步 ENHANCED_METADATA，
   // 且切换时触发一次强制重扫，使已扫描曲目按新模式重新解析，无需前端钩子。

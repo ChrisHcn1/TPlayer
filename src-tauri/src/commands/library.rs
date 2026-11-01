@@ -783,16 +783,27 @@ fn emit_scan_stage(
 /// - Linux：`/mnt/`、`/run/media/` 等非常驻挂载前缀。
 #[allow(dead_code)]
 fn is_network_path(path: &str) -> bool {
+    // 各平台分支一律「显式 return」，避免多 cfg 块位于尾表达式位置时的类型歧义。
     #[cfg(target_os = "linux")]
     {
-        path.starts_with("//") || path.starts_with("/mnt/") || path.starts_with("/run/media/")
+        return path.starts_with("//") || path.starts_with("/mnt/") || path.starts_with("/run/media/");
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
         if path.starts_with("\\\\") || path.starts_with("//") {
             return true;
         }
-        is_windows_remote_drive(path)
+        return is_windows_remote_drive(path);
+    }
+    // macOS：仅 UNC / SMB 风格路径（`//host/share`）算网络路径；
+    // 不可调用仅 Windows 存在的 `is_windows_remote_drive`，否则 macOS 构建失败。
+    #[cfg(target_os = "macos")]
+    {
+        return path.starts_with("//");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        return path.starts_with("//");
     }
 }
 

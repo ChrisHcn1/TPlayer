@@ -7,6 +7,7 @@ import { readonly, ref } from 'vue'
 
 import { DEFAULT_THEME, THEME_STORAGE_KEY } from '../constants'
 import type { AppError } from '../types'
+import { t } from '../i18n'
 
 export type ThemeName = 'dark' | 'light'
 
@@ -54,7 +55,7 @@ export function useTheme() {
 export function toAppError(error: unknown): AppError {
   return {
     code: 'UNKNOWN',
-    message: '操作失败',
+    message: t('theme.opFailed'),
     detail: error instanceof Error ? error.message : String(error),
   }
 }

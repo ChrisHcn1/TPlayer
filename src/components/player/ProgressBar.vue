@@ -9,6 +9,7 @@
 import { computed, ref } from 'vue'
 
 import { formatMs, progressRatio } from '../../utils/format'
+import { t } from '../../i18n'
 
 interface Props {
   positionMs: number
@@ -113,11 +114,11 @@ function onKeydown(event: KeyboardEvent): void {
       ref="trackRef"
       class="progress__track"
       role="slider"
-      aria-label="播放进度"
+      :aria-label="t('player.progress')"
       :aria-valuemin="0"
       :aria-valuemax="Math.round(effectiveDuration / 1000)"
       :aria-valuenow="Math.round((ratio * effectiveDuration) / 1000)"
-      aria-valuetext="播放进度"
+      :aria-valuetext="t('player.progress')"
       :tabindex="disabled ? -1 : 0"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"

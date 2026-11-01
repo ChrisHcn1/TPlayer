@@ -1069,6 +1069,8 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         sample_rate: row
             .get::<_, Option<i64>>("sample_rate")?
             .map(|v| v as u32),
+        codec: row.get::<_, Option<String>>("codec")?,
+        codec_profile: row.get::<_, Option<String>>("codec_profile")?,
         has_cover: row.get::<_, i64>("has_cover")? != 0,
         replaygain_db: row
             .get::<_, Option<f64>>("replaygain_db")?
@@ -1109,11 +1111,11 @@ fn upsert_track(
         r#"
         INSERT INTO tracks(
             id, title, album, album_id, duration, track_number, year,
-            file_path, file_size, format, bitrate, sample_rate,
+            file_path, file_size, format, bitrate, sample_rate, codec, codec_profile,
             has_cover, replaygain_db, replaygain_peak, added_at, modified_at, artists_json,
             is_cue, cue_offset, is_sacd, sacd_track_index, sacd_area, sacd_dsd_rate,
             metadata_pending, iso_placeholder
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
         ON CONFLICT(id) DO UPDATE SET
             title       = excluded.title,
             album       = excluded.album,
@@ -1126,6 +1128,8 @@ fn upsert_track(
             format      = excluded.format,
             bitrate     = excluded.bitrate,
             sample_rate = excluded.sample_rate,
+            codec       = excluded.codec,
+            codec_profile = excluded.codec_profile,
             has_cover   = excluded.has_cover,
             replaygain_db   = excluded.replaygain_db,
             replaygain_peak = excluded.replaygain_peak,
@@ -1153,6 +1157,8 @@ fn upsert_track(
             track.format,
             track.bitrate.map(|v| v as i64),
             track.sample_rate.map(|v| v as i64),
+            track.codec.clone(),
+            track.codec_profile.clone(),
             track.has_cover as i64,
             track.replaygain_db.map(|v| v as f64),
             track.replaygain_peak.map(|v| v as f64),

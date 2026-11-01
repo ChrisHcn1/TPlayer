@@ -77,6 +77,8 @@ export const ICONS: Record<string, string> = {
     '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M7 12h3M14 12h3M7 15.5h3M14 15.5h3"/>',
   ),
   queue: g('<path d="M4 6h16M4 12h16M4 18h10"/>'),
+  // 均衡器：三枚不同高度的竖向均衡条（音效调节），与「喇叭+声波」的音量图标明确区分
+  equalizer: g('<path d="M6 20v-9"/><path d="M12 20V5"/><path d="M18 20v-6"/>'),
 
   /* ---- 列表 / 工具条 ---- */
   'more-vertical':

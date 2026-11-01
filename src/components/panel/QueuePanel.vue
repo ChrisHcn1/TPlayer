@@ -11,6 +11,7 @@ import { storeToRefs } from 'pinia'
 
 import { usePlayerStore } from '../../stores/player'
 import { useLibraryStore } from '../../stores/library'
+import { t } from '../../i18n'
 import Icon from '../common/Icon.vue'
 
 const playerStore = usePlayerStore()
@@ -29,8 +30,8 @@ const rows = computed<QueueRow[]>(() =>
     const track = libraryStore.getTrack(id)
     return {
       id,
-      title: track?.title ?? '未知曲目',
-      artist: track ? track.artists.join(' / ') : '曲目缺失',
+      title: track?.title ?? t('queue.unknownTrack'),
+      artist: track ? track.artists.join(' / ') : t('queue.missingTrack'),
       missing: !track,
     }
   }),
@@ -39,15 +40,15 @@ const rows = computed<QueueRow[]>(() =>
 const contextName = computed(() => {
   switch (currentContext.value?.source) {
     case 'album':
-      return '专辑'
+      return t('queue.contextAlbum')
     case 'artist':
-      return '艺术家'
+      return t('queue.contextArtist')
     case 'playlist':
-      return '歌单'
+      return t('queue.contextPlaylist')
     case 'search':
-      return '搜索结果'
+      return t('queue.contextSearch')
     default:
-      return '曲库'
+      return t('queue.contextLibrary')
   }
 })
 
@@ -65,14 +66,14 @@ function removeFromQueue(index: number): void {
 <template>
   <div class="queue-panel">
     <div class="queue-panel__head">
-      <span class="queue-panel__name">{{ contextName }}队列</span>
-      <span class="queue-panel__count">{{ rows.length }} 首</span>
+      <span class="queue-panel__name">{{ t('queue.title', { context: contextName }) }}</span>
+      <span class="queue-panel__count">{{ t('queue.trackCount', { count: rows.length }) }}</span>
     </div>
 
     <div v-if="rows.length === 0" class="queue-panel__empty">
       <Icon name="queue" :size="26" />
-      <p>队列为空</p>
-      <p class="queue-panel__empty-hint">从曲库中播放曲目以建立队列</p>
+      <p>{{ t('queue.empty') }}</p>
+      <p class="queue-panel__empty-hint">{{ t('queue.emptyHint') }}</p>
     </div>
 
     <ul v-else class="queue-panel__list">
@@ -81,7 +82,7 @@ function removeFromQueue(index: number): void {
           type="button"
           class="queue-row"
           :class="{ 'queue-row--current': row.id === snapshot.trackId, 'queue-row--missing': row.missing }"
-          :title="`播放：${row.title}`"
+          :title="t('queue.playTitle', { title: row.title })"
           @dblclick="playAt(row.id)"
         >
           <span class="queue-row__index">
@@ -95,14 +96,14 @@ function removeFromQueue(index: number): void {
           <span
             v-if="index === currentIndex"
             class="queue-row__badge"
-            aria-label="当前播放"
+            :aria-label="t('queue.nowPlaying')"
           ></span>
         </button>
         <button
           type="button"
           class="queue-row__remove"
-          aria-label="从队列移除"
-          :title="`从队列移除：${row.title}`"
+          :aria-label="t('queue.remove')"
+          :title="t('queue.removeTitle', { title: row.title })"
           @click.stop="removeFromQueue(index)"
         >
           <Icon name="x" :size="12" />

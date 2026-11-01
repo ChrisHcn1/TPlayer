@@ -6,6 +6,7 @@
 import { storeToRefs } from 'pinia'
 
 import { useDialogStore } from '../../stores/dialog'
+import { t } from '../../i18n'
 import Modal from './Modal.vue'
 import BaseButton from './BaseButton.vue'
 
@@ -45,7 +46,7 @@ const { state, error } = storeToRefs(dialogStore)
         :data-autofocus="state?.danger ? '' : undefined"
         @click="dialogStore.cancel()"
       >
-        {{ state?.cancelText ?? '取消' }}
+        {{ state?.cancelText ?? t('common.cancel') }}
       </BaseButton>
       <BaseButton
         size="sm"
@@ -53,7 +54,7 @@ const { state, error } = storeToRefs(dialogStore)
         :data-autofocus="state && !state.danger && state.kind === 'confirm' ? '' : undefined"
         @click="dialogStore.accept()"
       >
-        {{ state?.confirmText ?? '确定' }}
+        {{ state?.confirmText ?? t('common.confirm') }}
       </BaseButton>
     </template>
   </Modal>

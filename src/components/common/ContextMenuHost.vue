@@ -10,6 +10,7 @@ import {
   useContextMenu,
   type MenuItem,
 } from '../../composables/useContextMenu'
+import { t } from '../../i18n'
 import Icon from './Icon.vue'
 import TrackMenuInfo from './TrackMenuInfo.vue'
 
@@ -190,7 +191,7 @@ function runChild(child: MenuItem): void {
         @contextmenu.prevent.stop
         @mouseleave="submenuParent = null"
       >
-        <li v-if="submenuParent.children.length === 0" class="context-menu__empty">（暂无歌单）</li>
+        <li v-if="submenuParent.children.length === 0" class="context-menu__empty">{{ t('menu.noPlaylists') }}</li>
         <template v-for="(child, childIndex) in submenuParent.children" :key="child.key ?? `c-${childIndex}`">
           <li v-if="child.divider" class="context-menu__divider" role="separator"></li>
           <li v-else>

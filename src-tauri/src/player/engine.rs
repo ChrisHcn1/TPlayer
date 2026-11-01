@@ -7,14 +7,18 @@ use std::f64::consts::PI;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 
 use crate::error::{AppError, AppResult};
 use crate::library::sacd::{cached_dsf_path, ensure_sacd_cache_fresh, SacdDisc};
+use crate::player::analyser::{AnalyserProcessor, AnalyserSource};
 
 /// symphonia 原生可解码的扩展名；其余格式走 ffmpeg 子进程解码为 PCM。
 ///
@@ -37,6 +41,16 @@ const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga"];
 
 #[cfg(not(target_os = "linux"))]
 const NATIVE_EXT: &[&str] = &["mp3", "flac", "wav", "ogg", "oga", "opus", "aac", "m4a"];
+
+/// 实验室·音频可视化开关（与主程序完全隔离的原子标志）。
+///
+/// 关闭时播放链中 `AnalyserSource` 仅做直通（一次原子读），零成本；开启时由
+/// `lab_set_feature` 原子翻转，即时生效，无需重建播放链、无爆音。
+pub static AUDIO_VISUALIZER: AtomicBool = AtomicBool::new(false);
+
+/// 启动期由 `run` 注入的全局 `AppHandle`，供播放链各 Source 发射实验室事件
+/// （如 `audio-analyser`）。以 `OnceLock` 持有，避免改动 `spawn_engine` 签名。
+pub static ENGINE_APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// ffmpeg 可解码的补充格式（ape/dsd/dts/wma/wv/tta/tak/aiff 等）。
 /// Linux 追加 aac/m4a/opus：rodio 无对应原生解码器，改由 ffmpeg 管道解码
@@ -215,139 +229,18 @@ fn is_native_format(path: &Path) -> bool {
     true
 }
 
-/// 外部工具的可执行文件名候选：Windows 带 `.exe`，Linux/macOS 不带。
-/// 两个候选都保留，便于同一 `bin/` 目录跨平台复用。
-fn tool_names(base: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![format!("{base}.exe"), base.to_string()]
-    } else {
-        vec![base.to_string(), format!("{base}.exe")]
-    }
-}
+/// 外部工具定位统一委托给 `crate::tools`（查找顺序：公共依赖目录 → 安装目录 →
+/// 系统固定路径 → PATH）。此处保留薄封装，避免改动全部调用点。
+pub(crate) use crate::tools::resolve_bin_tool;
 
-/// 候选外部工具是否可在本平台执行（平台隔离）。
-///
-/// Linux：必须是 ELF 可执行文件。仓库 `bin/ffmpeg.exe` / `bin/ffprobe.exe` 是
-///   Windows 程序（随 Windows 安装包分发），而 `resolve_bin_tool` 会沿可执行
-///   文件祖先目录查找 `bin/`——开发期（源码树内运行）与任何把 Windows 版
-///   工具放在查找路径内的布局都会命中它。直接 spawn 一个 PE 文件会得到
-///   `ExecFormatError`（表现为"无法启动 ffmpeg"而非"未找到 ffmpeg"），
-///   且 `ffmpeg_available()` 误报 true，把 ape/dsf/wv/tta/tak/dts/aiff/alac
-///   等格式的路由引向死路。读取文件头魔数 `\x7fELF` 甄别（不依赖 file 命令）。
-/// Windows：保持原语义（候选存在即可，`.exe` 由 tool_names 优先给出）。
-#[cfg(target_os = "linux")]
-fn tool_runnable(path: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    magic == *b"\x7fELF"
-}
-
-#[cfg(not(target_os = "linux"))]
-fn tool_runnable(_path: &Path) -> bool {
-    true
-}
-
-/// Linux 追加的随仓库/发行版分发布局：`bin/linux`（Linux 版 ffmpeg/ffprobe 的
-/// 存放位；Windows 侧不识别该子目录，`EXTRA_TOOL_SUBDIRS` 为空、行为不变）。
-///
-/// 背景：仓库 `bin/` 下只有 Windows 版 `ffmpeg.exe`/`ffprobe.exe`（随 NSIS
-/// 安装包分发），Linux 版 ELF 二进制放在 `bin/linux/`——开发期从源码树运行时
-/// 沿可执行文件祖先目录即可命中；DEB 打包脚本也会把该目录整体装进
-/// `/usr/lib/tplayer/bin`（固定安装路径，见下方第 3 类查找）。
-#[cfg(target_os = "linux")]
-const EXTRA_TOOL_SUBDIRS: &[&str] = &["bin/linux"];
-
-#[cfg(not(target_os = "linux"))]
-const EXTRA_TOOL_SUBDIRS: &[&str] = &[];
-
-/// 定位外部工具（ffmpeg/ffprobe），覆盖开发期、Tauri 打包与系统安装三种布局：
-///  1. 沿可执行文件祖先目录查 `<ancestor>/{bin,bin/linux,lib/tplayer/bin,libexec/tplayer}/<name>`
-///     （开发期 `src-tauri/bin`、`bin/linux`、构建产物 `bin/`、DEB 的 `/usr/lib/tplayer/bin`）；
-///  2. exe 同级、`bin/`、`bin/linux`、`resources/bin/`（Tauri bundle 布局）；
-///  3. 安装包固定位置 `/usr/lib/tplayer/bin`、`/usr/local/lib/tplayer/bin`、`/usr/libexec/tplayer`；
-///  4. 系统 PATH（Debian/Ubuntu 的 `ffmpeg` 包）。
-/// Linux 侧所有候选都经 ELF 魔数校验（见 tool_runnable），Windows 版 .exe 不会被误用。
-pub(crate) fn resolve_bin_tool(base: &str) -> Option<PathBuf> {
-    let names = tool_names(base);
-    // Linux 追加 ELF 魔数校验：避免把 Windows 版 ffmpeg.exe 当成本机可用工具
-    let found = |cand: &Path| (cand.is_file() && tool_runnable(cand)).then(|| cand.to_path_buf());
-
-    if let Ok(exe) = std::env::current_exe() {
-        // 1) 祖先目录
-        for ancestor in exe.ancestors().skip(1) {
-            for sub in ["bin", "lib/tplayer/bin", "libexec/tplayer"]
-                .iter()
-                .chain(EXTRA_TOOL_SUBDIRS)
-            {
-                for name in &names {
-                    if let Some(hit) = found(&ancestor.join(sub).join(name)) {
-                        return Some(hit);
-                    }
-                }
-            }
-        }
-        // 2) exe 同级 / Tauri 资源目录
-        if let Some(parent) = exe.parent() {
-            for rel in ["", "bin", "resources/bin", "../lib/tplayer/bin", "../libexec/tplayer"]
-                .iter()
-                .chain(EXTRA_TOOL_SUBDIRS)
-            {
-                for name in &names {
-                    if let Some(hit) = found(&parent.join(rel).join(name)) {
-                        return Some(hit);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3) 安装包固定位置
-    for root in [
-        "/usr/lib/tplayer/bin",
-        "/usr/local/lib/tplayer/bin",
-        "/usr/libexec/tplayer",
-    ] {
-        for name in &names {
-            if let Some(hit) = found(Path::new(root).join(name).as_path()) {
-                return Some(hit);
-            }
-        }
-    }
-
-    // 4) 系统 PATH
-    resolve_on_path(&names)
-}
-
-/// 在 PATH 中按候选顺序查找可执行文件（跳过空目录项）
-fn resolve_on_path(names: &[String]) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        for name in names {
-            let cand = dir.join(name);
-            // 与 resolve_bin_tool 同一判定：Linux 校验 ELF 魔数
-            if cand.is_file() && tool_runnable(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    None
-}
-
+/// 定位 FFmpeg
 pub fn resolve_ffmpeg() -> Option<PathBuf> {
-    resolve_bin_tool("ffmpeg")
+    crate::tools::resolve_ffmpeg()
 }
 
+/// 定位 FFprobe
 pub fn resolve_ffprobe() -> Option<PathBuf> {
-    resolve_bin_tool("ffprobe")
+    crate::tools::resolve_ffprobe()
 }
 
 /// 探测音频流参数（是否 DSD、采样率、声道数），用于动态构建 ffmpeg 解码命令，
@@ -423,6 +316,67 @@ fn probe_cache(
         std::sync::Mutex<std::collections::HashMap<(std::path::PathBuf, u64, u64), (bool, u32, u16)>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// ffprobe 取到的音频流编码信息（用于 DTS 子类型识别与 lofty 未解析格式的补充）。
+#[derive(Debug, Clone)]
+pub struct AudioCodecInfo {
+    pub codec_name: String,
+    pub profile: Option<String>,
+    pub bitrate: Option<u32>,
+    pub sample_rate: Option<u32>,
+}
+
+/// 用 ffprobe 取音频流的 `codec_name` / `profile` / `bit_rate` / `sample_rate`。
+///
+/// 用于：
+///  - DTS 子类型识别（Core / HD HRA / HD MA）——lofty 无法解析 DTS 属性，必须靠 ffprobe；
+///  - lofty 未给出码率 / 采样率的格式（dts/tta/tak 等）补充这些字段，使前端能正确分级。
+///
+/// 输出顺序与 `-show_entries` 字段顺序一致：`codec_name,profile,bit_rate,sample_rate`
+/// （profile 缺失时为空串，按空处理）。工具缺失 / 解析失败返回 None。
+///
+/// 注：扫描阶段调用，非播放引擎热路径，不做缓存（DTS 等稀有格式占比极低）。
+pub fn probe_audio_codec(path: &Path) -> Option<AudioCodecInfo> {
+    let ffprobe = resolve_ffprobe()?;
+    let out = crate::util::hidden_command(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,profile,bit_rate,sample_rate",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let first = s.lines().next().unwrap_or("").trim();
+    // 字段顺序：codec_name, profile, bit_rate, sample_rate（profile 可能为空串）
+    let f: Vec<&str> = first.split(',').map(|x| x.trim()).collect();
+    if f.is_empty() || f[0].is_empty() {
+        return None;
+    }
+    let codec_name = f[0].to_string();
+    let profile = f.get(1).and_then(|p| {
+        let p = p.to_string();
+        if p.is_empty() {
+            None
+        } else {
+            Some(p)
+        }
+    });
+    let bitrate = f.get(2).and_then(|b| b.parse::<u32>().ok());
+    let sample_rate = f.get(3).and_then(|r| r.parse::<u32>().ok());
+    Some(AudioCodecInfo {
+        codec_name,
+        profile,
+        bitrate,
+        sample_rate,
+    })
 }
 
 pub fn ffmpeg_available() -> bool {
@@ -875,6 +829,9 @@ struct RodioEngine {
     /// 让**正在播放**的曲目立即生效；滤波器状态不重置、系数走插值，不会爆音。
     /// 旧实现是每轨独占一份 `EqProcessor`，改动只能等下一首装载时生效。
     eq: Arc<Mutex<EqProcessor>>,
+    /// 实验室·音频可视化处理器（与所有音源共享，按帧算频谱）。仅在可视化开启时
+    /// 由 `AnalyserSource` 喂样，关闭时为空转 pass-through，对输出零影响。
+    viz_proc: Arc<Mutex<AnalyserProcessor>>,
 }
 
 impl RodioEngine {
@@ -906,6 +863,8 @@ impl RodioEngine {
                 2,
                 &EqConfig::default(),
             ))),
+            // 可视化处理器：关闭时不被喂样，为空转 pass-through
+            viz_proc: Arc::new(Mutex::new(AnalyserProcessor::new())),
         }
     }
 
@@ -1089,12 +1048,12 @@ impl RodioEngine {
         let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
             if let Some(idx) = sacd_track_index {
                 let (child, source, temp) = spawn_sacd_decoder(path, idx, &self.eq)?;
-                sink.append(source);
+                sink.append(AnalyserSource::new(source, &self.viz_proc));
                 (Some(child), Some(temp))
             } else if !is_native_format(path) || range.is_some() {
                 let (child, source) =
                     spawn_ffmpeg_decoder(path, start_ms, duration_ms, &self.eq)?;
-                sink.append(source);
+                sink.append(AnalyserSource::new(source, &self.viz_proc));
                 (Some(child), None)
             } else {
                 let file = std::fs::File::open(path).map_err(|e| {
@@ -1104,7 +1063,7 @@ impl RodioEngine {
                     .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
                 // 原生解码此前直接进 sink，**完全绕过 EQ**（同一份设置对 DSF 生效、
                 // 对 flac 无效）。包一层 EqSource，两条链路共用同一个 EqProcessor。
-                sink.append(EqSource::new(decoder, &self.eq));
+                sink.append(AnalyserSource::new(EqSource::new(decoder, &self.eq), &self.viz_proc));
                 (None, None)
             };
 
@@ -1162,12 +1121,12 @@ impl RodioEngine {
         let (ffmpeg_child, temp_file): (Option<Child>, Option<PathBuf>) =
             if let Some(idx) = sacd_track_index {
                 let (child, source, temp) = spawn_sacd_decoder(path, idx, &self.eq)?;
-                sink.append(source);
+                sink.append(AnalyserSource::new(source, &self.viz_proc));
                 (Some(child), Some(temp))
             } else if !is_native_format(path) || range.is_some() {
                 let (child, source) =
                     spawn_ffmpeg_decoder(path, start_ms, duration_ms, &self.eq)?;
-                sink.append(source);
+                sink.append(AnalyserSource::new(source, &self.viz_proc));
                 (Some(child), None)
             } else {
                 let file = std::fs::File::open(path).map_err(|e| {
@@ -1177,7 +1136,7 @@ impl RodioEngine {
                     .map_err(|e| AppError::Player(format!("不支持的音频格式或文件损坏: {}", e)))?;
                 // 原生解码此前直接进 sink，**完全绕过 EQ**（同一份设置对 DSF 生效、
                 // 对 flac 无效）。包一层 EqSource，两条链路共用同一个 EqProcessor。
-                sink.append(EqSource::new(decoder, &self.eq));
+                sink.append(AnalyserSource::new(EqSource::new(decoder, &self.eq), &self.viz_proc));
                 (None, None)
             };
 
@@ -1312,7 +1271,7 @@ impl RodioEngine {
             }
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
-            playback.sink.append(source);
+            playback.sink.append(AnalyserSource::new(source, &self.viz_proc));
             // 暂停态 seek 只重定位不出声（恢复播放由 resume 负责）
             if !self.paused {
                 playback.sink.play();
@@ -1349,7 +1308,7 @@ impl RodioEngine {
             }
             playback.ffmpeg_child = Some(child);
             playback.sink.clear();
-            playback.sink.append(source);
+            playback.sink.append(AnalyserSource::new(source, &self.viz_proc));
             // 暂停态 seek 只重定位不出声（恢复播放由 resume 负责）
             if !self.paused {
                 playback.sink.play();
@@ -1445,7 +1404,9 @@ impl Drop for RodioEngine {
 /// - 配合 `rms > 0.2` 过滤静音前导，避免误伤；两者同时成立才判定为异常音频。
 fn guard_sacd_dsf(dsf_path: &Path) -> AppResult<()> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
-        AppError::Player("SACD 解码校验需要 FFmpeg：未找到 ffmpeg".into())
+        AppError::DependencyMissing(
+            "SACD 解码校验需要 FFmpeg。请在「设置 → 解码组件」中安装 FFmpeg 后重试".into(),
+        )
     })?;
     let out = crate::util::hidden_command(&ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-i"])
@@ -1604,8 +1565,8 @@ fn spawn_ffmpeg_decoder(
     eq: &Arc<Mutex<EqProcessor>>,
 ) -> AppResult<(Child, PcmStreamSource)> {
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
-        AppError::Player(
-            "该格式需要 FFmpeg 解码：未找到 ffmpeg（请随包分发 ffmpeg 或安装系统 ffmpeg）".into(),
+        AppError::DependencyMissing(
+            "该格式需要 FFmpeg 解码。请在「设置 → 解码组件」中安装 FFmpeg 后重试".into(),
         )
     })?;
 
@@ -1750,18 +1711,22 @@ pub struct EqBand {
     pub q: f32,
 }
 
-/// 均衡器配置：频段列表 + 总开关
+/// 均衡器配置：频段列表 + 总开关 + 输出增益（make-up gain）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EqConfig {
     pub enabled: bool,
     pub bands: Vec<EqBand>,
+    /// 输出增益（dB，-12 ~ +12）：提升多段时为防削波可由用户压低，默认 0 保持现状
+    #[serde(default, alias = "output_gain")]
+    pub output_gain_db: f32,
 }
 
 impl Default for EqConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            output_gain_db: 0.0,
             bands: vec![
                 EqBand { freq: 60.0, gain_db: 0.0, q: 1.0 },
                 EqBand { freq: 170.0, gain_db: 0.0, q: 1.0 },
@@ -1881,7 +1846,34 @@ fn peaking_coeffs(sample_rate: u32, band: &EqBand) -> (f32, f32, f32, f32, f32) 
     )
 }
 
+/// 干/湿混合斜坡长度（样本数）：~11ms@44.1k，开关 EQ 时交叉淡化无爆音。
+const EQ_MIX_RAMP_SAMPLES: u32 = 512;
+
+/// 温和软限幅：|x|≤1 近似线性；|x|>1 做饱和压缩（渐近线 2.0），取代原先的硬 `clamp`，
+/// 消除多段提升时临界削波的方波感——这是「稳定完整」的关键音质兜底。
+#[inline]
+fn soft_clip(x: f32) -> f32 {
+    let a = x.abs();
+    let v = if a <= 1.0 {
+        a
+    } else {
+        1.0 + (a - 1.0) * 2.0 / (1.0 + 2.0 * (a - 1.0))
+    };
+    x.signum() * v
+}
+
+/// dB → 线性增益（0dB = 1.0），区间夹紧避免极端值。
+#[inline]
+fn db_to_linear(db: f32) -> f32 {
+    10.0f32.powf(db.clamp(-24.0, 24.0) / 20.0)
+}
+
 /// 均衡器处理器：对交错 i16 样本帧逐声道应用 biquad EQ。
+///
+/// 三重稳定性设计：
+///  1. **干/湿交叉淡化**：`mix` 随 `config.enabled` 斜坡（开关无爆音）；
+///  2. **输出增益（用户可调 make-up gain）**：提升多段时为防削波可由用户压低，默认 0dB 保持现状；
+///  3. **软限幅兜底**：任何残余溢出走 `soft_clip` 而非硬削波，避免方波失真。
 #[derive(Debug, Clone)]
 pub struct EqProcessor {
     config: EqConfig,
@@ -1889,6 +1881,12 @@ pub struct EqProcessor {
     channels: u16,
     /// 每声道每频段一组 biquad 状态
     filters: Vec<Vec<Biquad>>,
+    /// 输出增益（线性，由 config.output_gain_db 换算），默认 1.0
+    output_gain: f32,
+    /// 干/湿混合系数（0=直通，1=完全 EQ）；开关时斜坡过渡
+    mix: f32,
+    /// 混合目标（随 config.enabled 变化）
+    mix_target: f32,
 }
 
 impl EqProcessor {
@@ -1898,6 +1896,9 @@ impl EqProcessor {
             sample_rate,
             channels,
             filters: Vec::new(),
+            output_gain: db_to_linear(config.output_gain_db),
+            mix: if config.enabled { 1.0 } else { 0.0 },
+            mix_target: if config.enabled { 1.0 } else { 0.0 },
         };
         // 新建即立即生效（无前值可插值）
         p.rebuild_filters(false);
@@ -1938,9 +1939,11 @@ impl EqProcessor {
         }
     }
 
-    /// 更新配置（频段参数变化时调用）。走系数插值，**正在播放的曲目立即生效**。
+    /// 更新配置（频段参数 / 总开关 / 输出增益变化时调用）。走系数插值，正在播放立即生效。
     pub fn set_config(&mut self, config: &EqConfig) {
         self.config = config.clone();
+        self.output_gain = db_to_linear(config.output_gain_db);
+        self.mix_target = if config.enabled { 1.0 } else { 0.0 };
         self.rebuild_filters(true);
     }
 
@@ -1952,7 +1955,45 @@ impl EqProcessor {
         self.sample_rate = sample_rate;
         self.channels = channels;
         self.config = config.clone();
+        self.output_gain = db_to_linear(config.output_gain_db);
+        self.mix_target = if config.enabled { 1.0 } else { 0.0 };
         self.rebuild_filters(false);
+    }
+
+    /// 干/湿混合系数每样本逼近目标，开关 EQ 时平滑无爆音。
+    #[inline]
+    fn step_mix(&mut self) {
+        let diff = self.mix_target - self.mix;
+        if diff.abs() < f32::EPSILON {
+            self.mix = self.mix_target;
+            return;
+        }
+        let step = 1.0 / EQ_MIX_RAMP_SAMPLES as f32;
+        self.mix += diff.signum() * step;
+        if (self.mix_target - self.mix).abs() < step {
+            self.mix = self.mix_target;
+        }
+    }
+
+    /// 处理单个样本：滤波 → 输出增益 → 干/湿交叉淡化 → 软限幅 → i16。
+    #[inline]
+    fn process_one(&mut self, ch: usize, sample: i16) -> i16 {
+        let x = sample as f32 / 32768.0;
+        self.step_mix();
+        if self.mix <= 0.0 {
+            // 完全直通：零滤波开销（关闭 EQ 或已淡出时）
+            return (x * 32768.0).clamp(-32768.0, 32767.0) as i16;
+        }
+        let mut y = x;
+        if ch < self.filters.len() {
+            for f in self.filters[ch].iter_mut() {
+                y = f.process(y);
+            }
+            y *= self.output_gain;
+        }
+        let out = x * (1.0 - self.mix) + y * self.mix;
+        let out = soft_clip(out);
+        (out * 32768.0).clamp(-32768.0, 32767.0) as i16
     }
 
     /// 处理**单个**交错样本（供 `EqSource` 逐样本调用）；`ch` 为声道索引。
@@ -1962,30 +2003,26 @@ impl EqProcessor {
     /// 滤波器状态与系数。
     #[inline]
     pub fn process_sample(&mut self, ch: usize, sample: i16) -> i16 {
-        if !self.config.enabled || ch >= self.filters.len() {
+        if self.channels == 0 || ch >= self.filters.len() {
             return sample;
         }
-        let mut x = sample as f32 / 32768.0;
-        for f in self.filters[ch].iter_mut() {
-            x = f.process(x);
-        }
-        (x * 32768.0).clamp(-32768.0, 32767.0) as i16
+        self.process_one(ch, sample)
     }
 
     /// 对交错 i16 样本切片（长度 = channels * n_frames）就地应用 EQ。
     /// 返回处理后的样本数（与输入相同）。
     pub fn process_interleaved(&mut self, samples: &mut [i16]) {
-        if !self.config.enabled {
+        if self.channels == 0 {
+            return;
+        }
+        // 完全直通（EQ 关闭且已淡出）：原样透传，零开销
+        if self.mix <= 0.0 && self.mix_target <= 0.0 {
             return;
         }
         let ch = self.channels as usize;
         for frame in samples.chunks_mut(ch) {
             for (c, sample) in frame.iter_mut().enumerate() {
-                let mut x = *sample as f32 / 32768.0;
-                for band_idx in 0..self.config.bands.len() {
-                    x = self.filters[c][band_idx].process(x);
-                }
-                *sample = (x * 32768.0).clamp(-32768.0, 32767.0) as i16;
+                *sample = self.process_one(c, *sample);
             }
         }
     }
